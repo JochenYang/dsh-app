@@ -14,7 +14,7 @@
 // drives the ALREADY RUNNING dev window over CDP:
 //
 //   DSH_APP_DEV=1 npm start -- --remote-debugging-port=9222   (or npm run dev)
-//   node scripts/probe-whale.cjs [--cdp http://127.0.0.1:9222]
+//   node scripts/probe-whale.mjs [--cdp http://127.0.0.1:9222]
 //
 // Assertions (each one is a fact the decision in
 // docs/plans/kernel-0.2.2-rc.2-upgrade.md rests on):

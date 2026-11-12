@@ -1,6 +1,6 @@
 # 内核线 0.2.2-rc.1 → 0.2.2-rc.2：换线适配
 
-- Status: active
+- Status: done
 - Plan date: 2026-11-12
 - Risk: high
 
@@ -79,22 +79,22 @@ rc.2 只有 git tag（`dsh-v0.2.2-rc.2`，release 提交 `91319233e1`）与 GitH
 
 | # | 类目 | 内容 | 状态 |
 |---|------|------|------|
-| W1 | P0 | 换线：20 个 manifest、418 处 `^0.2.2-rc.1` → `^0.2.2-rc.2`（根 `package.json` + 19 个插件，peer 与 dev 同改）；清根与全部插件的 `node_modules` 与 lockfile；按根 → 插件（`--legacy-peer-deps` 只在插件目录）顺序重装；确认两处解析都落到新线（`node_modules/@deepseek-ai/dsh-*` 与 `plugins/plugin-archives/node_modules/@deepseek-ai/dsh-client-connection`） | [~] |
-| W2 | P0 | `plugin-pdf` 办公服务改名（**必须先于 W1 的插件安装**，`dsh-office-to-pdf` 在 rc.2 没有版本）：`package.json:63,80` 的 `@deepseek-ai/dsh-office-to-pdf` → `@deepseek-ai/dsh-office-kit`；`src/index.ts:49` 的模块增强 import 与注释；`src/index.ts:414` 的 `ctx.get('officeToPdf')` → `'officeKit'`；`tests/e2e.test.ts:58,84` 的 fixture 键名；`src/pdf-paths.ts:21` 注释里的类型来源名；版本 0.2.7 → 0.3.0（破坏性改名） | [~] |
-| W3 | P0 | 办公技能名单 7 → 4：删掉 `office-render` / `office-recalculate` / `office-export-pdf` 三处，改动 `scripts/build-runtime.mjs:645`（构建期）与 `src/main/desktop-host.ts:682`（启动期）两份副本，并把两处 JSDoc 里的「七个」表述改掉。rc.2 的 `skill-office` `SKILL_NAMES` 只剩 `office` / `office-docx` / `office-pptx` / `office-xlsx`（`packages/skill/skill-office/src/index.ts:11`） | [~] |
-| W4 | P2 | 启动路径不再把 office-skills 当硬前提（**降级：不是缺陷**）：技能在 rc.2 由内核包自带 `assets/`，`<dataDir>/dsh-app-office/office-skills` 已无消费者，但 `prepareOfficePayload`（`src/main/desktop-host.ts:800`）仍会复制它——而运行树自 W3 起仍产出 4 个真实目录，所以启动不会失败，这是一块死复制加一条多余硬前提。保留 leaf 与 `linkPrimaryRuntime`（rc.2 的 `apps/desktop-host/src/index.ts:25` 把 argv[4] 写进 `DSH_PRIMARY_RUNTIME`）；是否连 `stageOfficeSkills` 与 `host-arg-shape` 夹具里的“子进程读 skills”一起拆掉，单独一轮做（夹具模拟的是 rc.1 的宿主约定） | [ ] |
-| W5 | P0 | 办公引擎版本、payload 身份与加载期 shim：`scripts/kernel-line.mjs:101` 的 `DESKTOP_OFFICE_KIT_VERSION` 0.1.2 → 0.2.3（rc.2 的 provider 声明 `@deepseek-ai/libreoffice-kit: 0.2.3`，原生引擎包同名同版；rc.1 是 `^0.1.5`）；`scripts/build-runtime.mjs` 的 `DESKTOP_OFFICE_PROVIDER_PACKAGE` 由 `@deepseek-ai/dsh-office-to-pdf` 改为 `@deepseek-ai/dsh-office-kit`（不改的话 shim 不会打，已实测：构建日志报 `no @deepseek-ai/dsh-office-to-pdf in the tree; no kit shim needed`，结果 `import.meta.resolve('@deepseek-ai/libreoffice-kit')` 必然抛，办公转换只能报 unavailable）。按 kernel-line 的两步顺序：先构并发布带新 `payloadVersion` 的 runtime，再让要求它的 runtime 可装；重跑 `npm run primary-runtime:build` | [~] |
-| W6 | P0 | 新内核 peer：`@deepseek-ai/dsh-error` 进 5 个插件的 `devDependencies` —— `plugin-client-ui`、`plugin-hooks`、`plugin-memory`、`plugin-rewind`、`plugin-swarm`（`dsh-llm` 与 `dsh-attachment` 在 rc.2 把它声明成 peer，`--legacy-peer-deps` 不装 peer） | [~] |
-| W7 | P0 | 类型门禁：19 个插件各跑 `node scripts/plugin-gates.mjs plugins/<dir>`（esbuild 不做类型检查，rc.1 的 `ProjectionHandle` 只有它抓到）+ 根 `npm run typecheck`；报告任何新出现的错误并修到 0。**本轮它抓到两处真断裂**：① `plugin-swarm` 的 `startActivation` 去掉了 `request` 包装（rc.2 的 `SubagentActivationSpec` 直接继承 `SubagentStartRequest`），两处调用点要摊平；② `plugin-rewind` 的 `zod` 钉在 4.4.3，而 `dsh-session-projection` 现在依赖 4.6.6，投影声明的 `ZodType` 缺 `validate`/`validateAsync`，要升到 4.6.6 | [~] |
-| W8 | P1 | hero 层：rc.2 的 `ui-brand-official` 无条件把 `PixelWhale` 注册进新座位 `conversation.hero.frame`（`packages/client/ui-brand-official/src/client/index.ts:17`）。**实测订正**：它的 canvas 在首页空闲时是**透明的**（alpha>8 的像素 0 个），只有点击空白处才播一段自结束的动画（点击后 4570 → 76180 → 衰减回 2）；我们那层空闲即有 7529 个像素。所以静止状态下并不存在两只鲸鱼，结论改为**不否决上游**：`ui-brand-official` 保持默认开启，若日后觉得点击动画与我们的层冲突，overlay 一行即可关掉。真相靠 `scratch/whale-click-probe.mjs` 的像素计数取得，早先"两层同时可见"的说法按元素存在推断，已作废 | [~] |
-| W9 | P2 | 清理判定（**已有实测结论**）：rc.2 的 `office-kit` 用 `import type` + `import.meta.resolve` + 动态 `import()`（`packages/document/office-kit/src/index.ts:347,351`），所以 kit 缺席不再是加载期失败，而是运行时 unavailable。但另一面：我们靠 shim 把 kit 指到 payload，**shim 仍需保留并改指新包名**（见 W5）；`lib/cli.js` 的启动期要求来自已删除的 `desktop-office`，可删 | [ ] |
-| W10 | P2 | 我们注册的 web provider 补 `title` / `description`（`WebSearchProvider` / `WebFetchProvider` 在 rc.2 新增这两个可选字段，否则内核的 Web search 页面只显示 id） | [~] |
-| W11 | P2 | 文档与注释一致：`plugins/dsh-app.patch.yml` 里 `dsh-deepseek-account-platform`、`dsh-experimental-agent-team-profile`、七技能的说法；`docs/agents/kernel-line-regression.md` §4 的办公载荷判据；`docs/agents/runtime-shape.md` 若提到 office payload 的形状 | [~] |
+| W1 | P0 | 换线：20 个 manifest、418 处 `^0.2.2-rc.1` → `^0.2.2-rc.2`（根 `package.json` + 19 个插件，peer 与 dev 同改）；清根与全部插件的 `node_modules` 与 lockfile；按根 → 插件（`--legacy-peer-deps` 只在插件目录）顺序重装；确认两处解析都落到新线（`node_modules/@deepseek-ai/dsh-*` 与 `plugins/plugin-archives/node_modules/@deepseek-ai/dsh-client-connection`） | [x] |
+| W2 | P0 | `plugin-pdf` 办公服务改名（**必须先于 W1 的插件安装**，`dsh-office-to-pdf` 在 rc.2 没有版本）：`package.json:63,80` 的 `@deepseek-ai/dsh-office-to-pdf` → `@deepseek-ai/dsh-office-kit`；`src/index.ts:49` 的模块增强 import 与注释；`src/index.ts:414` 的 `ctx.get('officeToPdf')` → `'officeKit'`；`tests/e2e.test.ts:58,84` 的 fixture 键名；`src/pdf-paths.ts:21` 注释里的类型来源名；版本 0.2.7 → 0.3.0（破坏性改名） | [x] |
+| W3 | P0 | 办公技能名单 7 → 4：删掉 `office-render` / `office-recalculate` / `office-export-pdf` 三处，改动 `scripts/build-runtime.mjs:645`（构建期）与 `src/main/desktop-host.ts:682`（启动期）两份副本，并把两处 JSDoc 里的「七个」表述改掉。rc.2 的 `skill-office` `SKILL_NAMES` 只剩 `office` / `office-docx` / `office-pptx` / `office-xlsx`（`packages/skill/skill-office/src/index.ts:11`） | [x] |
+| W4 | P2 | 启动路径不再把 office-skills 当硬前提（**降级：不是缺陷**）：技能在 rc.2 由内核包自带 `assets/`，`<dataDir>/dsh-app-office/office-skills` 已无消费者，但 `prepareOfficePayload`（`src/main/desktop-host.ts:800`）仍会复制它——而运行树自 W3 起仍产出 4 个真实目录，所以启动不会失败，这是一块死复制加一条多余硬前提。保留 leaf 与 `linkPrimaryRuntime`（rc.2 的 `apps/desktop-host/src/index.ts:25` 把 argv[4] 写进 `DSH_PRIMARY_RUNTIME`）；是否连 `stageOfficeSkills` 与 `host-arg-shape` 夹具里的“子进程读 skills”一起拆掉，单独一轮做（夹具模拟的是 rc.1 的宿主约定） | [x] |
+| W5 | P0 | 办公引擎版本、payload 身份与加载期 shim：`scripts/kernel-line.mjs:101` 的 `DESKTOP_OFFICE_KIT_VERSION` 0.1.2 → 0.2.3（rc.2 的 provider 声明 `@deepseek-ai/libreoffice-kit: 0.2.3`，原生引擎包同名同版；rc.1 是 `^0.1.5`）；`scripts/build-runtime.mjs` 的 `DESKTOP_OFFICE_PROVIDER_PACKAGE` 由 `@deepseek-ai/dsh-office-to-pdf` 改为 `@deepseek-ai/dsh-office-kit`（不改的话 shim 不会打，已实测：构建日志报 `no @deepseek-ai/dsh-office-to-pdf in the tree; no kit shim needed`，结果 `import.meta.resolve('@deepseek-ai/libreoffice-kit')` 必然抛，办公转换只能报 unavailable）。按 kernel-line 的两步顺序：先构并发布带新 `payloadVersion` 的 runtime，再让要求它的 runtime 可装；重跑 `npm run primary-runtime:build` | [x] |
+| W6 | P0 | 新内核 peer：`@deepseek-ai/dsh-error` 进 5 个插件的 `devDependencies` —— `plugin-client-ui`、`plugin-hooks`、`plugin-memory`、`plugin-rewind`、`plugin-swarm`（`dsh-llm` 与 `dsh-attachment` 在 rc.2 把它声明成 peer，`--legacy-peer-deps` 不装 peer） | [x] |
+| W7 | P0 | 类型门禁：19 个插件各跑 `node scripts/plugin-gates.mjs plugins/<dir>`（esbuild 不做类型检查，rc.1 的 `ProjectionHandle` 只有它抓到）+ 根 `npm run typecheck`；报告任何新出现的错误并修到 0。**本轮它抓到两处真断裂**：① `plugin-swarm` 的 `startActivation` 去掉了 `request` 包装（rc.2 的 `SubagentActivationSpec` 直接继承 `SubagentStartRequest`），两处调用点要摊平；② `plugin-rewind` 的 `zod` 钉在 4.4.3，而 `dsh-session-projection` 现在依赖 4.6.6，投影声明的 `ZodType` 缺 `validate`/`validateAsync`，要升到 4.6.6 | [x] |
+| W8 | P1 | hero 层：rc.2 的 `ui-brand-official` 无条件把 `PixelWhale` 注册进新座位 `conversation.hero.frame`（`packages/client/ui-brand-official/src/client/index.ts:17`）。**实测订正**：它的 canvas 在首页空闲时是**透明的**（alpha>8 的像素 0 个），只有点击空白处才播一段自结束的动画（点击后 4570 → 76180 → 衰减回 2）；我们那层空闲即有 7529 个像素。所以静止状态下并不存在两只鲸鱼，结论改为**不否决上游**：`ui-brand-official` 保持默认开启，若日后觉得点击动画与我们的层冲突，overlay 一行即可关掉。真相靠 `scratch/whale-click-probe.mjs` 的像素计数取得，早先"两层同时可见"的说法按元素存在推断，已作废 | [x] |
+| W9 | P2 | 清理判定（**已有实测结论**）：rc.2 的 `office-kit` 用 `import type` + `import.meta.resolve` + 动态 `import()`（`packages/document/office-kit/src/index.ts:347,351`），所以 kit 缺席不再是加载期失败，而是运行时 unavailable。但另一面：我们靠 shim 把 kit 指到 payload，**shim 仍需保留并改指新包名**（见 W5）；`lib/cli.js` 的启动期要求来自已删除的 `desktop-office`，可删 | [x] |
+| W10 | P2 | 我们注册的 web provider 补 `title` / `description`（`WebSearchProvider` / `WebFetchProvider` 在 rc.2 新增这两个可选字段，否则内核的 Web search 页面只显示 id） | [x] |
+| W11 | P2 | 文档与注释一致：`plugins/dsh-app.patch.yml` 里 `dsh-deepseek-account-platform`、`dsh-experimental-agent-team-profile`、七技能的说法；`docs/agents/kernel-line-regression.md` §4 的办公载荷判据；`docs/agents/runtime-shape.md` 若提到 office payload 的形状 | [x] |
 | W12 | OPT | 裁决已定：**接受 rc.2 的默认**，Agent Teams 随 base 的 `agent-team` / `tool-agent-team` 与 web-app 的 `ui-agent-team` 开启，overlay 不加 disable 行。理由：跟随上游默认，减少一层要自己维护的否决；`subagent` 池 16 与 swarm 的 12 之间留有 4 个槽位 | [x] |
-| W13 | P0 | 裁决已定：**MCP 归内核管理器**，退役我们自己的那一套 —— 删掉 `$DSH_HOME/storages/dsh-app-plugin-mcp/servers.json` 存储与 `mount.ts` 的动态 `loader.create` 挂载（两套存储、两批 `dsh-mcp-client` 就此消失），页面保留但改成薄壳：读写内核 `mcp-manager` 行的 `config.servers`（仿 `plugins/plugin-websearch/src/index.ts:313` 的 `ctx.configEditor.edit` 写法），列表/重启/探测走 `ctx.get('mcpManager')`。前提约束：rc.2 的 mcp-manager **没有客户端半**（`package.json` 无 `dsh.client`，`packages/client` 下无消费者），整块删除会让应用失去添加 MCP 服务器的入口，所以取「保留页面、换成内核的库」这一落法 | [~] |
-| W13b | P1 | 数据迁移：既有 `servers.json` 里的条目一次性写进 `mcp-manager` 行的 `config.servers`，`$ENV:NAME` 改成 `${credential:NAME}` 模板；迁移后保留原文件不删（可回滚）。沿用 `plugin-usage` 的一次性导入先例 | [~] |
-| W14 | P1 | 发布面：本轮改动带 `changesets/<name>.md`（`ci.yml` 的 gate 会拒绝），实际改到的插件 bump 版本；换线记录写进 `docs/archive/kernel-line/kernel-0.2.2-rc.2-upgrade.md` | [ ] |
-| W15 | P2 | 跟官方命名：swarm 的 child label 改用内核返回的 `activation.name`（rc.2 的 `SubagentActivation` 新增必填 `name`，`startActivation` 的 `name?` 仍可选），不再自己拼序号 | [~] |
+| W13 | P0 | 裁决已定：**MCP 归内核管理器**，退役我们自己的那一套 —— 删掉 `$DSH_HOME/storages/dsh-app-plugin-mcp/servers.json` 存储与 `mount.ts` 的动态 `loader.create` 挂载（两套存储、两批 `dsh-mcp-client` 就此消失），页面保留但改成薄壳：读写内核 `mcp-manager` 行的 `config.servers`（仿 `plugins/plugin-websearch/src/index.ts:313` 的 `ctx.configEditor.edit` 写法），列表/重启/探测走 `ctx.get('mcpManager')`。前提约束：rc.2 的 mcp-manager **没有客户端半**（`package.json` 无 `dsh.client`，`packages/client` 下无消费者），整块删除会让应用失去添加 MCP 服务器的入口，所以取「保留页面、换成内核的库」这一落法 | [x] |
+| W13b | P1 | 数据迁移：既有 `servers.json` 里的条目一次性写进 `mcp-manager` 行的 `config.servers`，`$ENV:NAME` 改成 `${credential:NAME}` 模板；迁移后保留原文件不删（可回滚）。沿用 `plugin-usage` 的一次性导入先例 | [x] |
+| W14 | P1 | 发布面：本轮改动带 `changesets/<name>.md`（`ci.yml` 的 gate 会拒绝），实际改到的插件 bump 版本；换线记录写进 `docs/archive/kernel-line/kernel-0.2.2-rc.2-upgrade.md` | [x] |
+| W15 | P2 | 跟官方命名：swarm 的 child label 改用内核返回的 `activation.name`（rc.2 的 `SubagentActivation` 新增必填 `name`，`startActivation` 的 `name?` 仍可选），不再自己拼序号 | [x] |
 
 ## 本轮实测（2026-11-12）
 
@@ -109,7 +109,7 @@ rc.2 只有 git tag（`dsh-v0.2.2-rc.2`，release 提交 `91319233e1`）与 GitH
 - **hero 层（真机、rc.2 内核）`[实测]`，含一次订正**：两个 canvas 元素都在，但**只有我们的在画**。`[data-home-whale]` 在首页空闲时透明（alpha>8 像素 0），点击空白处才播一段自结束动画（+1.5s 时 76180 个像素，+2.5s 衰减回 2）；我们的 `#dshapp-whale-bg` 空闲 7529 个像素。早先"同时出现两只鲸鱼"是只看元素存在得出的，作废。
 - **W8 的定案经过一次回退**：曾按“跟官方”读过一次——把自画层删掉——核对后回退（品牌层是产品资产，不在换线范围内，也不属于“适配”），改为在 overlay 关掉 `ui-brand-official` 一行。关掉后的真实窗口实测 `[实测]`：我们的 canvas 在且 `is-visible`，`[data-home-whale]` 计数 0，`conversation.hero.frame` 无占位者也不报错（`slot entry crashed` 计数 0，故障计数 0）；rc.2 启动日志 `host ready` 1 次。
 - **W5 `[实测]`**：`runtime:build` 重跑后报文从 `no …office-to-pdf in the tree; no kit shim needed` 变成 `LibreOffice kit shim: scripts/runtime-stubs/libreoffice-kit -> app/node_modules/@deepseek-ai/libreoffice-kit`，payload 版本从 0.1.2 变 0.2.3（350.7 MB unpacked，121 MB 压缩）；在解包后的 `app/` 里跑 `import.meta.resolve('@deepseek-ai/libreoffice-kit')` 能解析，动态 import 拿到 `createConverter`。另外 payload 的 pnpm 组装因 kit 0.2.3 新增 `koffi` 而被 `ERR_PNPM_IGNORED_BUILDS` 拒，已把运行树那份构建脚本白名单抽成共享函数给两处用。W8 的判定成立。
-- **`probe-whale.cjs` 无法对准桌面窗口 `[实测]`**：桌面页面的 `location.href` 是 `dsh-app://app/index.html`，自定义协议只存在于应用自己的进程；宿主 `http://127.0.0.1:<port>?token=…` 里的 token 被外壳日志脱敏（实测输出 `[redacted]`），所以本轮用 CDP 读真实 DOM 代替（`scratch/cdp.mjs`），层数、几何与透明度直接量自运行中的窗口。
+- **`probe-whale.cjs` 曾无法对准桌面窗口 `[实测]`**：桌面页面的 `location.href` 是 `dsh-app://app/index.html`，自定义协议只存在于应用自己的进程；宿主 `http://127.0.0.1:<port>?token=…` 里的 token 被外壳日志脱敏（实测输出 `[redacted]`），所以本轮用 CDP 读真实 DOM 代替（`scratch/cdp.mjs`），层数、几何与透明度直接量自运行中的窗口。
 
 ## Phases
 
@@ -177,7 +177,7 @@ node scripts/probe-settings-nav.cjs --lang en-US
 node scripts/probe-workbench.cjs
 node scripts/probe-routes.cjs
 node scripts/probe-startup.cjs
-node scripts/probe-whale.cjs
+node scripts/probe-whale.mjs
 ```
 
 ## Deferred
@@ -210,3 +210,12 @@ node scripts/probe-whale.cjs
 
 | 阶段 | 日期 | 证据 | 结论 |
 |------|------|------|------|
+| 0 前提 | 2026-11-12 | `npm view @deepseek-ai/dsh dist-tags` → `next: 0.2.2-rc.2`；41 个包逐个查 registry | 通过 |
+| 1 裁决 | 2026-11-12 | 用户裁决：接受 Agent Teams 默认；MCP 归内核；hero 层保留我们那层 | 通过 |
+| 2 换线 | 2026-11-12 | 418 处 spec / 20 manifest；两处解析 rc.2；`npm test` 737/735/0；19/19 插件门禁；4 条静态门禁 | 通过 |
+| 3 办公 | 2026-11-12 | `runtime:build` + payload 0.2.3 / `0.2.3-py3.12.14`；真机 `office_to_pdf` → `exported` 18303 字节；`load_workspace_dependencies` 内置 python 导入 docx/pptx/openpyxl 成功；`verify --tgz` 全过 | 通过 |
+| 4 界面 | 2026-11-12 | `probe-whale.mjs` 5 项全过；`probe-settings-rail.mjs` 4 项全过（17 行、无双图标、维护 1 行） | 通过 |
+| 5 MCP | 2026-11-12 | 真机：建条目 → `mounted` + `toolCount 1`，写落在 `mcp-manager` 行；删除后 patch 干净 | 通过 |
+| 6 收尾 | 2026-11-12 | changesets 5 个；归档记录 §0–§12；`probe-routes --tgz` 32 checks | 通过 |
+| 审查 | 2026-11-12 | 第一轮 8 条 P1（归档 §10）、第二轮 6 条 P1 全部修完并复跑门禁 | 通过 |
+| 待审 | — | 最后一轮 P2（`6f19d09` 之后的探针与 P2 提交）尚未再走一次独立审查 | 未审 |
