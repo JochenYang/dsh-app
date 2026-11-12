@@ -167,10 +167,15 @@ export const ADVANCED_CSS = `
 /* -------------------------------------------------------------------- list */
 .dshAma-listSection{display:flex;align-items:center;gap:6px;margin:16px 0 4px;color:var(--dshAma-fg3);font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase}
 .dshAma-listSection:first-of-type{margin-top:4px}
-.dshAma-list{display:flex;flex-direction:column;gap:2px;margin:0 -8px}
-.dshAma-row{display:flex;align-items:center;gap:2px;padding:0 6px 0 8px;border-radius:var(--dshAma-r);animation:dshAmaRowIn var(--dshAma-t-slow) var(--dshAma-ease) backwards;transition:background var(--dshAma-t)}
-.dshAma-row:hover{background:var(--dshAma-hover)}
-.dshAma-rowMain{display:flex;align-items:center;gap:10px;flex:1;min-width:0;min-height:44px;padding:0;border:0;background:none;color:var(--dshAma-fg);font:inherit;font-size:13.5px;font-weight:500;text-align:left;cursor:pointer}
+/* Two cards per row. The list is a vertical scan of N providers; one column made
+   the page twice as tall as it needed to be and buried the catalog under the
+   configured block, while a card still leaves room for the mark, the name and the
+   pin on one line (the name ellipsizes instead of wrapping). The single-column
+   fallback below is for the narrow settings pane, not a preference. */
+.dshAma-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
+.dshAma-row{display:flex;align-items:center;gap:2px;padding:4px 6px 4px 10px;border:1px solid var(--dshAma-line);border-radius:var(--dshAma-r);background:var(--dshAma-surface);animation:dshAmaRowIn var(--dshAma-t-slow) var(--dshAma-ease) backwards;transition:border-color var(--dshAma-t),box-shadow var(--dshAma-t)}
+.dshAma-row:hover{border-color:var(--dshAma-line2);box-shadow:var(--dshAma-shadowSm)}
+.dshAma-rowMain{display:flex;align-items:center;gap:10px;flex:1;min-width:0;min-height:48px;padding:0;border:0;background:none;color:var(--dshAma-fg);font:inherit;font-size:13.5px;font-weight:500;text-align:left;cursor:pointer}
 .dshAma-rowMain:active{opacity:.85}
 .dshAma-rowMain:focus-visible{outline:2px solid var(--dshAma-brand);outline-offset:-2px;border-radius:8px}
 .dshAma-pin{color:var(--dshAma-fg4);flex:none;opacity:.6;transition:opacity var(--dshAma-t),color var(--dshAma-t)}
@@ -179,6 +184,10 @@ export const ADVANCED_CSS = `
 .dshAma-rowName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshAma-rowChevron{color:var(--dshAma-fg4);transition:transform var(--dshAma-t) var(--dshAma-ease),color var(--dshAma-t)}
 .dshAma-row:hover .dshAma-rowChevron{color:var(--dshAma-fg3);transform:translateX(2px)}
+
+@media (max-width:720px){
+  .dshAma-list{grid-template-columns:1fr}
+}
 
 /* ------------------------------------------------------------------- empty */
 .dshAma-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:40px 20px 44px;text-align:center}
@@ -190,7 +199,8 @@ export const ADVANCED_CSS = `
 .dshAma-alert.is-err{background:var(--dshAma-badSoft);color:var(--dshAma-badLabel)}
 
 /* --------------------------------------------------------------- skeletons */
-.dshAma-skelRow{display:flex;align-items:center;gap:10px;height:44px;padding:0 8px}
+/* The skeleton mirrors the two-up card grid, or the first paint jumps. */
+.dshAma-skelRow{display:flex;align-items:center;gap:10px;height:58px;padding:4px 10px;border:1px solid var(--dshAma-line1);border-radius:var(--dshAma-r)}
 .dshAma-skel{display:block;height:11px;border-radius:5px;background:linear-gradient(90deg,var(--dshAma-skel) 25%,var(--dshAma-fill) 37%,var(--dshAma-skel) 63%);background-size:400% 100%;animation:dshAmaShimmer 1.4s ease infinite}
 .dshAma-skelMark{width:22px;height:22px;border-radius:6px;flex:none}
 

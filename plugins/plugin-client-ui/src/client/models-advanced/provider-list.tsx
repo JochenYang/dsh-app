@@ -1,11 +1,13 @@
 /**
- * The provider list: the page's home level, and the shape of one row's summary.
+ * The provider list: the page's home level, and the shape of one card's summary.
  *
- * The list answers one question — which provider am I about to edit — so a row
+ * The list answers one question — which provider am I about to edit — so a card
  * carries the vendor's mark, the name and a chevron; the route id, protocol and
- * model count belong to the page it opens. It is a reading surface only:
- * creating a provider, its endpoint and its key stay on the official Models
- * page, which is why there is no "add provider" row here.
+ * model count belong to the page it opens. Cards are laid out TWO per row
+ * (`styles.ts`, `.dshAma-list`): a single column made the page twice as tall as
+ * the question needs, and the catalog section ended up below the fold. It is a
+ * reading surface only: creating a provider, its endpoint and its key stay on the
+ * official Models page, which is why there is no "add provider" card here.
  *
  * @module @dsh-app/plugin-client-ui/client/models-advanced/provider-list
  */

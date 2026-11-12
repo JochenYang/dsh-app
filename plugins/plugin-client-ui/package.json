@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-client-ui",
   "description": "DSH APP brand client plugin: brand theme registration, the provider manager settings page (advanced model and route fields), and the maintenance settings section (order 26: usage statistics, preset packages and diagnostics as three tabs).",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
