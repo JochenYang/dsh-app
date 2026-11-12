@@ -14,6 +14,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
     "check:graph": "node scripts/check-plugin-graph.mjs",
     "check:plugins": "node scripts/check-plugin-compat.mjs",
+    "check:preflight": "node scripts/kernel-preflight.mjs",
     "check:touchpoints": "node scripts/check-touchpoints.mjs",
     "check:touchpoints:gate": "node scripts/check-touchpoints.mjs --check",
     "check:surface": "node scripts/kernel-surface.mjs",

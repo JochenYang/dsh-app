@@ -231,3 +231,36 @@ swarm 批次级 schema 没有独立校验（真机一轮 turn 已覆盖整值，
 
 发版过程中被 release-check 拦下的一处：`check:graph` 在 `plugin-websearch` 的两个文件里发现字典外的 Han 字符（provider 的 `zh` 说明），
 搬到 `plugins/plugin-websearch/src/locales.ts` 后才打 tag。
+
+## 15 事后复算：预检脚本对这次换线的命中率 `[实测]`
+
+换线之后补了 `scripts/kernel-preflight.mjs`（`npm run check:preflight`，十二项检查）。
+把本文件 §1 记下的断裂当成标准答案，用**换线前的仓库快照**（`fd863db`，本仓 rc.1 侧）当被测树、
+`dsh-v0.2.2-rc.1` 与 `dsh-v0.2.2-rc.2` 两个上游检出当两侧，重跑一次：
+
+```sh
+node scripts/kernel-preflight.mjs --dir <rc.2 检出> --baseline-dir <rc.1 检出>
+```
+
+结果 5 个 blocker、5 条 ADAPT、14 条 note，对着 §1 的表逐条核：
+
+| §1 的断裂 | 预检结果 |
+|---|---|
+| 办公提供方改名 `dsh-office-to-pdf` → `dsh-office-kit` | `BLOCKER [published] @deepseek-ai/dsh-office-to-pdf: not present in the target line` |
+| 服务 id `officeToPdf` → `officeKit` | `BLOCKER [services] officeToPdf: … the baseline line declared it, the target does not` |
+| `skill-office` 7 → 4，两处名单 | 两条 `BLOCKER [skill-office]`，分别点名 `scripts/build-runtime.mjs` 与 `src/main/desktop-host.ts`，并列出多出来的三个名字 |
+| `dsh-llm` / `dsh-attachment` 新增 peer `dsh-error`（6 个 manifest） | `BLOCKER [peers] @deepseek-ai/dsh-llm → @deepseek-ai/dsh-error: … no manifest of this repository installs`（`dsh-attachment` 不在我们的 import 面里，所以只报了 `dsh-llm`） |
+| `SubagentActivation` 增加必填 `name`（`startActivation` 去掉 `request` 包装） | `ADAPT [declarations] @deepseek-ai/dsh-subagent · SubagentActivation`，标为「必填成员新增」而不是 additive |
+| 其余声明变化（`Checkbox`/`Modal`/`WebFetchProvider` 等） | 3 条降为 note（只新增可选成员），`Menu`/`MenuItemButton`/`Session`/`SubagentRunEndInfo` 仍是 ADAPT |
+
+漏检两类，都是这一层静态扫描够不到的：
+
+1. **传递依赖版本错位**：`dsh-session-projection` 要 `zod 4.6.6`，`plugin-rewind` 钉的 `4.4.3`。
+   当时的脚本没有这一项——本轮补了 `deps` 检查（目标精确钉住的依赖 vs 本地实际版本），
+   对 rc.1 检出重跑已能看到 `[deps] zod 4.4.3 ← @deepseek-ai/dsh-agent`（本地 4.6.6，方向相反故为 note）。
+2. **架构位移**：rc.2 的 `mcp-manager` 接管了 servers 配置，`plugin-mcp` 从「自己存 `servers.json`」改为
+   「薄壳 + 内核 `configEditor`」。没有任何符号消失，所有声明检查都不会响；这类只能靠读变更说明。
+
+误报方面，本轮修掉三处：`ctx.logger`/`ctx.get`/`ctx.inject` 这类 cordis 基类成员在源码检出里被当成「被删的服务」、
+npm 目标只下了我们 import 的包导致其余包的服务被当成「被删」、以及把「新增可选成员」算成需要改代码。
+修正后的规则写进 `docs/agents/kernel-line-regression.md` §1。

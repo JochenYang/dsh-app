@@ -22,6 +22,50 @@
 
 ## 1 升线前：七类接触面扫描
 
+**先跑预检脚本，再读这一节。** `npm run check:preflight` 把"目标线会对我们做什么"编成
+十项检查，一次跑完；它替代的是过去每轮临时写在 `scratch/` 里的那几个脚本
+（`resolve.mjs` / `diff.mjs` / `decl-diff.mjs` / `shapes.mjs`）。三种目标形态：
+
+```sh
+npm run check:preflight                          # 已安装的这条线（离线，0.5 秒）
+npm run check:preflight -- --dir <checkout>      # 目标 tag 的检出/工作树
+npm run check:preflight -- --npm 0.2.3-rc.1      # 已发布的包（下载 + 校验 sha512）
+```
+
+已经发生过的换线可以按原本方向复算一次：`--baseline-dir` / `--baseline-npm` 把比较的
+另一侧从「已安装的线」换成指定的旧线，于是「换线前一天它会不会告诉我」变成可重复的实验
+（两侧要同类：两个检出，或两条已发布线）。
+
+| 检查 | 问的问题 | 能看见的断裂 |
+|---|---|---|
+| `line` | 我们消费的每个包是否落在同一个版本 | 混线（装配期直接拒） |
+| `published` | 目标线是否还发布这些包 | 改名（`dsh-office-to-pdf` → `dsh-office-kit`） |
+| `engines` | 目标的 `engines.node` 下限 vs CI 的 Node | 打包进运行时的 Node 低于内核要求 |
+| `exports` | 我们 import 的每个具名导出是否还在 | 内核删掉具名导出（编译期是 `undefined`） |
+| `declarations` | 同一符号的签名是否变了 | 返回类型/必填字段增减（`SubagentActivation` 多了必填 `name`）；纯新增可选成员降为 note |
+| `slots` | 注册的每个 slot id 是否还有声明 | 座位退役 → 静默无操作 |
+| `services` | `ctx.<id>` 用到的宿主服务是否还在 | 服务改名（`officeToPdf` → `officeKit`） |
+| `overlay` | overlay 改的每一行是否还有目标；insert id 是否撞行 | 补丁成为静默空操作 / 重复挂载 |
+| `skill-office` | 两处技能名单 vs 包自带名单 | 7 → 4 那次（构建与启动各拒一次） |
+| `deps` | 目标精确钉住的传递依赖，本地是否是那个版本 | `zod` 4.4.3 → 4.6.6（投影的 `ZodType` 缺方法） |
+| `peers` | 目标**新增**的 peer，本仓 manifest 是否声明了 | `--legacy-peer-deps` 不装 peer → 打包期 "Could not resolve" |
+| `payload` | 哪些包真的变了、变了多少文件（需 `--npm`） | 决定先看哪里 |
+
+退出码是判据：`0` = 无 blocker，`1` = 有 blocker，`2` = 参数或输入错误。
+`--json` 给机器读。
+
+**实测**（2026-11-12，0.2.2-rc.1 → rc.2，用换线前的仓库快照当被测树，两侧都是检出）：
+5 个 blocker 命中当轮手工查出的 4 处代码级断裂——`dsh-office-to-pdf` 不再发布、服务
+`officeToPdf` 消失、`skill-office` 两处名单各差 3 个、`dsh-llm` 新增 peer `dsh-error`；
+外加 5 条声明变化（其中 `SubagentActivation` 新增**必填** `name` 即 `startActivation`
+那处改动，另 3 条纯新增可选成员降为 note）。**漏检两类**，都在上面表里无从查起：
+`zod` 的传递版本错位（本轮 `deps` 补上，同一轮重跑已能看到 `zod 4.4.3 ← dsh-agent`）、
+以及「某个包获得了新职责」这类架构位移（rc.2 的 `mcp-manager` 接管 servers 配置）——
+后者没有任何符号消失，只能靠读变更说明。渲染结果与运行期行为同理，仍然只能进真机。
+
+下面这一节仍然是必做的：预检脚本扫的是**目标线的声明与清单**，不是我们的代码里
+有没有用错姿势。
+
 升线前先做一遍**只读**扫描，得到一张"这次变动可能打到我们哪里"的表。扫描不证明兼容，
 它的价值是保证该问的角度都问过，而不是每次靠人重新想一遍从哪些角度问。
 
@@ -435,6 +479,8 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
 
 升线前：
 
+- [ ] 预检脚本对着**目标线**跑，blocker 清零或逐条记进台账：
+      `npm run check:preflight -- --npm <目标版本>`（或 `--dir <目标 tag 的检出>`）
 - [ ] 第 1 节七类接触面扫描：`npm run check:touchpoints`，命中与未命中都进表
 - [ ] 注册面：`npm run check:slots`
 - [ ] 导出面报告：`npm run check:surface -- --used-only`，看新增面里有没有该用的

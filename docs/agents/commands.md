@@ -46,10 +46,37 @@ npm run smoke:package                             # assert a packaged output car
 npm run icon:build | icon:gen                     # regenerate resources/ icons
 ```
 
+## Kernel line preflight
+
+The one command that says what a new upstream line will do to this repository,
+before anything is adapted. Twelve checks over one target — the line number, the
+packages still published, the exports we import, declaration shape, slot and
+service ids, overlay rows, the office skill list, transitive pins the line moved,
+newly added peers, and (npm mode) which packages changed at all. Exit 0 = no
+blocker, 1 = blocker, 2 = bad input. The reasoning, the per-check table and the
+measured rc.1 → rc.2 recall live in
+[`kernel-line-regression.md`](kernel-line-regression.md) §1.
+
+```sh
+npm run check:preflight                          # the installed line (offline, ~0.5s)
+npm run check:preflight -- --dir <checkout>      # a checkout / worktree of the target tag
+npm run check:preflight -- --npm 0.2.3-rc.1      # published packages (download + sha512 check)
+npm run check:preflight -- --npm 0.2.2-rc.2 --baseline-npm 0.2.2-rc.1   # re-audit a move
+npm run check:preflight -- --json                # machine-readable
+```
+
+`--npm` is the mode that compares like with like: it reads published declarations
+and can diff payloads. `--baseline-dir` / `--baseline-npm` replace the installed
+line as the other side of the comparison, so a move that already happened can be
+re-run in its own direction; pair like with like (two checkouts, or two published
+lines). A registry other than npmjs is `DSH_PREFLIGHT_REGISTRY`; downloads land in
+`scratch/kernel-preflight/<version>/` and are reused.
+
 ## Gates (all static — no kernel, no network)
 
 ```sh
 npm run check:graph           # plugin-graph + suite-roster rules
+npm run check:preflight       # kernel-line preflight against the installed line
 npm run check:suites          # the five roster copies agree (--check form: check:suites:gate)
 npm run check:slots           # every ctx.slots id a client half names still exists in the line
 npm run check:surface         # kernel-surface report
