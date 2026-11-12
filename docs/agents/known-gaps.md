@@ -61,3 +61,11 @@ a short summary and points here.
   (`exec.deadline` exposure and a promotion contract); neither is planned here.
 - Future: signed kernel manifests; `$DSH_HOME` settings rollback on major-version upgrades. `docs/capability-roadmap/`
   holds the rest of the roadmap; `docs/plans/` holds the plans that are still open.
+- **The kernel preflight cannot see a shift in responsibility, or anything at render time.** It answers
+  twelve questions about a target line's symbols, declarations, ids and versions
+  (`scripts/kernel-preflight.mjs`, table in `kernel-line-regression.md` §1), and the 0.2.2-rc.1 → rc.2
+  move measured its recall: every code-level break of that round is now caught, and two classes are not.
+  A package that GAINS a responsibility (rc.2's `mcp-manager` took over the servers config, which forced
+  `plugin-mcp` from owning a file to being a thin shell) removes no symbol, so no scan here can see it —
+  that one is read from the upstream notes. And nothing static covers rendering or runtime behaviour, so
+  a line move still ends in a real window (§5 of `kernel-line-regression.md`).

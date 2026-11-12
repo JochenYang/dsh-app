@@ -66,6 +66,7 @@ work elsewhere.
 | `electron-builder.yml` | packaging targets, the NSIS hook include, `extraResources` (the bundled kernel), the `publish` provider |
 | `plugins/dsh-app.patch.yml` | the loader overlay that mounts the suite into the kernel (roster copy 1 of 5 — `plugins/AGENTS.md` §5) |
 | `scripts/kernel-line.mjs` | line derivation, `SUITE_PLUGINS` (roster copy 2), `suiteVersion`, the LibreOffice kit pin |
+| `scripts/kernel-preflight.mjs` | what a TARGET line would do to this repository before anything is adapted (twelve checks; see `docs/agents/kernel-line-regression.md` §1) |
 | `scripts/primary-runtime-lock.json` | the Python set the office payload carries, plus the bundled pnpm pin |
 | `changesets/*.md` | the release-input fragments (`AGENTS.md` §11) |
 | `.github/workflows/{ci,release,publish-mirror}.yml` | the gates, the release pipeline, the ModelScope mirror |
