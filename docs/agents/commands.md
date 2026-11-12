@@ -89,6 +89,9 @@ sha512 applies) and copies the six the plugin builds from `grammars-optional/`, 
 the same bytes a user's download installs. Without it those tables print 18 skips; with
 it the suite is 588/588. To reproduce CI locally, run it into a directory and set
 `DSH_APP_CODEGRAPH_GRAMMARS` to the same directory.
+
+| Probe | Re-run when | What only it can see |
+|---|---|---|
 | `probe-office-menu.cjs` | after touching `plugin-ppt`'s `office-menu.ts`, its icons, the `menu.*` keys, or the client entry's registration | the four rows rendering, ordered, clicking to ONE chip |
 | `probe-swarm-team-prompt.mjs` | after touching `plugin-swarm`'s prompt sections | whether both delegation sections survive assembly, contiguous and ordered |
 | `probe-team-section-mount.mjs` | after touching the Team section's mount | the optional `agentTeams` mount in BOTH composition orders |

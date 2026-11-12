@@ -30,8 +30,9 @@ and asserting the directory in the same round (`preparePrimaryRuntime` answers
 the primary-runtime path only). It stays because `stageOfficeSkills` still writes
 it and the copy is part of the meta layer's content; removing it changes that
 layer's hash and is deliberately its own step. The build asserts the set it
-stages; `scripts/probe-routes.cjs` parses that list out of the build script
-rather than keeping a copy.
+stages; **nothing else checks it** — `probe-routes` stopped asserting the
+directory in the same round (the skills come from the package's `assets/`, so a
+missing staged copy is dead weight, not a boot failure).
 
 The runtime also carries **pnpm** at `<kernelDir>/runtime/pnpm` (`stagePnpm`),
 pinned by `scripts/primary-runtime-lock.json` — the same pin the office payload

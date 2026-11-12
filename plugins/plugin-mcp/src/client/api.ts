@@ -81,6 +81,7 @@ const HOST_KEYS: Readonly<Record<string, McpKey>> = {
   'mount.closed': 'mcp.host.mountClosed',
   'mount.needsCredentials': 'mcp.host.mountNeedsCredentials',
   'env.inlineRef': 'mcp.host.envInlineRef',
+  'env.legacyRef': 'mcp.host.envLegacyRef',
   'env.missing': 'mcp.host.envMissing',
 }
 

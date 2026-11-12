@@ -4,6 +4,7 @@
  *   GET  /servers        — sanitized entries + mount status + the file path
  *   POST /server/create  — validate + persist into the mcp-manager row
  *   POST /server/update  — validate + replace that row's entry
+ *   POST /server/enable  — flip one entry's switch (nothing else)
  *   POST /server/delete  — remove the row's entry
  *   POST /server/import  — bulk-paste mcpServers JSON; per-server failures
  *                          never abort the batch; invalid display-name keys
@@ -213,10 +214,21 @@ export function registerMcpRoutes(
     } satisfies McpServersResponse)
   }
 
-  /** Guarded write: the master switch off answers 409 (read-only mode). */
-  const guardWrite = (): Response | undefined => (store.load().enabled
-    ? undefined
-    : fail(409, 'disabled', { code: 'route.disabled' }))
+  /**
+   * Guarded write: the master switch off answers 409 (read-only mode).
+   *
+   * It reads the store, so it can hit the same unreadable row the read path
+   * reports — and it runs before each route's own `try`, which is why the read is
+   * wrapped here instead of being trusted. A raw throw out of the handler would
+   * reach the browser as a bare HTTP 500 with no coded message.
+   */
+  const guardWrite = (): Response | undefined => {
+    try {
+      return store.load().enabled ? undefined : fail(409, 'disabled', { code: 'route.disabled' })
+    } catch (error) {
+      return writeRejection(error)
+    }
+  }
 
   /** Write-store failure: the reason is a technical detail, so the client's
    * copy owns the sentence and the detail rides as the code's English text. */
@@ -269,6 +281,39 @@ export function registerMcpRoutes(
     } catch (error) {
       // The store resolves the key inside the write now, so "no such server" is
       // raised there; the client keys its own copy on 404.
+      if (error instanceof McpValidationError && error.code === 'server.notFound') {
+        return fail(404, 'not-found', error.hostText())
+      }
+      return writeRejection(error)
+    }
+    return await respond()
+  }
+
+  /**
+   * Flip ONE field: `enabled`.
+   *
+   * The card's switch used to post the whole entry it had loaded, which made a
+   * toggle a full replace from a possibly stale snapshot — a command or an env
+   * key another writer changed in between was reverted (and, because modelled
+   * fields are authoritative, a field that writer added was deleted). This route
+   * touches nothing but the switch.
+   */
+  const setEnabled = async (request: Request): Promise<Response> => {
+    let body: Record<string, unknown>
+    try {
+      body = await readJsonBody(request)
+    } catch (error) {
+      return bodyRejection(error)
+    }
+    const denied = guardWrite()
+    if (denied !== undefined) return denied
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (typeof body.enabled !== 'boolean') {
+      return fail(400, 'bad-request', { code: 'route.invalidBody', params: { detail: 'enabled must be a boolean' } })
+    }
+    try {
+      await store.setEnabled(id, body.enabled)
+    } catch (error) {
       if (error instanceof McpValidationError && error.code === 'server.notFound') {
         return fail(404, 'not-found', error.hostText())
       }
@@ -363,6 +408,12 @@ export function registerMcpRoutes(
       methods: ['POST'],
       requestBody: 'buffered',
       fetch: update,
+    }),
+    connectionFetch.register({
+      path: `${ROUTE_PREFIX}/server/enable`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: setEnabled,
     }),
     connectionFetch.register({
       path: `${ROUTE_PREFIX}/server/delete`,

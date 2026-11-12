@@ -167,7 +167,7 @@ rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelW
 |---|---|---|---|
 | 1 | `plugin-swarm` 的 item 加了 `name`，但工具 output schema 是 `additionalProperties: false` 且未声明它 → 内核以 `ToolOutputError` 拒掉整个返回 | `SWARM_ITEM_SCHEMA` 抽成导出常量并声明 `name`；新增一条用例把真实批次 outcome 交给 `validateJsonSchemaValue` | 变异测试：删掉 `name` 声明后该用例红在 `"value.name" is not a declared property`；真机批次通过 |
 | 2 | `childName` 只声明未赋值，continuable 分支（默认 provider）永远丢名字 | 在 `startActivation` 之后 `childName = started.name`；continuable 的 mock 补上 `name` | 真机 `name: agent-1` / `agent-2` |
-| 3 | `scripts/probe-routes.cjs` 还留着第三份 7 项技能名单，会让「升线后必跑」的探针拒绝每个产物 | 改成从 `build-runtime.mjs` 解析 `OFFICE_SKILL_NAMES` | 解析出 4 项；`node --check` 通过 |
+| 3 | `scripts/probe-routes.cjs` 还留着第三份 7 项技能名单，会让「升线后必跑」的探针拒绝每个产物 | 先改成从 `build-runtime.mjs` 解析，后按第二轮审查**直接删掉技能目录断言**（技能来自内核包自带 `assets/`，产物的该目录已无消费者） | 现在 `probe-routes --tgz` 不再检查该目录；`RESULT: PASS (32 checks)` |
 | 4 | MCP 写路径用 await 前的快照覆盖整张 `servers`，另一个写者新加的服务器被静默抹掉 | 写改成在 `editor.edit` 回调里按 live `current`/`inherited` 计算；行匹配改结构化；读不到配置就拒绝写 | `store.test.ts` 新增「第二个写者插入的条目仍在」 |
 | 5 | 每次保存都按字段白名单重建条目，本版本不认识的开关（`reconnect`）在开关切换时丢失 | `toRawServer(entry, previous)` 在原有裸对象上合并，只有换 transport 才删另一套字段 | `store.test.ts` 新增两条（保留未知字段 / 换 transport 清理） |
 | 6 | 插件开关不再能阻止挂载，页面却同时显示「整体停用」与「已挂载」 | 文案与文档改成「本页只读，服务器仍由内核挂载」；状态不再受该开关影响 | 文案与 `wire.ts` 契约一致 |
@@ -195,3 +195,25 @@ rc.2 的 `ui-brand-official` 在官方构建门控**之前**无条件把 `PixelW
 | 新增 `probe-settings-rail.mjs` | `probe-settings-nav.cjs` 需要一个装好并构建过的 harness 检出（它靠 `pnpm dsh web` 起内核），本机没有。新探针走 CDP：设置栏 17 行、每行至多一个原生字形、合并后的「维护设置」恰好一行；英文窗口的 Han 检查在中文窗口下自动跳过并说明原因 |
 | `plugin-mcp` 的 P2 | `fleet.list()` 每页只读一次（原先每条一次，O(n²)）；删掉已无人用的 `nextEntryId` / `assertUniqueServerName` / `McpStore.log` / `McpStore.available`；`configured: false` 的记录现在报告为「已移除、内核收尾中」而不是普通条目；客户端未知状态回退成 `starting` 而不是「已停用」；编辑表单不再允许改 `serverName`（host 一律拒，等于每次一个 400）；`package.json` 描述改成新机制；`dsh-tools` 从 peer/dev 里删掉（已无人 import） |
 | `plugin-swarm` 的 P2 | schema 测试现在校验**编译后**的 schema，并覆盖 ready / `status_only` / dry-run 三种形态；另加一条源码断言，钉住「注册的就是导出的那个常量，不是内联副本」 |
+
+## 13 第三轮（发版前）审查与修复 `[实测]`
+
+两路原生 reviewer 并行；此前派给 Orca worker「雪洛」的同一任务因模型配额 429 异常终止，没有产出。
+
+| # | 发现（P1） | 修法 | 验证 |
+|---|---|---|---|
+| 1 | 页面把 `$ENV:NAME` 当占位符教给用户，而这条线只解析 `${credential:NAME}`；旧值被当字面量发给子进程，卡片却显示已挂载 | 占位符、类型 JSDoc、字段注释改成 `${credential:…}`；并在 `status.ts` 补回**真正的生产者**：检出 `$ENV:` 值就挂 `env.legacyRef` 警告 | `status.test.ts` 新增一条（mounted + 1 条警告，字段名正确） |
+| 2 | `guardWrite()` 在路由的 `try` 之外调 `store.load()`，读不到行配置时抛出未编码错误（浏览器看到裸 500） | 把读取包进 `try`，失败走同一个 `writeRejection` | `routes.test.ts` 新增一条：盲编辑器 + create → 400 且 `host.code = store.unreadable` |
+| 3 | 卡片开关把整条条目回写（页面加载时的快照），两个写者之间改过的字段被回滚/删除 | 新增一字段路由 `POST /server/enable` + `McpStore.setEnabled()`，只改 `enabled`；客户端改用该路由 | `routes.test.ts` 新增一条：改开关不动并发改过的 `command` |
+| 4 | `linkPrimaryRuntime` 先删旧链接再建新链接：一次被拒绝的 junction 会让应用带着已毁的链接启动不能 | 先建**暂存**链接（拒绝就抛、旧链接不动），再删除旧链接 + rename 换入；中途失败按 `previous` 重建旧链接 | `primary-runtime-leaf.test.mjs` 11/11；Windows 上 `rename` 不能覆盖目录，实测后改为「暂存优先 + 删除后 rename」 |
+| 5 | 两个新探针 `import '../scratch/cdp-lib.mjs'` —— `scratch/` 是 gitignore 的，新克隆里跑不了 | 助手移入 `scripts/lib/cdp.mjs` 并入库，两个探针改指向 | 两个探针在本机 5/5 与 4/4 |
+| 6 | 构建期垫片门槛是「包名存在吗」：下一次 provider 改名会再次静默丢能力 | 改成问产物：树里若有包声明 `@deepseek-ai/libreoffice-kit` 而 provider 不在，**构建失败**并指名 | `runtime:build` exit 0 且日志出现 `LibreOffice kit shim: …` |
+| 7 | overlay 里 hero 那段注释仍在论证「关掉官方行」，并引用已作废的 752×611 / opacity 0.18 测量，而该行是 `disabled: false` | 注释改成规则本身（我们的层负责静止画面，上游画布静止透明、点击才播；需要时一行关掉即可） | `probe-whale.mjs` W2 依赖该行保持开启 |
+
+非阻塞也已处理：跨 transport 的残留字段一律删除、两个内核服务改为每次调用时解析（激活早于服务挂载不再永久只读）、
+插件开关关闭时不再执行旧文件导入、`McpStore` 去掉第三个已删参数（测试同步）、`locale/*.json` 的描述、
+`probe-settings-rail` 的 S3 改为 `=== 1`、`probe-whale` 的 W4 增加「层必须存在」前置、`commands.md` 表格断行、
+`office-payload.ts` 里与 `pruneOtherVersions` 矛盾的那句、`probe-routes` 的孤立 JSDoc、swarm 两条启动失败路径上的 `name`。
+
+**未处理并已登记**：`stageOfficeSkills` 死重量（Deferred 行）、设置页暴露 `restart`/`probe`（Deferred 行）、
+swarm 批次级 schema 没有独立校验（真机一轮 turn 已覆盖整值，但无单测）、`docs/plans/…:94` 的 W13 与 Deferred 已改为一致表述。

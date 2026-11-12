@@ -119,12 +119,12 @@ export interface McpServerEntry {
   // --- stdio ---
   readonly command?: string
   readonly args?: readonly string[]
-  /** Values may reference environment variables as `$ENV:NAME`. */
+  /** Values may reference a credential as `${credential:NAME}`; the manager resolves it per instance. */
   readonly env?: Readonly<Record<string, string>>
   readonly cwd?: string
   // --- streamable-http ---
   readonly url?: string
-  /** Values may reference environment variables as `$ENV:NAME`. */
+  /** Values may reference a credential as `${credential:NAME}`; the manager resolves it per instance. */
   readonly headers?: Readonly<Record<string, string>>
   /** Per-tool-call timeout in ms; omitted uses the upstream default (60s). */
   readonly toolCallTimeoutMs?: number

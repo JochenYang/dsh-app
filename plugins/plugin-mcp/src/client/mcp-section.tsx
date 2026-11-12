@@ -7,7 +7,7 @@
  *
  * Secret hygiene: literal env/header values come back from the host masked
  * (••••••); a form or JSON view that leaves the mask untouched sends it back
- * and the host keeps the stored value. `$ENV:NAME` references are verbatim.
+ * and the host keeps the stored value. `${credential:NAME}` references are verbatim.
  *
  * Every string this page renders comes from the `dsh-app.mcp` namespace
  * through the `t` standard seat: the section registers with `locale: NS`, so
@@ -431,7 +431,9 @@ export function McpSection({ t }: McpSectionProps): ReactNode {
 
   const onToggle = useCallback(async (view: ServerView) => {
     try {
-      await post('/server/update', { ...view, enabled: !view.enabled })
+      // One field, not the whole entry: a full replace from this page's snapshot
+      // would revert whatever changed since the page loaded.
+      await post('/server/enable', { id: view.id, enabled: !view.enabled })
       setNotice(!view.enabled ? { kind: 'enabled', name: view.serverName } : { kind: 'disabled', name: view.serverName })
     } catch {
       // post() already surfaced the error banner.
@@ -602,7 +604,7 @@ export function McpSection({ t }: McpSectionProps): ReactNode {
                           <textarea
                             className="dshMcp-textarea"
                             value={draft.envText}
-                            placeholder={'GITHUB_TOKEN=$ENV:GITHUB_TOKEN'}
+                            placeholder={'GITHUB_TOKEN=${credential:GITHUB_TOKEN}'}
                             disabled={busy}
                             aria-label={t('mcp.field.envAria')}
                             onChange={(event) => { setDraft({ ...draft, envText: event.target.value }) }}
@@ -628,7 +630,7 @@ export function McpSection({ t }: McpSectionProps): ReactNode {
                           <textarea
                             className="dshMcp-textarea"
                             value={draft.headersText}
-                            placeholder={'Authorization=$ENV:MCP_TOKEN'}
+                            placeholder={'Authorization=Bearer ${credential:MCP_TOKEN}'}
                             disabled={busy}
                             aria-label={t('mcp.field.headersAria')}
                             onChange={(event) => { setDraft({ ...draft, headersText: event.target.value }) }}

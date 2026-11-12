@@ -15,6 +15,37 @@
 
 import type { HostText, McpMountStatus, McpServerEntry } from './wire.ts'
 
+/** The reference syntax this line resolves; `$ENV:` is the retired one. */
+const CREDENTIAL_REFERENCE = /\$\{credential:([A-Za-z_][A-Za-z0-9_]*)\}/
+/** The retired reference syntax: stored values may still carry it. */
+const LEGACY_REFERENCE = /^\$ENV:([A-Za-z_][A-Za-z0-9_]*)$/
+
+/**
+ * Warnings for values the manager will not resolve.
+ *
+ * `$ENV:NAME` was this plugin's own syntax before the fleet moved to the kernel
+ * manager, which resolves `${credential:NAME}`. A stored `$ENV:` value is now a
+ * literal handed to the child, so the page has to say so — otherwise the card
+ * reads "mounted" while the server cannot authenticate, which is exactly the
+ * silent failure this warning channel exists for.
+ *
+ * @param entry - the configured entry.
+ * @returns one coded warning per un-resolvable value found.
+ */
+function referenceWarnings(entry: McpServerEntry): readonly HostText[] {
+  const found: HostText[] = []
+  for (const field of ['env', 'headers'] as const) {
+    for (const [key, value] of Object.entries(entry[field] ?? {})) {
+      if (LEGACY_REFERENCE.test(value)) {
+        found.push({ code: 'env.legacyRef', params: { field: `${field}.${key}`, name: value.slice(5) } })
+      } else if (value.includes('${credential:') && !CREDENTIAL_REFERENCE.test(value)) {
+        found.push({ code: 'env.inlineRef', params: { value: value.slice(0, 40) } })
+      }
+    }
+  }
+  return found
+}
+
 /** One managed server as the manager lists it. */
 export interface ManagedServerView {
   readonly name: string
@@ -90,11 +121,15 @@ function toMountStatus(status: unknown): McpMountStatus {
 
 /** Per-entry status over the kernel manager's live view. */
 export class McpFleetStatus {
-  constructor(private readonly fleet: McpFleetLike | undefined) {}
+  /**
+   * @param fleetOf - resolves the manager per call; it may be mounted after this
+   *   plugin activates, or replaced on a reload.
+   */
+  constructor(private readonly fleetOf: () => McpFleetLike | undefined) {}
 
   /** Whether a manager is mounted at all; false degrades the page to read-only. */
   get available(): boolean {
-    return this.fleet !== undefined
+    return this.fleetOf() !== undefined
   }
 
   /**
@@ -107,8 +142,15 @@ export class McpFleetStatus {
    * @returns a lookup over the current fleet; empty when no manager is mounted.
    */
   snapshot(): (entry: McpServerEntry) => McpMountStatus {
-    if (this.fleet === undefined) return () => ({ state: 'unavailable' })
-    const views = new Map(this.fleet.list().map((view) => [view.name, view]))
+    const fleet = this.fleetOf()
+    if (fleet === undefined) return () => ({ state: 'unavailable' })
+    let views: Map<string, ManagedServerView>
+    try {
+      views = new Map(fleet.list().map((view) => [view.name, view]))
+    } catch {
+      // A disposed manager must degrade the page, not throw out of the route.
+      return () => ({ state: 'unavailable' })
+    }
     return (entry) => {
       // An entry this version cannot parse may still be mounted by the manager,
       // so its status is reported before the disabled check: the page must not
@@ -121,7 +163,11 @@ export class McpFleetStatus {
       // is no longer in the row (a removal whose cleanup did not finish): the
       // page must not present it as an ordinary configured server.
       if (!view.configured) return { state: 'error', message: { code: 'mount.retained' } }
-      return toMountStatus(view.status)
+      const status = toMountStatus(view.status)
+      const warnings = referenceWarnings(entry)
+      // A mounted server whose credentials cannot resolve is not healthy: keep
+      // the manager's state, attach what makes it fail.
+      return warnings.length === 0 ? status : { ...status, warnings }
     }
   }
 

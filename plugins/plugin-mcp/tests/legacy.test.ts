@@ -106,7 +106,7 @@ describe('importing', () => {
       const file = join(dir, 'servers.json')
       writeFileSync(file, LEGACY)
       const fake = fakeEditor()
-      const store = new McpStore(fake.editor, true)
+      const store = new McpStore(() => fake.editor, true)
       await importLegacyServers(store, file, () => {})
       const stored = fake.document.servers as Record<string, Record<string, unknown>>
       assert.deepEqual(Object.keys(stored).sort(), ['github', 'web'])
@@ -126,7 +126,7 @@ describe('importing', () => {
       const file = join(dir, 'servers.json')
       writeFileSync(file, LEGACY.replace('"enabled": true', '"enabled": false'))
       const fake = fakeEditor()
-      const store = new McpStore(fake.editor, true)
+      const store = new McpStore(() => fake.editor, true)
       const { lines, log } = logs()
       await importLegacyServers(store, file, log)
       const stored = fake.document.servers as Record<string, Record<string, unknown>>
@@ -145,7 +145,7 @@ describe('importing', () => {
       const file = join(dir, 'servers.json')
       writeFileSync(file, LEGACY)
       const fake = fakeEditor()
-      const store = new McpStore(fake.editor, true)
+      const store = new McpStore(() => fake.editor, true)
       await store.importAll([{ id: 'github', serverName: 'github', transport: 'stdio', enabled: true, command: 'npx' },
         { id: 'web', serverName: 'web', transport: 'streamable-http', enabled: false, url: 'https://x/mcp' }])
       const before = fake.writes()
@@ -166,7 +166,7 @@ describe('importing', () => {
     const dir = scratch()
     try {
       const fake = fakeEditor()
-      const store = new McpStore(fake.editor, true)
+      const store = new McpStore(() => fake.editor, true)
       await importLegacyServers(store, join(dir, 'absent.json'), () => {})
       assert.equal(fake.writes(), 0)
     } finally {

@@ -91,7 +91,7 @@ rc.2 只有 git tag（`dsh-v0.2.2-rc.2`，release 提交 `91319233e1`）与 GitH
 | W10 | P2 | 我们注册的 web provider 补 `title` / `description`（`WebSearchProvider` / `WebFetchProvider` 在 rc.2 新增这两个可选字段，否则内核的 Web search 页面只显示 id） | [x] |
 | W11 | P2 | 文档与注释一致：`plugins/dsh-app.patch.yml` 里 `dsh-deepseek-account-platform`、`dsh-experimental-agent-team-profile`、七技能的说法；`docs/agents/kernel-line-regression.md` §4 的办公载荷判据；`docs/agents/runtime-shape.md` 若提到 office payload 的形状 | [x] |
 | W12 | OPT | 裁决已定：**接受 rc.2 的默认**，Agent Teams 随 base 的 `agent-team` / `tool-agent-team` 与 web-app 的 `ui-agent-team` 开启，overlay 不加 disable 行。理由：跟随上游默认，减少一层要自己维护的否决；`subagent` 池 16 与 swarm 的 12 之间留有 4 个槽位 | [x] |
-| W13 | P0 | 裁决已定：**MCP 归内核管理器**，退役我们自己的那一套 —— 删掉 `$DSH_HOME/storages/dsh-app-plugin-mcp/servers.json` 存储与 `mount.ts` 的动态 `loader.create` 挂载（两套存储、两批 `dsh-mcp-client` 就此消失），页面保留但改成薄壳：读写内核 `mcp-manager` 行的 `config.servers`（仿 `plugins/plugin-websearch/src/index.ts:313` 的 `ctx.configEditor.edit` 写法），列表/重启/探测走 `ctx.get('mcpManager')`。前提约束：rc.2 的 mcp-manager **没有客户端半**（`package.json` 无 `dsh.client`，`packages/client` 下无消费者），整块删除会让应用失去添加 MCP 服务器的入口，所以取「保留页面、换成内核的库」这一落法 | [x] |
+| W13 | P0 | 裁决已定：**MCP 归内核管理器**，退役我们自己的那一套 —— 删掉 `$DSH_HOME/storages/dsh-app-plugin-mcp/servers.json` 存储与 `mount.ts` 的动态 `loader.create` 挂载（两套存储、两批 `dsh-mcp-client` 就此消失），页面保留但改成薄壳：读写内核 `mcp-manager` 行的 `config.servers`（经 `ctx.configEditor.edit`），列表与状态走 `ctx.get('mcpManager').list()`；「重启 / 探测」是内核管理器自己的能力，本页不暴露（见 Deferred）。前提约束：rc.2 的 mcp-manager **没有客户端半**（`package.json` 无 `dsh.client`，`packages/client` 下无消费者），整块删除会让应用失去添加 MCP 服务器的入口，所以取「保留页面、换成内核的库」这一落法 | [x] |
 | W13b | P1 | 数据迁移：既有 `servers.json` 里的条目一次性写进 `mcp-manager` 行的 `config.servers`，`$ENV:NAME` 改成 `${credential:NAME}` 模板；迁移后保留原文件不删（可回滚）。沿用 `plugin-usage` 的一次性导入先例 | [x] |
 | W14 | P1 | 发布面：本轮改动带 `changesets/<name>.md`（`ci.yml` 的 gate 会拒绝），实际改到的插件 bump 版本；换线记录写进 `docs/archive/kernel-line/kernel-0.2.2-rc.2-upgrade.md` | [x] |
 | W15 | P2 | 跟官方命名：swarm 的 child label 改用内核返回的 `activation.name`（rc.2 的 `SubagentActivation` 新增必填 `name`，`startActivation` 的 `name?` 仍可选），不再自己拼序号 | [x] |
@@ -120,7 +120,7 @@ rc.2 只有 git tag（`dsh-v0.2.2-rc.2`，release 提交 `91319233e1`）与 GitH
 | 2 换线 | W2（仅 package.json 的包名改名）, W1, W6, W7 | 两处版本解析都在新线；根 `typecheck` 通过；19 个插件的 import/type/presence/freshness 四道门全过；`check:graph` / `check:suites:gate` / `check:slots` 绿 |
 | 3 办公 | W2（源码与测试）, W3, W4, W5 | `npm run runtime:build` 与 `npm run primary-runtime:build` 成功；真机 `office_to_pdf` 与 `office-docx` 各跑通一次 |
 | 4 界面 | W8, W15 | 真机首页只有一层鲸鱼（我们的层，内核那行已关）；`probe-startup.cjs` 通过；swarm 的 child label 显示内核名字 |
-| 5 MCP | W13, W13b | 页面能增删改/重启/探测；工具仍以 `mcp__<server>__<tool>` 注册且只有一套；迁移后旧 `servers.json` 仍在 |
+| 5 MCP | W13, W13b | 页面能增删改 + 单字段开关；状态来自内核管理器；工具仍以 `mcp__<server>__<tool>` 注册且只有一套；旧文件导入后改名留档 |
 | 6 收尾 | W9, W10, W11, W14 | `npm test` 绿；changesets 片段存在；`npm run verify -- --tgz <新产物>` 通过；四条探针（settings-nav / workbench / routes / startup）结果入 Phase log |
 
 ## Affected behaviors
@@ -185,6 +185,8 @@ node scripts/probe-whale.mjs
 | 项 | 为什么本轮不做 | 何时该回来 |
 |---|---|---|
 | 移植 `@deepseek-ai/dsh-tool-office`（rc.2 新增，未挂到 web-app，无冲突） | 与 `plugin-ppt` / `plugin-pdf` 的边界要单独定，不在换线范围 | 决定 Office 能力归属时 |
+| 拆掉 `scripts/build-runtime.mjs` 的 `stageOfficeSkills`（运行树仍写 4 个技能目录，产品里无人读） | 它会改变 meta 层的内容哈希，需要一个整轮的改动与复验 | 下次动 runtime 分层或技能来源时 |
+| 在设置页暴露内核管理器的 `restart` / `probe` | 本轮只做「归内核 + 页面薄壳」，探测/重启的交互另立 | 用户反馈需要手动重连某个服务器时 |
 | 用内核的 subagent 名字替换 swarm 的 `childLabel` | 已提升为 W15（按官方命名走） | — |
 | `tool-subagent-control` 的 `interrupt: false` 默认（base 行新增） | 我们没覆盖该行，行为随上游走；未观察到与 swarm 的 `interrupt` 冲突 | 出现 swarm 中断行为异常时 |
 | MCP 新能力（凭据模板 `${credential:…}`、`probeServer`、状态单元） | W13b 只做迁移与页面薄壳，不在本轮把探测/重启体验做满 | W13 落地后单独一轮 |
@@ -218,4 +220,4 @@ node scripts/probe-whale.mjs
 | 5 MCP | 2026-11-12 | 真机：建条目 → `mounted` + `toolCount 1`，写落在 `mcp-manager` 行；删除后 patch 干净 | 通过 |
 | 6 收尾 | 2026-11-12 | changesets 5 个；归档记录 §0–§12；`probe-routes --tgz` 32 checks | 通过 |
 | 审查 | 2026-11-12 | 第一轮 8 条 P1（归档 §10）、第二轮 6 条 P1 全部修完并复跑门禁 | 通过 |
-| 待审 | — | 最后一轮 P2（`6f19d09` 之后的探针与 P2 提交）尚未再走一次独立审查 | 未审 |
+| 独立审查 | 2026-11-12 | 原生 reviewer 两路并行（雪洛的 Orca 会话因 429 未能执行）：6 条 P1 / 3 条 P1 全部修完，`npm test` 737/735/0、`verify --tgz` 全过、`probe-routes --tgz` 32 checks、两个 CDP 探针 5/5 与 4/4 | 通过 |

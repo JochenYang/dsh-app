@@ -13,8 +13,11 @@
  * the payload's own manifest and a `node_modules` tree holding the kit, its
  * dependencies and the target's engine. The version is the payload's CONTENT
  * identity (kit version, plus the Python version when a Python set is carried),
- * never the dsh version — that is what makes the engine download once and stay
- * put across kernel updates and rollbacks.
+ * never the dsh version — so a kernel update or a rollback that asks for the same
+ * payload reuses it. A payload version this line does not ask for is PRUNED
+ * (`pruneOtherVersions`), which is what keeps the data directory from growing:
+ * going back to a kernel that wants another payload version means downloading it
+ * again.
  *
  * What guarantees it: the artifact is resolved through the SAME release
  * metadata chain the kernel uses (official host first and fail-closed, proxies

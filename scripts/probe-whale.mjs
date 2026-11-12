@@ -22,7 +22,7 @@
 //   W2 the official canvas exists and is transparent at rest
 //   W3 a blank click makes the official canvas paint, and it clears itself
 //   W4 our layer is unaffected by that click
-import { connect, sleep } from '../scratch/cdp-lib.mjs'
+import { connect, sleep } from './lib/cdp.mjs'
 
 const args = process.argv.slice(2)
 const argOf = (name, fallback) => (args.includes(name) ? args[args.indexOf(name) + 1] : fallback)
@@ -101,7 +101,11 @@ try {
     const playing = JSON.parse(await cdp.evaluate(CENSUS))
     record('W3 a blank click paints the official canvas', (playing.theirs?.painted ?? 0) > 0,
       `${String(playing.theirs?.painted)} px after 1.6 s`)
-    record('W4 our layer is unaffected by the click', Math.abs((playing.ours?.painted ?? 0) - (idle.ours?.painted ?? 0)) < (idle.ours?.painted ?? 1) * 0.1,
+    // Guarded on presence: two absent readings would otherwise satisfy the
+    // tolerance trivially, and the claim is about a layer that is there.
+    const oursIdle = idle.ours?.painted ?? 0
+    const oursPlaying = playing.ours?.painted ?? 0
+    record('W4 our layer is unaffected by the click', oursIdle > 0 && Math.abs(oursPlaying - oursIdle) < oursIdle * 0.1,
       `${String(idle.ours?.painted)} → ${String(playing.ours?.painted)}`)
   }
 } finally {

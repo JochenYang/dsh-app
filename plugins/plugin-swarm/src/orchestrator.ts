@@ -975,6 +975,9 @@ async function runContinuableTask(
         ...typeof code === 'string' ? { failureCode: code } : {},
       },
       ...task.resumeChildId !== undefined ? { childId: task.resumeChildId } : {},
+      // A retried item learned its name before it resumed; keep reporting it
+      // rather than losing the identity on the failure path.
+      ...task.knownName === undefined ? {} : { name: task.knownName },
     }
   }
 }
@@ -1064,6 +1067,8 @@ async function runOneShotTask(
         failureKind: classifyLaunchError(error),
         ...typeof code === 'string' ? { failureCode: code } : {},
       },
+      // The activation may have been created before the failure surfaced.
+      ...activation === undefined ? {} : { name: activation.name },
     }
   } finally {
     if (activation !== undefined) {

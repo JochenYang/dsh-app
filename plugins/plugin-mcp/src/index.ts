@@ -74,19 +74,31 @@ export function apply(ctx: Context, config: Config): void {
   const dir = config.storePath !== '' ? config.storePath : join(resolveDshHome(), 'storages', 'dsh-app-plugin-mcp')
   const legacyFile = join(dir, 'servers.json')
 
-  const editor = ctx.get('configEditor') as ConfigEditorLike | undefined
-  const fleet = ctx.get('mcpManager') as McpFleetLike | undefined
-  const store = new McpStore(editor, config.enabled)
-  const status = new McpFleetStatus(fleet)
+  // Resolved per call, not captured: the editor and the manager are services the
+  // composition may mount after this plugin activates (or replace on a reload),
+  // and a captured `undefined` would leave the page read-only forever while the
+  // kernel mounts the fleet fine.
+  const editorOf = (): ConfigEditorLike | undefined => ctx.get('configEditor') as ConfigEditorLike | undefined
+  const fleetOf = (): McpFleetLike | undefined => ctx.get('mcpManager') as McpFleetLike | undefined
+  const store = new McpStore(editorOf, config.enabled)
+  const status = new McpFleetStatus(fleetOf)
 
+  const editor = editorOf()
   if (editor === undefined) {
     log.warn('mcp: this kernel mounts no config editor; the page is read-only and nothing is imported')
-  } else if (fleet === undefined) {
+  } else if (fleetOf() === undefined) {
     log.warn('mcp: this kernel mounts no mcp-manager; servers configured here cannot be mounted')
   }
 
   ctx.effect(() => {
     if (editor === undefined) return () => undefined
+    // The switch off means "this page is read-only"; importing into the user's
+    // row would be a write they asked us not to make. It runs on the first
+    // enabled start instead.
+    if (!config.enabled) {
+      log.info('mcp: plugin disabled by config; the legacy import waits for an enabled start')
+      return () => undefined
+    }
     void importLegacyServers(store, legacyFile, (message) => {
       if (message.includes('imported')) log.info(message)
       else log.warn(message)

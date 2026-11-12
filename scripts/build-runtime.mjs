@@ -1734,11 +1734,54 @@ async function trimRuntimePayload(runtimeDir, platform, arch) {
  * @param runtimeDir - the runtime tree being assembled (the kernel dir).
  * @returns the absolute stub directory, or null when no provider needs it.
  */
+/**
+ * Packages in the assembled tree that declare the LibreOffice kit.
+ *
+ * The shim exists for whoever resolves the specifier, and a rename is how that
+ * consumer silently disappeared once — so the build asks the manifest instead of
+ * trusting a constant.
+ *
+ * @param modulesDir - the tree's `node_modules` root.
+ * @returns the package names that depend on the kit.
+ */
+function officeKitReachers(modulesDir) {
+  const scope = path.join(modulesDir, '@deepseek-ai')
+  const found = []
+  let entries
+  try {
+    entries = readdirSync(scope, { withFileTypes: true })
+  } catch {
+    return found
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    try {
+      const manifest = JSON.parse(readFileSync(path.join(scope, entry.name, 'package.json'), 'utf8'))
+      const declared = { ...manifest.dependencies, ...manifest.peerDependencies, ...manifest.optionalDependencies }
+      if (Object.hasOwn(declared, DESKTOP_OFFICE_KIT_PACKAGE)) found.push(manifest.name ?? entry.name)
+    } catch {
+      continue
+    }
+  }
+  return found.sort()
+}
+
 async function stageOfficeKitShim(runtimeDir) {
   const modulesDir = path.join(runtimeDir, 'app', 'node_modules')
   const providerDir = path.join(modulesDir, ...DESKTOP_OFFICE_PROVIDER_PACKAGE.split('/'))
   if (!existsSync(path.join(providerDir, 'package.json'))) {
-    console.log(`[build-runtime] no ${DESKTOP_OFFICE_PROVIDER_PACKAGE} in the tree; no kit shim needed`)
+    // A rename is exactly how the capability was lost once: this line used to log
+    // "no kit shim needed", exit 0, and ship a tree where the provider's
+    // `import.meta.resolve('@deepseek-ai/libreoffice-kit')` throws — user-visible
+    // "unavailable", no gate. So the absence is only benign when nothing in the
+    // tree reaches for the kit; when something does, the build fails instead.
+    const reachers = officeKitReachers(modulesDir)
+    if (reachers.length > 0) {
+      throw new Error(`${reachers.join(', ')} resolve(s) ${DESKTOP_OFFICE_KIT_PACKAGE} but no `
+        + `${DESKTOP_OFFICE_PROVIDER_PACKAGE} is in this tree — either the provider was renamed (update `
+        + `DESKTOP_OFFICE_PROVIDER_PACKAGE) or those packages should not be here`)
+    }
+    console.log(`[build-runtime] no ${DESKTOP_OFFICE_PROVIDER_PACKAGE} in the tree and nothing reaches for the kit; no shim needed`)
     return null
   }
   const source = path.join(root, ...OFFICE_KIT_STUB_DIR)

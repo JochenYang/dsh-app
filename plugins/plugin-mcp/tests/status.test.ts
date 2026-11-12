@@ -23,7 +23,7 @@ const ENTRY: McpServerEntry = {
 
 function fleetOf(status: unknown, name = 'github'): McpFleetStatus {
   const views: ManagedServerView[] = [{ name, configured: true, status }]
-  return new McpFleetStatus({ list: () => views })
+  return new McpFleetStatus(() => ({ list: () => views }))
 }
 
 describe('fleet status', () => {
@@ -87,8 +87,19 @@ describe('fleet status', () => {
     assert.equal(status.message?.code, 'entry.invalid')
   })
 
+  it('warns about a value the manager will not resolve', () => {
+    // `$ENV:` was this plugin's own syntax; the manager resolves
+    // `${credential:NAME}`, so a stored `$ENV:` value is a literal now.
+    const withLegacy = { ...ENTRY, env: { TOKEN: '$ENV:GITHUB_TOKEN', OK: '${credential:GH}' } }
+    const status = fleetOf({ state: 'connected', toolCount: 1 }).statusFor(withLegacy)
+    assert.equal(status.state, 'mounted')
+    assert.equal(status.warnings?.length, 1)
+    assert.equal(status.warnings?.[0]?.code, 'env.legacyRef')
+    assert.equal(status.warnings?.[0]?.params?.field, 'env.TOKEN')
+  })
+
   it('reports unavailable when the kernel mounts no manager', () => {
-    const status = new McpFleetStatus(undefined)
+    const status = new McpFleetStatus(() => undefined)
     assert.equal(status.available, false)
     assert.deepEqual(status.statusFor(ENTRY), { state: 'unavailable' })
   })

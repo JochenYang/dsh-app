@@ -317,24 +317,23 @@
 - id: product-analytics
   disabled: true
 
-# The official brand row, switched off here on purpose.
+# The official brand row stays ENABLED (the default), and this note is why — so
+# nobody re-adds a veto out of reflex.
 #
-# Since 0.2.2-rc.2 it registers an occupant for the new `conversation.hero.frame`
-# slot (`PixelWhale`, `packages/client/ui-brand-official/src/client/index.ts:17`)
-# — unconditionally, not behind the `DSH_CLIENT_BUILD_PROFILE === 'official'`
-# guard that its sidebar rows sit behind. Our own whale layer
-# (`plugin-client-ui/src/client/whale-background.ts`) already paints that surface,
-# so on this line the home screen carried TWO whales at once. Measured on a real
-# rc.2 window 2026-11-12: ours at 752×611, opacity 1, fixed; the kernel's at
-# 1224×843, opacity 0.18, absolute; both `z-index: -1`.
+# Since 0.2.2-rc.2 the row registers an occupant for the new
+# `conversation.hero.frame` slot (`PixelWhale`,
+# `packages/client/ui-brand-official/src/client/index.ts:17`), outside the
+# `DSH_CLIENT_BUILD_PROFILE === 'official'` guard its sidebar rows sit behind. In
+# this build the two decorations coexist because they paint different things:
+# our layer (`plugin-client-ui/src/client/whale-background.ts`) draws at rest,
+# while the official canvas is transparent at rest and paints only for the
+# animation a blank-space click starts (`probe-whale.mjs` measures painted
+# pixels, not elements: 0 for theirs at idle, ours > 0).
 #
-# Disabling the whole row costs nothing else: every other seat it declares
-# (`sidebar.brand.mark` / `sidebar.brand.name`) is behind that official-build
-# guard, which a third-party build never sets, so those registrations never ran
-# here either. The row's own module still mounts — the guard is inside its
-# `apply()` — so the disabled row leaves the brand slots empty exactly as before.
-- id: ui-brand-official
-  disabled: false
+# The escape hatch, if the click animation ever fights our layer: `disabled: true`
+# on this row. That costs nothing else — `sidebar.brand.mark` /
+# `sidebar.brand.name` are behind the official-build guard, which a third-party
+# build never sets, so those registrations never run here.
 
 # Session full-text search: override the base/web-app row's openAt from
 # 'never' to 'first-search' (the sqlite handle is created lazily on the first

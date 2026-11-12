@@ -73,7 +73,7 @@ function harness(store: McpStore): Harness {
       return async () => undefined
     },
   }
-  const status = new McpFleetStatus(undefined)
+  const status = new McpFleetStatus(() => undefined)
   const dispose = registerMcpRoutes(fetchRegistry as never, store, status)
 
   const dispatch = async (path: string, method: string, body?: unknown): Promise<Response> => {
@@ -123,12 +123,13 @@ async function envelope(response: Response): Promise<Envelope> {
 const okEnvelope = (response: Response): Promise<Envelope> => envelope(response)
 
 describe('route registration', () => {
-  const harnessed = harness(new McpStore(fakeEditor().editor, true, () => {}))
+  const harnessed = harness(new McpStore(() => fakeEditor().editor, true))
 
-  it('registers the five routes under the Connection prefix, reads GET, writes POST', () => {
+  it('registers the six routes under the Connection prefix, reads GET, writes POST', () => {
     assert.deepEqual(harnessed.routes.map(route => route.path).sort(), [
       `${ROUTE_PREFIX}/server/create`,
       `${ROUTE_PREFIX}/server/delete`,
+      `${ROUTE_PREFIX}/server/enable`,
       `${ROUTE_PREFIX}/server/import`,
       `${ROUTE_PREFIX}/server/update`,
       `${ROUTE_PREFIX}/servers`,
@@ -159,7 +160,7 @@ describe('route behavior', () => {
 
   beforeEach(() => {
     fake = fakeEditor()
-    store = new McpStore(fake.editor, true)
+    store = new McpStore(() => fake.editor, true)
     harnessed = harness(store)
   })
 
@@ -225,6 +226,40 @@ describe('route behavior', () => {
     assert.equal(body.error?.host?.code, 'server.notFound')
   })
 
+  it('POST /server/enable flips only the switch, never the rest of the entry', async () => {
+    await store.create({ serverName: 'github', transport: 'stdio', command: 'npx', args: ['-y'] })
+    // A field another writer changed after this page loaded.
+    ;(fake.servers().github as Record<string, unknown>).command = 'npx-rotated'
+    const response = await harnessed.post(`${ROUTE_PREFIX}/server/enable`, { id: 'github', enabled: false })
+    assert.equal(response.status, 200)
+    const stored = fake.servers().github as Record<string, unknown>
+    assert.equal(stored.enabled, false)
+    // The one-field route is the point: a full replace from the page's snapshot
+    // would have written the stale command back.
+    assert.equal(stored.command, 'npx-rotated')
+  })
+
+  it('answers the coded unreadable-store failure on a write, not a bare 500', async () => {
+    const fake = fakeEditor({ github: { transport: 'stdio', command: 'npx' } })
+    // The row is there but its configuration cannot be read.
+    const blind = { ...fake.editor, configuration: undefined }
+    const blindStore = new McpStore(() => blind as never, true)
+    const blindHarness = harness(blindStore)
+    try {
+      const response = await blindHarness.post(`${ROUTE_PREFIX}/server/create`, {
+        serverName: 'x', transport: 'stdio', command: 'npx',
+      })
+      // A coded rejection (400), not a bare 500: `store.unreadable` is a
+      // McpValidationError, so the write path answers the same envelope the read
+      // path does.
+      assert.equal(response.status, 400)
+      const body = await envelope(response)
+      assert.equal(body.error?.host?.code, 'store.unreadable')
+    } finally {
+      await blindHarness.dispose()
+    }
+  })
+
   it('POST /server/delete removes the entry and answers the remaining list', async () => {
     const created = await store.create({ serverName: 'github', transport: 'stdio', command: 'npx' })
     const response = await harnessed.post(`${ROUTE_PREFIX}/server/delete`, { id: created.id })
@@ -247,7 +282,7 @@ describe('route behavior', () => {
 
   it('answers 409 for every write route while the master switch is off', async () => {
     const readOnly = fakeEditor()
-    const disabledStore = new McpStore(readOnly.editor, false)
+    const disabledStore = new McpStore(() => readOnly.editor, false)
     const disabled = harness(disabledStore)
     try {
       for (const path of ['create', 'update', 'delete', 'import']) {

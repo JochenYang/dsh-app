@@ -742,29 +742,48 @@ export async function preparePrimaryRuntime(dataDir: string | undefined, primary
 async function linkPrimaryRuntime(source: string, leaf: string): Promise<void> {
   const resolved = await realpath(source).catch(() => source)
   const existing = await lstat(leaf).catch(() => undefined)
+  let previous: string | undefined
   if (existing !== undefined) {
     if (existing.isSymbolicLink()) {
-      const current = await realpath(leaf).catch(() => undefined)
-      if (current === resolved) return
-      // Ours (the only writer of this leaf): unlink, never delete through it.
-      await unlink(leaf)
-    } else if (existing.isDirectory() && isShellMadeLeaf(leaf)) {
-      // Only the tree a pre-0.2.2 line built is removed (see isShellMadeLeaf);
-      // a directory the user pointed at, or one carrying a payload's own
+      previous = await realpath(leaf).catch(() => undefined)
+      if (previous === resolved) return
+    } else if (!(existing.isDirectory() && isShellMadeLeaf(leaf))) {
+      // A directory the user pointed at, or one carrying a payload's own
       // runtime.json, is left where it is and this start reports the conflict
-      // rather than destroying it.
-      await rm(leaf, { recursive: true, force: true })
-    } else {
+      // rather than destroying it (see isShellMadeLeaf).
       throw new Error(`dsh host: ${leaf} is a directory this shell did not write; move it aside to let the payload's primary runtime be linked`)
     }
   }
-  // The link is created beside the leaf and swapped in, so a platform that
-  // refuses one (a junction needs reparse support) cannot leave the leaf empty.
+  // Create the new link BESIDE the leaf FIRST: a platform that refuses one (a
+  // junction needs reparse support, and a UNC data directory has none) must not
+  // cost the old link, which is the only thing keeping the previous payload
+  // reachable — the app cannot boot without it.
+  //
+  // The swap is then remove-then-rename rather than rename-over: on Windows a
+  // directory (and a junction IS a directory) cannot be replaced by `rename`
+  // (EPERM, measured), so the old link has to go first. If anything fails after
+  // that point the previous link is recreated before the error propagates, so a
+  // failed update still leaves a bootable install.
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir'
   await mkdir(path.dirname(leaf), { recursive: true })
   const staged = `${leaf}.${process.pid}.tmp`
   await rm(staged, { recursive: true, force: true })
-  await symlink(resolved, staged, process.platform === 'win32' ? 'junction' : 'dir')
-  await rename(staged, leaf)
+  await symlink(resolved, staged, linkType)
+  try {
+    if (existing?.isSymbolicLink()) {
+      await unlink(leaf)
+    } else if (existing?.isDirectory()) {
+      // Only the tree a pre-0.2.2 line built reaches here (isShellMadeLeaf).
+      await rm(leaf, { recursive: true, force: true })
+    }
+    await rename(staged, leaf)
+  } catch (error) {
+    await rm(staged, { recursive: true, force: true })
+    if (previous !== undefined && (await lstat(leaf).catch(() => undefined)) === undefined) {
+      await symlink(previous, leaf, linkType).catch(() => undefined)
+    }
+    throw error
+  }
 }
 
 /**

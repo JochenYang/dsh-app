@@ -151,8 +151,11 @@ function assign(target: RawServer, key: string, value: unknown): void {
 
 function toRawServer(entry: McpServerEntry, previous: RawServer | undefined): RawServer {
   const raw: RawServer = { ...previous }
-  if (previous !== undefined && previous.transport !== entry.transport) {
-    for (const field of ['command', 'args', 'env', 'cwd', 'url', 'headers']) Reflect.deleteProperty(raw, field)
+  // The other transport's fields ALWAYS go, not only on a switch: the manager
+  // refuses an entry that names both, and such an entry stays broken forever if a
+  // save keeps it (the form has no field to clear the foreign one by hand).
+  for (const field of entry.transport === 'stdio' ? ['url', 'headers'] : ['command', 'args', 'env', 'cwd']) {
+    Reflect.deleteProperty(raw, field)
   }
   raw.transport = entry.transport
   raw.enabled = entry.enabled
@@ -186,13 +189,14 @@ export class McpStore {
   readonly filePath = `row "${MANAGER_ROW_ID}" → config.servers`
 
   constructor(
-    private readonly editor: ConfigEditorLike | undefined,
+    /** Resolved per call: the editor may be mounted after activation. */
+    private readonly editorOf: () => ConfigEditorLike | undefined,
     private readonly enabled: boolean,
   ) {}
 
   /** The row this store addresses, or undefined when the composition has none. */
   private row(): ConfigRow | undefined {
-    return this.editor?.entries().find((entry) => entry.options?.id === MANAGER_ROW_ID)
+    return this.editorOf()?.entries().find((entry) => entry.options?.id === MANAGER_ROW_ID)
   }
 
   /**
@@ -204,7 +208,7 @@ export class McpStore {
    * map with this one entry".
    */
   private rawServers(): RawServers {
-    const editor = this.editor
+    const editor = this.editorOf()
     if (editor === undefined) return {}
     const view = editor.configuration?.().find((candidate) => candidate.entry.options?.id === MANAGER_ROW_ID)
     if (view === undefined) {
@@ -244,7 +248,7 @@ export class McpStore {
    * @throws McpValidationError when the row or its configuration is unreadable.
    */
   private async mutate(change: (servers: RawServers, previous: (key: string) => RawServer | undefined) => RawServers | undefined): Promise<void> {
-    const editor = this.editor
+    const editor = this.editorOf()
     const row = this.row()
     if (editor === undefined || row === undefined) {
       throw new McpValidationError('store.unavailable', { row: MANAGER_ROW_ID })
@@ -299,6 +303,24 @@ export class McpStore {
     })
     if (entry === undefined) throw new McpValidationError('store.unreadable', { row: MANAGER_ROW_ID })
     return entry
+  }
+
+  /**
+   * Flip one entry's switch, leaving every other field as the document has it.
+   *
+   * The page's toggle used to post the whole entry it had loaded; a full replace
+   * from a stale snapshot reverts whatever another writer changed in between.
+   *
+   * @param id - the entry key.
+   * @param enabled - the next value.
+   * @throws McpValidationError when the key is not configured.
+   */
+  async setEnabled(id: string, enabled: boolean): Promise<void> {
+    await this.mutate((servers, previous) => {
+      const entry = previous(id)
+      if (entry === undefined) throw new McpValidationError('server.notFound', { id })
+      return { ...servers, [id]: { ...entry, enabled } }
+    })
   }
 
   /**

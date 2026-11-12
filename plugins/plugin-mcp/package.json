@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-mcp",
   "description": "DSH APP MCP settings page: CRUD over the kernel mcp-manager row's config.servers (written through the kernel config editor), status from ctx.mcpManager, and a one-time import of the retired servers.json. It mounts nothing itself: 0.2.2-rc.2's dsh-mcp-manager owns the fleet.",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",

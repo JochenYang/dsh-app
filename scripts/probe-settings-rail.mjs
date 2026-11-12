@@ -16,7 +16,7 @@
 //   S2 every row carries at most ONE native glyph (the rc.1 double-icon bug)
 //   S3 the merged 维护 section is one rail row, not one per tab
 //   S4 in English mode no rail label still holds Han characters
-import { connect, sleep } from '../scratch/cdp-lib.mjs'
+import { connect, sleep } from './lib/cdp.mjs'
 
 const args = process.argv.slice(2)
 const argOf = (name, fallback) => (args.includes(name) ? args[args.indexOf(name) + 1] : fallback)
@@ -95,7 +95,7 @@ try {
     doubled.length === 0 ? '' : JSON.stringify(doubled))
 
   const maintenance = rail.filter((row) => /维护|Maintenance/u.test(row.label))
-  record('S3 the merged maintenance section is one rail row', maintenance.length <= 1,
+  record('S3 the merged maintenance section is exactly one rail row', maintenance.length === 1,
     `${String(maintenance.length)} row(s): ${JSON.stringify(maintenance.map((row) => row.label))}`)
 
   // The Han-leak check only means something in an ENGLISH window, and the window's

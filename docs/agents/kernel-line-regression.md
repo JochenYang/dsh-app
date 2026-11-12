@@ -334,9 +334,13 @@ M1 用**隔离的 `DSH_HOME`** 跑；M2 用同一 home 做二次启动，确认 
   `plugins/` 里**每个名册包**的 `lib/` —— 名册取自 shell 的 `SUITE_PLUGIN_DIRS`，缺失或比 `src` 旧同样
   直接拒绝，并在报错里给出该包的构建命令（`plugin-brand` 走 `tsc`，没有 `build.mjs`）。**端口不再是固定的**：
   0.2.1 起 `dsh-desktop-host` 传 `--port 0`，A2/S2 比对的是 `ready` URL 里的端口，不再有 19387 这个常量；
-  办公载荷的契约也换成了 `<skill>/SKILL.md`（0.2.1 七项，0.2.2-rc.2 起四项），`assertRuntimeTree` 跟着改过；
+  办公载荷的契约也换成了 `<skill>/SKILL.md`（0.2.1 七项，0.2.2-rc.2 起四项）；`assertRuntimeTree` 的技能断言在 rc.2 这轮被**移除**（技能改由内核包的 `assets/` 提供），不是改成四项；
 - 探针运行在 Electron 内，**每个 `spawn` 必须传 `windowsHide: true`**，否则每起一个控制台
   子进程都会在用户桌面上弹窗。
+- **升线后要复跑的两个 CDP 探针**：`scripts/probe-whale.mjs`（首页两层装饰各自画了什么——上游在 rc.2 新增了
+  `conversation.hero.frame` 的占位者）与 `scripts/probe-settings-rail.mjs`（设置栏的行、字形与合并区）。它们不启内核，
+  而是连到 `--remote-debugging-port=9222` 的运行窗口：桌面文档是 `dsh-app://app`，只存在于应用自己的进程里。
+  共用助手是已入库的 `scripts/lib/cdp.mjs`。
 - `probe-settings-nav.cjs` 的「设置入口」有两个形状：直连按钮（`aria-haspopup="dialog"`，仅当
   `settings.launcher` 座位空着）与**账号菜单里的设置项**（0.2.1 起 `ui-settings-account` 占了那个座位，
   `aria-haspopup="menu"`）。只找直连按钮的版本在这一行上每次都会红在“设置对话框没渲染出 navList”。

@@ -231,6 +231,18 @@ function parseArgs(argv) {
  * the old marker rejected every artifact of this line.
  */
 
+/**
+ * What a runtime tree must carry for this probe to boot it.
+ *
+ * Deliberately small: the kernel entry, the Node binary, and the desktop host.
+ * The office skills are NOT here — 0.2.2-rc.2's `skill-office` reads its own
+ * packaged `assets/`, so a missing `runtime/office-skills` is dead weight rather
+ * than a boot failure (requiring it refused every artifact of that line).
+ *
+ * @param dir - the extracted runtime tree.
+ * @param source - what the caller named, for the error message.
+ * @returns the paths the caller needs.
+ */
 function assertRuntimeTree(dir, source) {
   const bin = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   const nodeBin = path.join(dir, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
