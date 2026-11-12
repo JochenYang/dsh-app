@@ -529,8 +529,6 @@ function hostRuntime(): {
   allowLinkedProfile: boolean
   /** Undefined when the host package's version maps to nothing (see hostProfileAnchor). */
   profileAnchor: HostProfileAnchor | undefined
-  /** Office payload to mirror for the web transport (see DshHostOptions). */
-  officeSkillsSource: string
   /** The runtime TREE the host runs from, when there is one (see DshHostOptions.pnpmTree). */
   pnpmTree?: string
   /** Whether the runtime tree is a checkout; the web transport passes it as the profile resolution mode. */
@@ -556,10 +554,6 @@ function hostRuntime(): {
       // The bundled pnpm lives at the TREE's root, beside `node/`, while the
       // host is handed the tree's `app/` directory — see pnpmTree.
       pnpmTree: dir,
-      // The layout the upstream desktop host expects beside its runtime tree. A
-      // released DSH APP runtime carries no office payload yet, so a host line
-      // that needs one fails the start with the path it looked for.
-      officeSkillsSource: path.join(runtimeDir, '..', 'runtime', 'office-skills'),
       checkoutRuntime: false,
     }
   }
@@ -567,9 +561,6 @@ function hostRuntime(): {
   if (checkout === undefined) throw new Error(t('hostFailure.devHostMissing', { checkout: 'DSH_APP_DEV_RUNTIME' }))
   const executable = machineNodeBinary()
   const appDir = path.join(checkout, 'apps', 'desktop-host')
-  // The office skills ship inside the workspace checkout as a package of their
-  // own; the child wants the payload directory beside its primary-runtime slot.
-  const officeSkillsSource = path.join(checkout, 'packages', 'skill', 'skill-office', 'assets')
   if (existsSync(path.join(appDir, 'lib', 'index.js'))) {
     return {
       executable,
@@ -577,7 +568,6 @@ function hostRuntime(): {
       entry: path.join(appDir, 'lib', 'index.js'),
       allowLinkedProfile: true,
       profileAnchor: hostProfileAnchor(hostPackageVersion(appDir)),
-      officeSkillsSource,
       checkoutRuntime: true,
     }
   }
@@ -591,7 +581,6 @@ function hostRuntime(): {
       entry,
       allowLinkedProfile: true,
       profileAnchor: hostProfileAnchor(hostPackageVersion(checkout)),
-      officeSkillsSource,
       checkoutRuntime: true,
     }
   }
