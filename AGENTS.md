@@ -20,7 +20,7 @@ documents below. Read the one your change touches, and when a document and the c
 | [`docs/agents/release-checklist.md`](docs/agents/release-checklist.md) | cutting a release — the order of operations, with the mistakes that each cost one called out |
 | [`docs/agents/environment.md`](docs/agents/environment.md) | an environment variable's meaning, or adding one |
 | [`docs/agents/troubleshooting.md`](docs/agents/troubleshooting.md) | a timeout, an error code or a log line you cannot place |
-| [`docs/agents/kernel-line-regression.md`](docs/agents/kernel-line-regression.md) | a kernel-line move: the pre-flight touchpoint scan, the gates and what each one cannot see, the rendering-side blind spot, the checklist |
+| [`docs/agents/kernel-line-regression.md`](docs/agents/kernel-line-regression.md) | a kernel-line move: the preflight command that runs first, the seven touchpoint scans, the gates and what each one cannot see, the rendering-side blind spot, the checklist |
 | [`docs/agents/profile-supply-chain.md`](docs/agents/profile-supply-chain.md) | a machine's own `dsh` profiles after a kernel-line move |
 | [`docs/plans/`](docs/plans/README.md) | the plans that are still open — each plan's own `- Status:` header carries its state |
 | [`docs/capability-roadmap/`](docs/capability-roadmap/README.md) | whether a capability domain is planned, partly landed, done or stopped |

@@ -16,6 +16,7 @@
 > 复现材料（gitignore 的 scratch 目录，随时可重跑）：`scratch/kernel-0.2.2/`
 > —— `resolved.json`（逐包解析）、`diff.json`（逐包载荷比对）、
 > `resolve.mjs` / `diff.mjs` / `shapes.mjs` / `service-surface.mjs` / `decl-diff.mjs`。
+> （2026-11-12 清理 `scratch/` 时删除；这些能力已并入 `scripts/kernel-preflight.mjs`，复算用 `npm run check:preflight -- --baseline-*`）
 
 ---
 

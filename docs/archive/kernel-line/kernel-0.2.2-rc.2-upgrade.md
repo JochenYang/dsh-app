@@ -6,9 +6,11 @@
 >
 > **证据标记**：`[实测]` = 命令真跑过、有输出；`[静态]` = 读源码或包内容；`[待验证]` = 推断。
 >
-> 复现材料（gitignore）：`scratch/kernel-0.2.2-rc.2/` —— `ourimports.json`（我们 import 的 98 个符号）、
-> `surface.mjs` / `surfaceAll.mjs`（入口导出面）、`declDiff.mjs` / `focus.mjs`（声明差异）、
-> `slots.mjs`（SlotMap 抽取）、`peers.mjs` / `peers2.mjs`（peer 差集）、`check-published.mjs`（发布核查）。
+> **预检**（§7.1 的字段，本轮当时还没有这个脚本，事后补算）：`check:preflight` 对同一次
+> rc.1 → rc.2 的复算结果是 5 个 blocker / 5 条 ADAPT / 14 条 note，逐条对照见 §15。
+> 当时用的临时脚本（`ourimports` / `surface` / `declDiff` / `focus` / `slots` / `peers` /
+> `check-published`，本来在 gitignore 的 `scratch/kernel-0.2.2-rc.2/`）已删除：它们的能力现在在
+> `scripts/kernel-preflight.mjs` 里，复算只需一条命令。
 
 ---
 

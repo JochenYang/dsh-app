@@ -9,6 +9,7 @@
 > 复现材料（gitignore）：`scratch/kernel-0.2.2/` —— `resolved.json`（rc.1 逐包解析）、
 > `diff-rc1.txt`（逐包载荷比对）、`rc1-compat.mjs`（我们 import 的符号在两条线上的声明比对）、
 > `plugin-install-rc1.log`（19 个插件的安装与构建）、`verify-rc1.log`（全部套件与门禁）。
+> （2026-11-12 清理 `scratch/` 时删除；这些能力已并入 `scripts/kernel-preflight.mjs`，复算用 `npm run check:preflight -- --baseline-*`）
 
 ---
 

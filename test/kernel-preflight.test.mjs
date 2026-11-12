@@ -38,7 +38,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -263,4 +263,31 @@ test('the baseline flags are exclusive', () => {
     () => execFileSync(process.execPath, [script, '--baseline-dir', '.', '--baseline-npm', '1.0.0'], { stdio: 'ignore' }),
     /Command failed/u,
   )
+})
+
+test('the line-move process keeps the preflight as its first step', () => {
+  // The documented process is the only thing that makes this command run at the
+  // right moment; a step that quietly drops out of the checklist is a step that
+  // stops happening. Four assertions, each pinned to what the doc actually says:
+  const doc = readFileSync(path.join(repoRoot, 'docs', 'agents', 'kernel-line-regression.md'), 'utf8')
+
+  // 1. both target shapes are named (a checkout before publication, the
+  //    published packages after it)
+  assert.match(doc, /check:preflight -- --npm/u)
+  assert.match(doc, /check:preflight -- --dir/u)
+
+  // 2. the checklist gates on it BEFORE the contact-surface scan
+  const checklist = doc.slice(doc.indexOf('## 9 升线清单'))
+  const preflightAt = checklist.indexOf('check:preflight')
+  const touchpointsAt = checklist.indexOf('check:touchpoints')
+  assert.ok(preflightAt > 0, 'the checklist must name the preflight')
+  assert.ok(touchpointsAt === -1 || preflightAt < touchpointsAt, 'the preflight must come before the touchpoint scan')
+
+  // 3. the round's record has a field for the result
+  assert.match(doc, /`预检`/u)
+
+  // 4. the command exists in the manifest: a doc naming a script nobody wired is
+  //    worse than no doc at all
+  const manifest = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8'))
+  assert.match(manifest.scripts['check:preflight'] ?? '', /kernel-preflight\.mjs/u)
 })
