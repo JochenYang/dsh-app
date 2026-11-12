@@ -20,16 +20,14 @@ const { prepareOfficePayload } = require('../dist/main/desktop-host.js')
 /**
  * The skill directories a payload carries, mirroring
  * `@deepseek-ai/dsh-skill-office`'s `SKILL_NAMES`: 0.2.1 replaced the single
- * `scripts/check_office.py` marker with these per-task skills.
+ * `scripts/check_office.py` marker with these per-task skills, and 0.2.2-rc.2
+ * dropped the three that belonged to the retired conversion API.
  */
 const OFFICE_SKILL_NAMES = [
   'office',
   'office-docx',
   'office-pptx',
   'office-xlsx',
-  'office-render',
-  'office-recalculate',
-  'office-export-pdf',
 ]
 
 /**

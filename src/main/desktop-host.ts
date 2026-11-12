@@ -675,18 +675,17 @@ function webShapeArgs(options: DshHostOptions, primaryRuntime: string): string[]
  * reads `<assetRoot>/<name>/SKILL.md` for each while composing, so a payload
  * missing any of them makes the child throw a few seconds into its start. The
  * list is the payload's whole contract with that package — 0.2.1 replaced the
- * single `scripts/check_office.py` marker with these per-task skills, and a
- * future line that adds or renames one must move this list with it. The build
- * asserts the same set while staging (scripts/build-runtime.mjs).
+ * single `scripts/check_office.py` marker with these per-task skills, and
+ * 0.2.2-rc.2 dropped the three that belonged to the retired conversion API
+ * (`office-render`, `office-recalculate`, `office-export-pdf`); a future line
+ * that adds or renames one must move this list with it. The build asserts the
+ * same set while staging (scripts/build-runtime.mjs).
  */
 const OFFICE_SKILL_NAMES = [
   'office',
   'office-docx',
   'office-pptx',
   'office-xlsx',
-  'office-render',
-  'office-recalculate',
-  'office-export-pdf',
 ] as const
 
 /** The one file every payload skill directory must hold. */

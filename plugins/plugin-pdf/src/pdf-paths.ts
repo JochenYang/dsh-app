@@ -18,7 +18,7 @@ export const PDF_PROJECT_EXTENSION = '.pdf.json'
 export const PDF_FILE_EXTENSION = '.pdf'
 /**
  * Office source extensions the conversion engine accepts — the kit's own set
- * (`OfficeExtension` in `@deepseek-ai/dsh-office-to-pdf`), so a path this
+ * (`OfficeExtension` in `@deepseek-ai/dsh-office-kit`), so a path this
  * plugin accepts is never refused (or, worse, guessed) downstream.
  */
 export const OFFICE_SOURCE_EXTENSIONS: readonly string[] = ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']

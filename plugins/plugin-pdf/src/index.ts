@@ -46,8 +46,8 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the systemPrompt Context merge into scope.
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
-// Type-only: pulls the office provider's Context merge (ctx.officeToPdf) into scope.
-import type {} from '@deepseek-ai/dsh-office-to-pdf'
+// Type-only: pulls the office provider's Context merge (ctx.officeKit) into scope.
+import type {} from '@deepseek-ai/dsh-office-kit'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { checkPdfDocument, loadPdfDocument } from './pdfd/check.ts'
@@ -411,7 +411,7 @@ function registerPdfTools(ctx: Context): () => void {
           overwrite,
           'output_file',
         )
-        const service = ctx.get('officeToPdf')
+        const service = ctx.get('officeKit')
         if (service === undefined) {
           throw new Error(officeComponentDeclared()
             ? '当前内核没有办公文档转换服务（内核未包含该组件）；请更新内核后重试'

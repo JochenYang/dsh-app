@@ -40,17 +40,15 @@ const {
  * The skill directories an office payload carries, mirroring
  * `@deepseek-ai/dsh-skill-office`'s `SKILL_NAMES` and the shell's own
  * OFFICE_SKILL_NAMES. 0.2.1 replaced the single `scripts/check_office.py`
- * marker with these per-task skills, so a fixture that still writes the old
- * marker would pass a payload the real kernel rejects.
+ * marker with these per-task skills, and 0.2.2-rc.2 dropped the three the retired
+ * conversion API owned, so a fixture that still writes them passes a payload the
+ * real kernel no longer asks for.
  */
 const OFFICE_SKILL_NAMES = [
   'office',
   'office-docx',
   'office-pptx',
   'office-xlsx',
-  'office-render',
-  'office-recalculate',
-  'office-export-pdf',
 ]
 
 /**
@@ -144,7 +142,7 @@ if (process.env.FAKE_WEB_CONTRACT === 'refuse') problems.push('unsupported inter
 // <payload>/office-skills) fails this suite instead of the user's boot.
 if (argv[2] !== undefined) {
   const assetRoot = path.join(path.dirname(argv[2]), 'office-skills')
-  const skills = ['office', 'office-docx', 'office-pptx', 'office-xlsx', 'office-render', 'office-recalculate', 'office-export-pdf']
+  const skills = ['office', 'office-docx', 'office-pptx', 'office-xlsx']
   const missing = skills.filter((name) => !fs.existsSync(path.join(assetRoot, name, 'SKILL.md')))
   if (missing.length > 0) {
     problems.push('office skills missing at ' + assetRoot + ': ' + missing.join(', '))

@@ -879,13 +879,11 @@ async function runContinuableTask(
       const started = await ctx.subagents.startActivation({
         provider: options.provider,
         label: childLabel(options.label, task.item),
-        request: {
-          prompt: [{ type: 'text', text: task.prompt }],
-          parent: options.parent,
-          ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
-          ...options.agentPreset !== undefined ? { agentPreset: options.agentPreset } : {},
-          ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
-        },
+        prompt: [{ type: 'text', text: task.prompt }],
+        parent: options.parent,
+        ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
+        ...options.agentPreset !== undefined ? { agentPreset: options.agentPreset } : {},
+        ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
         signal: options.signal,
         // Parent delivery, unchanged from the pre-0.2.1 continuable shape: the
         // kernel injects each child's settlement message into the delegating
@@ -982,13 +980,11 @@ async function runOneShotTask(
     activation = await ctx.subagents.startActivation({
       provider: options.provider,
       label: childLabel(options.label, task.item),
-      request: {
-        prompt: [{ type: 'text', text: task.prompt }],
-        parent: options.parent,
-        ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
-        ...options.agentPreset !== undefined ? { agentPreset: options.agentPreset } : {},
-        ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
-      },
+      prompt: [{ type: 'text', text: task.prompt }],
+      parent: options.parent,
+      ...options.agentOptions !== undefined ? { agentOptions: options.agentOptions } : {},
+      ...options.agentPreset !== undefined ? { agentPreset: options.agentPreset } : {},
+      ...options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {},
       signal: options.signal,
       // One-shot children report to this tool only: their text is the item's
       // output, and the batch aggregate is the one result the model receives.

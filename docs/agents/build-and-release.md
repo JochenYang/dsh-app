@@ -24,10 +24,11 @@ pinned `@deepseek-ai/dsh-web-frontend` (`latest` lags), the private
 `<kernelDir>/runtime/office-skills` — the host composes `skill-office` with that
 asset root and the package reads `<assetRoot>/<skill>/SKILL.md` for every skill
 it registers, so a partial payload is as fatal as a missing host (meta layer).
-The skill set is the payload's contract with the kernel line: seven directories
-on 0.2.1 (`office`, `office-docx`, `office-pptx`, `office-xlsx`, `office-render`,
-`office-recalculate`, `office-export-pdf`), asserted by `stageOfficeSkills` at
-build time and by the shell (`OFFICE_SKILL_NAMES`) before every start.
+The skill set is the payload's contract with the kernel line: four directories
+on 0.2.2-rc.2 (`office`, `office-docx`, `office-pptx`, `office-xlsx`; 0.2.1 also
+carried `office-render`, `office-recalculate` and `office-export-pdf`, which the
+replacement of the conversion provider retired), asserted by `stageOfficeSkills`
+at build time and by the shell (`OFFICE_SKILL_NAMES`) before every start.
 
 The runtime also carries **pnpm** at `<kernelDir>/runtime/pnpm` (`stagePnpm`),
 pinned by `scripts/primary-runtime-lock.json` — the same pin the office payload

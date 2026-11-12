@@ -55,7 +55,7 @@ interface FakeHost {
   sections: FakeSection[]
 }
 
-/** One `officeToPdf.render` call, captured for assertions. */
+/** One `officeKit.render` call, captured for assertions. */
 interface FakeRenderCall {
   scope: { sessionId: string, workspaceRoot: string }
   path: string
@@ -81,7 +81,7 @@ async function mountHost(office?: FakeOfficeService): Promise<FakeHost> {
   const sections: FakeSection[] = []
   const services = new Map<string, unknown>()
   if (office !== undefined) {
-    services.set('officeToPdf', {
+    services.set('officeKit', {
       async render(
         scope: FakeRenderCall['scope'], path: string, priority: string, signal: AbortSignal,
       ): Promise<{ data: Uint8Array, missingFonts: string[] }> {

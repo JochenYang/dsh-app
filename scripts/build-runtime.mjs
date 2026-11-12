@@ -632,7 +632,7 @@ const OFFICE_KIT_STUB_DIR = ['scripts', 'runtime-stubs', 'libreoffice-kit']
  * at `<kernelDir>/runtime/office-skills` — a path nothing else in the runtime
  * occupies, because the kernel tree itself is `<kernelDir>/app`.
  *
- * These are the seven skill directories (one SKILL.md each, plus their
+ * These are the four skill directories (one SKILL.md each, plus their
  * references), not the conversion engine: the engine is the separate payload
  * artifact. The name list is the payload's contract with
  * @deepseek-ai/dsh-skill-office's `SKILL_NAMES`, and the shell validates the
@@ -647,9 +647,6 @@ const OFFICE_SKILL_NAMES = [
   'office-docx',
   'office-pptx',
   'office-xlsx',
-  'office-render',
-  'office-recalculate',
-  'office-export-pdf',
 ]
 
 /** Which of {@link OFFICE_SKILL_NAMES} a directory is missing. */
