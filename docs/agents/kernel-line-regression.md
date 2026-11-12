@@ -207,7 +207,7 @@ npm run check:plugins -- --kernel <新 runtime.tgz> --home <真实 DSH_HOME>
 | 项 | 检查方式 |
 |---|---|
 | 私有宿主包被正确构建进 runtime | `tar -tzf <runtime>.tgz \| grep dsh-desktop-host`，应含 `lib/index.js`。该包从不发布，由 `scripts/build-runtime.mjs` 从检出构建 |
-| 办公载荷随 runtime 打包 | 同上，应含 `runtime/office-skills/<skill>/SKILL.md`；**0.2.2-rc.2 起是四项**（`office` / `office-docx` / `office-pptx` / `office-xlsx`），另外三项随转换提供方的退出被删。技能的实际来源已改到 `@deepseek-ai/dsh-skill-office` 包内自带的 `assets/`，外壳不再把技能复制到用户数据目录；`runtime/office-skills` 目前仍被构建阶段写出，但已无消费者（见 `docs/plans/kernel-0.2.2-rc.2-upgrade.md` 的 Deferred） |
+| 办公载荷随 runtime 打包 | 同上，应含 `runtime/office-skills/<skill>/SKILL.md`；**0.2.2-rc.2 起是四项**（`office` / `office-docx` / `office-pptx` / `office-xlsx`），另外三项随转换提供方的退出被删。技能的实际来源已改到 `@deepseek-ai/dsh-skill-office` 包内自带的 `assets/`，外壳不再把技能复制到用户数据目录；`runtime/office-skills` 目前仍被构建阶段写出，但产品里已无消费者（`probe-routes` 也停止断言它了）（见 `docs/plans/kernel-0.2.2-rc.2-upgrade.md` 的 Deferred） |
 | 宿主传输分支未被切换 | 真机日志确认 `web transport`；出现 frames 分支说明走到了另一条协议路径 |
 | 客户端存储按线清理 | 换线后 `src/main/client-state.ts` 应报 `cleared`（客户端状态属于写它的那条线） |
 | overlay 行 id 是否还有目标 | 组合树里逐行确认；行 id 会在 bundle 层之间移动，override 因此可能失去目标 |

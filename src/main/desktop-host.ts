@@ -65,7 +65,7 @@ import { protocol } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync, readFileSync } from 'node:fs'
-import { lstat, mkdir, realpath, rm, symlink, unlink } from 'node:fs/promises'
+import { lstat, mkdir, realpath, rename, rm, symlink, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import semver from 'semver'
@@ -748,14 +748,40 @@ async function linkPrimaryRuntime(source: string, leaf: string): Promise<void> {
       if (current === resolved) return
       // Ours (the only writer of this leaf): unlink, never delete through it.
       await unlink(leaf)
-    } else {
-      // A real tree from an earlier layout — the async rm does not descend into
-      // links, which matters if this directory ever held one.
+    } else if (existing.isDirectory() && isShellMadeLeaf(leaf)) {
+      // Only the tree a pre-0.2.2 line built is removed (see isShellMadeLeaf);
+      // a directory the user pointed at, or one carrying a payload's own
+      // runtime.json, is left where it is and this start reports the conflict
+      // rather than destroying it.
       await rm(leaf, { recursive: true, force: true })
+    } else {
+      throw new Error(`dsh host: ${leaf} is a directory this shell did not write; move it aside to let the payload's primary runtime be linked`)
     }
   }
+  // The link is created beside the leaf and swapped in, so a platform that
+  // refuses one (a junction needs reparse support) cannot leave the leaf empty.
   await mkdir(path.dirname(leaf), { recursive: true })
-  await symlink(resolved, leaf, process.platform === 'win32' ? 'junction' : 'dir')
+  const staged = `${leaf}.${process.pid}.tmp`
+  await rm(staged, { recursive: true, force: true })
+  await symlink(resolved, staged, process.platform === 'win32' ? 'junction' : 'dir')
+  await rename(staged, leaf)
+}
+
+/**
+ * Whether a real directory at the leaf is the one this shell built.
+ *
+ * Two shapes are ours: the link (handled by the caller) and the tree a
+ * pre-0.2.2 line materialised — it holds `dependencies/node/bin/<node>` and no
+ * `runtime.json`, because that line carried no Python set. A directory holding
+ * `runtime.json` is either a payload or something the user named; deleting it
+ * would be data loss, so both link and clear refuse.
+ *
+ * @param leaf - the primary-runtime path.
+ * @returns true when the shell itself may delete it.
+ */
+function isShellMadeLeaf(leaf: string): boolean {
+  if (!existsSync(path.join(leaf, ...INTERPRETER_LEAF_SEGMENTS))) return false
+  return !existsSync(path.join(leaf, 'runtime.json'))
 }
 
 /**
@@ -778,9 +804,7 @@ async function clearPrimaryRuntimeLink(leaf: string): Promise<void> {
     await unlink(leaf)
     return
   }
-  if (!existing.isDirectory()) return
-  const interpreter = path.join(leaf, ...INTERPRETER_LEAF_SEGMENTS)
-  if (!existsSync(interpreter) || existsSync(path.join(leaf, 'runtime.json'))) return
+  if (!existing.isDirectory() || !isShellMadeLeaf(leaf)) return
   await rm(leaf, { recursive: true, force: true })
 }
 

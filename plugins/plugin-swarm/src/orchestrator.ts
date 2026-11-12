@@ -198,6 +198,12 @@ export interface SwarmTask {
   readonly prompt: string
   /** Present when this task continues a prior child instead of starting a fresh one. */
   readonly resumeChildId?: string
+  /**
+   * The child's kernel name, when an earlier attempt of THIS item learned it.
+   * A retry re-enters as a resume (which returns no name), so without this the
+   * retried item would settle with `childId` but no `name`.
+   */
+  readonly knownName?: string
 }
 
 /** Scheduling and delegation parameters for one batch. */
@@ -882,6 +888,7 @@ async function runContinuableTask(
         { signal: options.signal },
       )
       childId = task.resumeChildId
+      childName = task.knownName
       usageBaseline = childUsageTotals(ctx, liveChildSession(ctx, childId))
     } else {
       const started = await ctx.subagents.startActivation({
@@ -1019,7 +1026,13 @@ async function runOneShotTask(
     const session = liveChildSession(ctx, String(activation.childId))
     const usage = childUsage(ctx, session, undefined)
     const durationMs = Date.now() - startedAt
-    const metrics = { durationMs, name: activation.name, ...usage === undefined ? {} : { usage } }
+    // Guarded: a provider that answers no name must not put `undefined` into the
+    // tool value — the kernel's lossless snapshot rejects the whole batch for it.
+    const metrics = {
+      durationMs,
+      ...activation.name === undefined ? {} : { name: activation.name },
+      ...usage === undefined ? {} : { usage },
+    }
     if (result.stopReason === 'completed') {
       return { index: task.index, item: task.item, status: 'completed', ...metrics, output: truncate(textOf(result.output), options.outputLimit) }
     }
@@ -1310,7 +1323,7 @@ export async function runSwarmBatch(ctx: Context, options: SwarmBatchOptions): P
         && !budgetStop
       if (retryable) {
         retryQueue.push({
-          task: { ...task, resumeChildId: outcome.childId!, prompt: RETRY_PROMPT },
+          task: { ...task, resumeChildId: outcome.childId!, knownName: outcome.name, prompt: RETRY_PROMPT },
           retries: retries + 1,
           notBefore: Date.now() + retryDelayMs * 2 ** retries,
         })

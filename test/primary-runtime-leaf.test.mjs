@@ -104,20 +104,6 @@ test('a real directory a shell did not write is left alone', async () => {
   assert.ok(existsSync(path.join(leaf, 'foreign.txt')), 'a foreign directory survives')
 })
 
-test('a foreign directory is replaced by the payload link when one is named', async () => {
-  const dataDir = scratchDir('dsh-web-data-')
-  const leaf = leafOf(dataDir)
-  mkdirSync(path.join(leaf, 'dependencies'), { recursive: true })
-  writeFileSync(path.join(leaf, 'dependencies', 'stale.txt'), 'from an older layout\n')
-
-  // The rc.1 layout left a real tree here with the interpreter inside it. A
-  // payload's set replaces it wholesale rather than being merged into it.
-  const set = payload()
-  const answered = await preparePrimaryRuntime(dataDir, set)
-  assert.equal(lstatSync(answered).isSymbolicLink(), true)
-  assert.equal(existsSync(path.join(answered, 'dependencies', 'stale.txt')), false)
-})
-
 test('a data directory the shell cannot answer is refused', async () => {
   await assert.rejects(
     () => preparePrimaryRuntime(undefined, payload()),
@@ -168,4 +154,33 @@ test('a payload-shaped tree at the leaf is never removed', async () => {
 
   await preparePrimaryRuntime(dataDir, undefined)
   assert.ok(existsSync(path.join(leaf, 'runtime.json')), 'a payload-shaped tree survives')
+})
+
+test('the tree a pre-0.2.2 line built is replaced by the payload link', async () => {
+  const dataDir = scratchDir('dsh-web-data-')
+  const leaf = leafOf(dataDir)
+  // That line's shape: the interpreter it statSync'd, and no runtime.json.
+  const interpreter = path.join(leaf, 'dependencies', 'node', 'bin', process.platform === 'win32' ? 'node.exe' : 'node')
+  mkdirSync(path.dirname(interpreter), { recursive: true })
+  writeFileSync(interpreter, 'stale')
+
+  const set = payload()
+  const answered = await preparePrimaryRuntime(dataDir, set)
+  assert.equal(lstatSync(answered).isSymbolicLink(), true)
+  assert.equal(existsSync(path.join(answered, 'dependencies', 'node')), false)
+})
+
+test('a payload-shaped directory at the leaf is refused by a link, not deleted', async () => {
+  const dataDir = scratchDir('dsh-web-data-')
+  const leaf = leafOf(dataDir)
+  // A real tree carrying runtime.json: a payload, or something a user named.
+  mkdirSync(leaf, { recursive: true })
+  writeFileSync(path.join(leaf, 'runtime.json'), '{"components":{"python":"3.12"}}')
+  writeFileSync(path.join(leaf, 'user.txt'), 'keep me\n')
+
+  await assert.rejects(
+    () => preparePrimaryRuntime(dataDir, payload()),
+    /this shell did not write/u,
+  )
+  assert.ok(existsSync(path.join(leaf, 'user.txt')), 'the directory and its contents survive')
 })

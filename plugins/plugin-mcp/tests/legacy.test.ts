@@ -139,7 +139,7 @@ describe('importing', () => {
     }
   })
 
-  it('leaves the file in place when the row already holds every key', async () => {
+  it('retires the file when the row already holds every key, so a later delete stays deleted', async () => {
     const dir = scratch()
     try {
       const file = join(dir, 'servers.json')
@@ -151,7 +151,12 @@ describe('importing', () => {
       const before = fake.writes()
       await importLegacyServers(store, file, () => {})
       assert.equal(fake.writes(), before, 'no write when nothing is missing')
-      assert.equal(existsSync(file), true, 'the source is left for the next version to inspect')
+      // Retired even without a write: the import runs before the page exists, so
+      // a file left behind re-creates a server the user deletes from the page.
+      assert.equal(existsSync(file), false, 'the source is retired')
+      await store.remove('github')
+      await importLegacyServers(store, `${file}`, () => {})
+      assert.equal(Object.hasOwn(fake.document.servers as object, 'github'), false, 'a deleted server stays deleted')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

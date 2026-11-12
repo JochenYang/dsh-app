@@ -120,21 +120,15 @@ function projectEntry(key: string, raw: RawServer): McpServerEntry {
   try {
     return validateEntry(base, new Set())
   } catch (error) {
-    const invalid: HostText = {
-      code: 'entry.invalid',
-      ...(error instanceof McpValidationError ? { params: { reason: error.code } } : {}),
-      text: error instanceof Error ? error.message : String(error),
-    }
-    return {
-      id: key,
-      serverName: key,
-      transport,
-      enabled: raw.enabled !== false,
-      ...asString(raw.command) === undefined ? {} : { command: asString(raw.command) },
-      ...asString(raw.url) === undefined ? {} : { url: asString(raw.url) },
-      ...typeof raw.toolCallTimeoutMs === 'number' ? { toolCallTimeoutMs: raw.toolCallTimeoutMs } : {},
-      invalid,
-    }
+    // The reason carries the validator's own code, so the client's existing
+    // dictionary renders it instead of showing an English diagnostic.
+    const invalid: HostText = error instanceof McpValidationError
+      ? error.hostText()
+      : { code: 'entry.invalid', text: error instanceof Error ? error.message : String(error) }
+    // The WHOLE raw entry, not a hand-picked subset: the fields that made it
+    // invalid are exactly the ones the form has to show so the user can fix
+    // them. An allowlist here is the same mistake as rebuilding on write.
+    return { ...raw, id: key, serverName: key, transport, enabled: raw.enabled !== false, invalid }
   }
 }
 
@@ -150,6 +144,11 @@ function projectEntry(key: string, raw: RawServer): McpServerEntry {
  * @param previous - its raw form before this write, when it had one.
  * @returns the raw config object.
  */
+function assign(target: RawServer, key: string, value: unknown): void {
+  if (value === undefined) Reflect.deleteProperty(target, key)
+  else target[key] = value
+}
+
 function toRawServer(entry: McpServerEntry, previous: RawServer | undefined): RawServer {
   const raw: RawServer = { ...previous }
   if (previous !== undefined && previous.transport !== entry.transport) {
@@ -157,16 +156,19 @@ function toRawServer(entry: McpServerEntry, previous: RawServer | undefined): Ra
   }
   raw.transport = entry.transport
   raw.enabled = entry.enabled
+  // Modelled fields are AUTHORITATIVE: an absent value means the user cleared
+  // it, so it is deleted rather than left over. Keeping the old value here would
+  // make "delete the env line and save" silently keep sending the credential.
   if (entry.transport === 'stdio') {
-    if (entry.command !== undefined) raw.command = entry.command
-    if (entry.args !== undefined) raw.args = [...entry.args]
-    if (entry.env !== undefined) raw.env = { ...entry.env }
-    if (entry.cwd !== undefined) raw.cwd = entry.cwd
+    assign(raw, 'command', entry.command)
+    assign(raw, 'args', entry.args === undefined ? undefined : [...entry.args])
+    assign(raw, 'env', entry.env === undefined ? undefined : { ...entry.env })
+    assign(raw, 'cwd', entry.cwd)
   } else {
-    if (entry.url !== undefined) raw.url = entry.url
-    if (entry.headers !== undefined) raw.headers = { ...entry.headers }
+    assign(raw, 'url', entry.url)
+    assign(raw, 'headers', entry.headers === undefined ? undefined : { ...entry.headers })
   }
-  if (entry.toolCallTimeoutMs !== undefined) raw.toolCallTimeoutMs = entry.toolCallTimeoutMs
+  assign(raw, 'toolCallTimeoutMs', entry.toolCallTimeoutMs)
   return raw
 }
 
@@ -209,9 +211,15 @@ export class McpStore {
    */
   private rawServers(): RawServers {
     const editor = this.editor
-    if (editor?.configuration === undefined) return {}
-    const view = editor.configuration().find((candidate) => candidate.entry.options?.id === MANAGER_ROW_ID)
-    return view === undefined ? {} : serversOf(view)
+    if (editor === undefined) return {}
+    const view = editor.configuration?.().find((candidate) => candidate.entry.options?.id === MANAGER_ROW_ID)
+    if (view === undefined) {
+      // The row exists but its configuration cannot be read. Answering `{}` here
+      // would report an empty fleet for a manager that is mounting servers, and
+      // the delete path would then answer "deleted" without writing anything.
+      throw new McpValidationError('store.unreadable', { row: MANAGER_ROW_ID })
+    }
+    return serversOf(view)
   }
 
   /**
@@ -272,18 +280,30 @@ export class McpStore {
     return entry
   }
 
-  /** Validate + replace the entry stored under one key. */
-  async update(id: string, raw: unknown): Promise<McpServerEntry> {
+  /**
+   * Validate + replace the entry stored under one key.
+   *
+   * @param id - the entry's key.
+   * @param raw - the incoming entry.
+   * @param withLive - optional last step over the stored entry AS IT IS NOW;
+   *   the settings route uses it to put the values behind a mask sentinel back,
+   *   so a secret rotated by another writer is not overwritten with the older
+   *   value the page happened to be showing.
+   */
+  async update(id: string, raw: unknown, withLive?: (live: RawServer | undefined) => unknown): Promise<McpServerEntry> {
     const draft = isRecord(raw) ? raw : {}
     const requested = asString(draft.serverName) ?? id
     // The key is the identity: a rename here would move the tool namespace out
     // from under a model that was told the old one, so it is refused instead.
     if (requested !== id) throw new McpValidationError('serverName.immutable', { from: id, to: requested })
-    const entry = validateEntry({ ...draft, id, serverName: id }, new Set())
+    let entry: McpServerEntry | undefined
     await this.mutate((servers, previous) => {
       if (!Object.hasOwn(servers, id)) throw new McpValidationError('server.notFound', { id })
+      const body = withLive === undefined ? draft : withLive(previous(id))
+      entry = validateEntry({ ...(isRecord(body) ? body : {}), id, serverName: id }, new Set())
       return { ...servers, [id]: toRawServer(entry, previous(id)) }
     })
+    if (entry === undefined) throw new McpValidationError('store.unreadable', { row: MANAGER_ROW_ID })
     return entry
   }
 

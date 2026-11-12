@@ -87,7 +87,11 @@ describe('reading', () => {
     // row would make the page under-report a running fleet with no way to act.
     assert.deepEqual(names, ['broken', 'good'])
     const broken = store.load().servers.find((entry) => entry.serverName === 'broken')
-    assert.equal(broken?.invalid?.code, 'entry.invalid')
+    // The marker carries the validator's own code, so the client's existing copy
+    // renders it instead of an English diagnostic.
+    assert.equal(broken?.invalid?.code, 'stdio.commandRequired')
+    // And the whole raw entry is projected, so the form can show what is wrong.
+    assert.deepEqual((broken as unknown as { env?: unknown }).env, undefined)
   })
 
   it('is unavailable rather than throwing when the kernel mounts no editor', () => {
@@ -110,6 +114,42 @@ describe('writing', () => {
     const store = new McpStore(fake.editor, true, () => {})
     await store.create({ serverName: 'c', transport: 'stdio', command: 'c' })
     assert.deepEqual(Object.keys(fake.document.servers as object).sort(), ['a', 'b', 'c'])
+  })
+
+  it('removes a modelled field the user cleared instead of keeping the old value', async () => {
+    const fake = fakeEditor({ gh: { transport: 'stdio', command: 'npx', env: { TOKEN: 'secret' }, args: ['-y'] } })
+    const store = new McpStore(fake.editor, true, () => {})
+    // The form sends no `env`/`args` when the user emptied them.
+    await store.update('gh', { serverName: 'gh', transport: 'stdio', command: 'npx' })
+    const stored = fake.document.servers as Record<string, Record<string, unknown>>
+    assert.equal(stored.gh?.env, undefined, 'a cleared credential must stop being passed to the child')
+    assert.equal(stored.gh?.args, undefined)
+  })
+
+  it('resolves a callback against the entry as it is at write time', async () => {
+    const fake = fakeEditor({ gh: { transport: 'stdio', command: 'npx', env: { TOKEN: 'old' } } })
+    const original = fake.editor.edit
+    fake.editor.edit = async (entry, change) => {
+      ;((fake.document.servers as Record<string, Record<string, unknown>>).gh!.env as Record<string, string>).TOKEN = 'rotated'
+      return original(entry, change)
+    }
+    const store = new McpStore(fake.editor, true, () => {})
+    let sawToken: unknown
+    await store.update('gh', { serverName: 'gh', transport: 'stdio', command: 'npx' }, (live) => {
+      sawToken = (live?.env as Record<string, string> | undefined)?.TOKEN
+      return { serverName: 'gh', transport: 'stdio', command: 'npx' }
+    })
+    // The route's mask resolution runs through this hook, so this is what stops
+    // a stale page from writing the older secret back over a rotated one.
+    assert.equal(sawToken, 'rotated')
+  })
+
+  it('refuses to read a row whose configuration cannot be read, instead of reporting an empty fleet', async () => {
+    const fake = fakeEditor({ a: { transport: 'stdio', command: 'a' } })
+    const blind = { ...fake.editor, configuration: undefined }
+    const store = new McpStore(blind as never, true, () => {})
+    assert.throws(() => store.load(), (error: unknown) => error instanceof McpValidationError && error.code === 'store.unreadable')
+    await assert.rejects(() => store.remove('a'), (error: unknown) => error instanceof McpValidationError && error.code === 'store.unreadable')
   })
 
   it('keeps fields this version does not model when an entry is edited', async () => {

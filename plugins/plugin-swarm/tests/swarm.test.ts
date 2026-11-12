@@ -1230,13 +1230,16 @@ test('renderBatchBounded: the byte budget is hard, whatever the shape of the bat
  * validated against the schema the tool declares.
  */
 test('the tool output schema accepts every field a real batch item carries', async () => {
-  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools')
+  const { valueSchemaSpecToJsonSchema, validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools')
   const { SWARM_ITEM_SCHEMA } = await import('../src/index.ts')
+  // The compiled form, not the author spec: `required: true` per property is
+  // only understood here, and this is the shape the kernel validates against.
+  const compiled = valueSchemaSpecToJsonSchema(SWARM_ITEM_SCHEMA as never)
   const ctx = mockOneShotCtx({ alpha: { stopReason: 'completed', text: 'alpha done' } })
   const outcome = await runSwarmBatch(ctx, { ...baseOptions(), tasks: tasksOf('alpha') })
   assert.equal(outcome.items.length, 1)
   // The item really carries the kernel name here, so the schema is exercised.
   assert.equal(outcome.items[0].name, 'alpha')
-  const problems = validateJsonSchemaValue(SWARM_ITEM_SCHEMA as never, outcome.items[0])
+  const problems = validateJsonSchemaValue(compiled as never, outcome.items[0])
   assert.deepEqual(problems, [])
 })

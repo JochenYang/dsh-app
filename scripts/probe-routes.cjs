@@ -69,9 +69,8 @@
  *     (the profile manifest), `prepareBrandSuite` (the `@dsh-app` links into both
  *     scopes) and `installSuiteLayer` (the layer package, from the SHIPPED
  *     overlay `dist/main/dsh-app.patch.yml`),
- *   - the office payload the web transport cannot boot without, materialized the
- *     way `prepareOfficePayload` does (a copy of `office-skills` beside the
- *     `primary-runtime` leaf, with the runtime's own Node placed inside it).
+ *   - the primary-runtime path the web transport is handed (`preparePrimaryRuntime`:
+ *     the leaf is named, nothing is materialized under it).
  *
  * What it deliberately does NOT reproduce (stated so the reading is not
  * over-claimed): the Electron shell around the child. No window, no
@@ -231,34 +230,20 @@ function parseArgs(argv) {
  * single `scripts/check_office.py` marker no longer exists anywhere. Asserting
  * the old marker rejected every artifact of this line.
  */
-function officeSkillNames() {
-  // Parsed from the build script rather than copied here: this probe used to be
-  // the third copy of the list, and it kept requiring three directories the
-  // 0.2.2-rc.2 line removed — the probe then refused every artifact of the line
-  // with a message blaming the artifact. A grep of a literal would only prove
-  // this file contains what was typed; the contract belongs to build-runtime.mjs
-  // (itself mirroring `@deepseek-ai/dsh-skill-office`'s SKILL_NAMES).
-  const source = fs.readFileSync(path.join(__dirname, 'build-runtime.mjs'), 'utf8')
-  const block = /const OFFICE_SKILL_NAMES = \[([\s\S]*?)\n\]/u.exec(source)
-  if (block === null) throw new Error('scripts/build-runtime.mjs no longer declares OFFICE_SKILL_NAMES')
-  const names = [...block[1].matchAll(/'([a-z-]+)'/gu)].map((match) => match[1])
-  if (names.length === 0) throw new Error('OFFICE_SKILL_NAMES parsed empty from scripts/build-runtime.mjs')
-  return names
-}
 
 function assertRuntimeTree(dir, source) {
   const bin = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   const nodeBin = path.join(dir, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
   const hostEntry = path.join(dir, 'app', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js')
-  const officeSkills = path.join(dir, 'runtime', 'office-skills')
   for (const file of [bin, nodeBin, hostEntry]) {
     if (!fs.existsSync(file)) throw new Error(`${source} is not a runtime tree: ${file} is missing`)
   }
-  for (const name of officeSkillNames()) {
-    const skill = path.join(officeSkills, name, 'SKILL.md')
-    if (!fs.existsSync(skill)) throw new Error(`${source} is not a runtime tree: ${skill} is missing`)
-  }
-  return { nodeBin, bin, hostEntry, officeSkills }
+  // No skill-directory assertion: since 0.2.2-rc.2 `dsh-skill-office` serves its
+  // own packaged `assets/`, nothing in the product reads
+  // `<tree>/runtime/office-skills`, and requiring it here made this probe refuse
+  // every artifact of the line. Asserting the build's own list would only make
+  // the build and the probe wrong in the same direction.
+  return { nodeBin, bin, hostEntry }
 }
 
 /**
@@ -540,21 +525,13 @@ async function prepareHome(tree, treeFiles) {
     .map((fixture) => `- insert:\n    - id: ${fixture.dirName}\n      name: '${fixture.packageName}'\n`)
     .join('\n'))
 
-  // The office payload: `prepareOfficePayload` copies the skills beside the fixed
-  // `primary-runtime` leaf and puts the child's own Node inside that leaf
-  // (`dependencies/node/bin/node.exe`), because the host's office plugin stats
-  // both on every start.
-  const skillsTarget = path.join(officeRoot, 'office-skills')
+  // The primary-runtime path, answered the way `preparePrimaryRuntime` does on
+  // 0.2.2-rc.2: the leaf is named and NOTHING is materialized under it. The
+  // office skills used to be copied here because a 0.1.7-rc.1 host derived its
+  // asset root from this argument's parent and stat'd a Node inside it; the
+  // skills now come from the kernel package and the child only reads the path.
   fs.mkdirSync(officeRoot, { recursive: true })
-  fs.cpSync(treeFiles.officeSkills, skillsTarget, { recursive: true })
   const primaryRuntime = path.join(officeRoot, 'primary-runtime')
-  const leafNode = path.join(primaryRuntime, 'dependencies', 'node', 'bin', path.basename(treeFiles.nodeBin))
-  fs.mkdirSync(path.dirname(leafNode), { recursive: true })
-  try {
-    fs.linkSync(treeFiles.nodeBin, leafNode)
-  } catch {
-    fs.copyFileSync(treeFiles.nodeBin, leafNode)
-  }
 
   return { profileDir, layer, primaryRuntime }
 }

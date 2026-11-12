@@ -68,6 +68,7 @@ const HOST_KEYS: Readonly<Record<string, McpKey>> = {
   'serverName.taken': 'mcp.host.serverNameTaken',
   'serverName.immutable': 'mcp.host.serverNameImmutable',
   'store.unavailable': 'mcp.host.storeUnavailable',
+  'store.unreadable': 'mcp.host.storeUnreadable',
   'secret.masked': 'mcp.host.secretMasked',
   'route.disabled': 'mcp.host.routeDisabled',
   'route.writeFailed': 'mcp.host.writeFailed',

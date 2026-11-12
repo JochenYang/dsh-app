@@ -127,15 +127,18 @@ export async function importLegacyServers(store: McpStore, file: string, log: (m
     return
   }
   const written = await store.importAll(entries)
-  if (written === 0) {
-    log('legacy servers file: every entry is already configured; left in place')
-    return
-  }
+  // Retire the source whenever the row now holds EVERY key — including the case
+  // where it already did. Leaving it behind (the old behaviour) resurrects a
+  // server the user deletes from the page on the next start, because this import
+  // runs before the page exists.
+  if (written === 0) log('legacy servers file: every entry is already configured; retiring the source')
   const aside = `${file}.migrated`
   try {
     renameSync(file, existsSync(aside) ? `${aside}-${Date.now()}` : aside)
   } catch (error) {
-    log(`legacy servers file: imported ${written} entry/entries but could not rename it aside: ${(error as Error).message}`)
+    // Never silent: this file will be re-read on the next start, so a failed
+    // rename is a resurrection risk the log has to name.
+    log(`legacy servers file: could not retire it (${(error as Error).message}); it will be read again on the next start`)
     return
   }
   log(`legacy servers file: imported ${written} entry/entries into the mcp-manager row`

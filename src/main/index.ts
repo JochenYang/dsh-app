@@ -1423,9 +1423,9 @@ async function startServerAndOpenWindow(): Promise<void> {
   // the shim's own actionable refusal is what the user gets.
   const officePayloadDir = await officePayload.expectedDir()
   // A payload that carries a Python set is what the host's own
-  // `load_workspace_dependencies` tool installs; without one the child keeps the
-  // fixed leaf beside the office skills (and the tool reports the path it
-  // looked for, exactly as it always has).
+  // `load_workspace_dependencies` tool installs; without one the child is handed
+  // the fixed leaf and the tool reports the path it looked for. Nothing is
+  // materialized beside it since 0.2.2-rc.2.
   const officePrimaryRuntime = await officePayload.primaryRuntimeDir()
   const kernelEnv = {
     ...proxyEnv,

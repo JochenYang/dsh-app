@@ -187,7 +187,14 @@ export function registerMcpRoutes(
   fleet: McpFleetStatus,
 ): () => Promise<void> {
   const respond = async (extra: Record<string, unknown> = {}): Promise<Response> => {
-    const file = store.load()
+    let file
+    try {
+      file = store.load()
+    } catch (error) {
+      // `store.unreadable`: the row is there but its config could not be read.
+      // Reporting an empty fleet here would hide servers the manager is running.
+      return writeRejection(error)
+    }
     const servers: McpServerView[] = []
     for (const entry of file.servers) {
       servers.push({
@@ -252,13 +259,17 @@ export function registerMcpRoutes(
     const denied = guardWrite()
     if (denied !== undefined) return denied
     const id = typeof body.id === 'string' ? body.id : ''
-    const existing = store.load().servers.find(entry => entry.id === id)
-    if (existing === undefined) {
-      return fail(404, 'not-found', { code: 'server.notFound', params: { id } })
-    }
     try {
-      await store.update(id, unmaskSecretValues(body, existing))
+      // The mask sentinel is resolved against the entry as it is AT WRITE TIME
+      // (`withLive`), not against the copy this request read: another writer may
+      // have rotated that secret in between.
+      await store.update(id, body, (live) => unmaskSecretValues(body, live as McpServerEntry | undefined))
     } catch (error) {
+      // The store resolves the key inside the write now, so "no such server" is
+      // raised there; the client keys its own copy on 404.
+      if (error instanceof McpValidationError && error.code === 'server.notFound') {
+        return fail(404, 'not-found', error.hostText())
+      }
       return writeRejection(error)
     }
     return await respond()
