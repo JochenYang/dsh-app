@@ -14,6 +14,11 @@
 //      makes the choice informed rather than accidental. Measured: with the
 //      installed 0.1.6 kernel and this repository's 0.1.7-adapted suite, a dev run
 //      died with `duplicate loader entry id: mcp-context7` before any window.
+//   3b. else a `runtime-dist/dsh-runtime-<platform>-<arch>-<version>.tgz` for the
+//      followed line is unpacked into `scratch/dev-kernel-<version>/` and used.
+//      The artifact is what `npm run runtime:build` just produced, so the common
+//      line-move state — repository ahead of the installed app — is one command
+//      away instead of a manual extract-and-name dance.
 //   4. nothing → the installed runtime, exactly like a packaged start, with a
 //      warning naming the line this repository follows.
 //
@@ -21,7 +26,7 @@
 // old launcher probed `../deepseek-harness` and silently booted whatever build was
 // in it (measured on this tree: three builds behind HEAD, still carrying 0.1.6
 // symbols). A runtime tree announces its own version, so this cannot happen here.
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -122,6 +127,73 @@ function localRuntimeOfFollowedLine() {
 }
 
 /**
+ * Unpack the runtime artifact this repository just built, when it is the
+ * followed line, and answer the tree the scanner above would have found.
+ *
+ * Without this, the state after every line move — repository adapted to a newer
+ * line than the installed app — is a refusal that asks the reader to build an
+ * artifact and extract it by hand. The artifact is already there
+ * (`runtime-dist/`, produced by `npm run runtime:build`), and its own
+ * `manifest.json` is what decides whether it may boot.
+ *
+ * Paths are passed RELATIVE to the artifact directory: GNU tar reads a Windows
+ * drive letter (`D:\…`) as a remote host and fails with "Cannot connect to D".
+ *
+ * @returns the extracted tree, or undefined when no artifact of this line exists.
+ */
+function extractBuiltArtifactOfFollowedLine() {
+  const spec = followedSpec()
+  const artifacts = path.join(appRoot, 'runtime-dist')
+  let entries
+  try {
+    entries = readdirSync(artifacts, { withFileTypes: true })
+  } catch {
+    return undefined
+  }
+  const prefix = `dsh-runtime-${process.platform}-${process.arch}-`
+  const candidates = []
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith('.tgz')) continue
+    const version = entry.name.slice(prefix.length, -'.tgz'.length)
+    try {
+      assertFollowedVersion(version, spec)
+    } catch {
+      continue
+    }
+    candidates.push({ version, file: entry.name, mtime: statSync(path.join(artifacts, entry.name)).mtimeMs })
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime)
+  const chosen = candidates[0]
+  if (chosen === undefined) return undefined
+
+  const target = path.join(appRoot, 'scratch', `dev-kernel-${chosen.version}`)
+  const manifestPath = path.join(target, 'runtime', 'manifest.json')
+  let unpacked = false
+  if (!existsSync(manifestPath)) {
+    console.log(`[dev] unpacking ${chosen.file} → ${path.relative(appRoot, target).replace(/\\/gu, '/')} (once per version)`)
+    mkdirSync(target, { recursive: true })
+    const extracted = spawnSync('tar', ['-xzf', chosen.file, '-C', path.relative(artifacts, target)], {
+      cwd: artifacts,
+      stdio: ['ignore', 'ignore', 'inherit'],
+      windowsHide: true,
+    })
+    if (extracted.status !== 0) {
+      console.error(`[dev] could not unpack ${chosen.file} (tar exited ${String(extracted.status)})`)
+      return undefined
+    }
+    unpacked = true
+  }
+  // The scanner is the one place that decides what a usable tree is: after the
+  // unpack, ask it rather than re-deriving the shape here.
+  const found = localRuntimeOfFollowedLine()
+  if (found === undefined) {
+    if (unpacked) console.error(`[dev] ${chosen.file} unpacked but does not declare ${spec}`)
+    return undefined
+  }
+  return found
+}
+
+/**
  * The version the INSTALLED app's active kernel declares, or undefined.
  *
  * Read from the app's own kernel pointer (`<userData>/kernel/current.json` →
@@ -181,7 +253,7 @@ const named = [
 if (named.length > 0) {
   console.log(`[dev] DSH_APP_DEV=1, kernel: ${named.map(([name, value]) => `${name}=${value}`).join(', ')}`)
 } else {
-  const local = localRuntimeOfFollowedLine()
+  const local = localRuntimeOfFollowedLine() ?? extractBuiltArtifactOfFollowedLine()
   if (local === undefined) {
     const installed = installedKernelVersion()
     if (installed !== undefined && !followsLine(installed)) {
@@ -195,7 +267,7 @@ if (named.length > 0) {
       console.error(`[dev] refusing to boot: the installed kernel is dsh ${installed}, but this repository follows ${followedSpec()}.`)
       console.error('[dev] Starting anyway mixes two lines in one profile: the older kernel projects its packages')
       console.error('[dev] into $DSH_HOME, and the line this repository is adapted to then loads them.')
-      console.error('[dev] Build one (npm run dist / scripts/build-runtime.mjs) and extract it under scratch/<name>/runtime,')
+      console.error('[dev] Build one: npm run runtime:build — this launcher unpacks it from runtime-dist/ on the next run,')
       console.error('[dev] or name an existing tree: DSH_APP_DEV_KERNEL=<dir with node/ and app/> npm run dev')
       process.exit(1)
     }
