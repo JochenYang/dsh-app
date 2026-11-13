@@ -343,3 +343,25 @@ test('version comparison understands prereleases', () => {
   assert.ok(compareVersions('^0.2.2-rc.2', '0.2.2-rc.2') === 0)
   assert.ok(compareVersions('0.2.1', '0.2.2-rc.2') < 0)
 })
+
+test('a line package pinned to the line version is not a transitive mismatch', () => {
+  // The first release-day run reported 11 blockers of the shape "dsh-brand
+  // 0.2.2-rc.3 pinned, this tree has rc.2" — the expected state before a bump,
+  // owned by the line check, not by this one. Third-party pins stay judged.
+  const dir = checkout({
+    'packages/tooling/dsh-commands/package.json': JSON.stringify({
+      name: '@deepseek-ai/dsh-commands',
+      version: followedSpec().replace(/^[\^~]/u, ''),
+      type: 'module',
+      // A line package two lines ahead of this tree, and a third-party pin that
+      // really is behind: only the second one is a finding.
+      dependencies: { '@deepseek-ai/dsh-brand': '0.2.2-rc.99', zod: '99.0.0' },
+    }, null, 2),
+    'packages/tooling/dsh-commands/src/index.ts': 'export interface CommandResult {\n  ok: boolean\n}\n',
+  })
+  const { report } = run(['--dir', dir])
+  assert.ok(!report.findings.some((item) => item.check === 'deps' && item.subject.includes('dsh-brand')),
+    'a line package pin belongs to the line check, not the transitive one')
+  assert.ok(report.findings.some((item) => item.check === 'deps' && item.subject.startsWith('zod 99.0.0')),
+    'a third-party pin that is behind is still a finding')
+})
