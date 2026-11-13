@@ -1,8 +1,9 @@
 # 内核线 0.2.2-rc.2 → 0.2.2-rc.3：一次小版本跟随
 
-- Status: adaptation done, release pending
+- Status: done
 - Plan date: 2026-11-13
 - 上一轮记录：[`../archive/kernel-line/kernel-0.2.2-rc.2-upgrade.md`](../archive/kernel-line/kernel-0.2.2-rc.2-upgrade.md)
+- 本轮执行记录：[`../archive/kernel-line/kernel-0.2.2-rc.3-upgrade.md`](../archive/kernel-line/kernel-0.2.2-rc.3-upgrade.md)
 - 流程判据：[`../agents/kernel-line-regression.md`](../agents/kernel-line-regression.md)
 
 > **预检**（§7.1 的字段）：`npm run check:preflight -- --npm 0.2.2-rc.3`，目标形态 = 已发布包
@@ -59,8 +60,11 @@
 | `probe-routes.cjs --tgz`（electron） | `RESULT: PASS (32 checks)` |
 | offices payload | `0.2.3`、kit 0.2.3、win32-x64，121.0 MB compact / 350.7 MB unpacked |
 
-## 4 待办（发版，需要决定）
+## 4 发版（已完成）
 
-- 版本号与 `CHANGELOG`：本次只有内核线与一处打包修正，`shell: patch` 片段已写（`changesets/kernel-0.2.2-rc.3.md`），无插件行为变更 → 不 bump 任何插件版本（`suiteVersion` 保持 `ededa5ec`）。
-- 发布顺序按 `docs/agents/release-checklist.md`：payload 产物 → shell tag（刷新 `bundled-kernel/`）→ runtime（保持 prerelease）→ `gh release edit --draft=false --notes-file` → ModelScope 镜像。
-- 三个平台的 runtime 与 payload 只在本机验证了 win32-x64；mac/linux cell 由 CI 产出。
+`v0.19.1` 已发布：release 运行 `43419260830` 全绿（`prepare-release` / `resolve` / 六个 runtime cell /
+`mirror runtime` / 四个 app cell），CI `43419254611` 绿；六个 cell manifest 均为
+`dshVersion 0.2.2-rc.3` + `suiteVersion ededa5ec`，每个 `.sha512` 与 manifest `integrity` 相等；
+镜像 `43424317267` Summary **OK**（`releases/latest` + `archive/0.19.1`、21 个资产、prune 删 0.18.0、
+latest cleanup 删 17 个 0.19.0 残留）。逐项证据在
+[`../archive/kernel-line/kernel-0.2.2-rc.3-upgrade.md`](../archive/kernel-line/kernel-0.2.2-rc.3-upgrade.md) §3。
