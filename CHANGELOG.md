@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.19.1] - 2026-11-13
+
+### 中文
+- 跟随内核线 0.2.2-rc.3。这一版上游只有新增：侧边栏「新建会话」行多了一个可装饰的座位（HOC），图标集多了上传图标；我们逐一核过声明、座位、服务 id、overlay 行、技能名单与 peer，没有一处需要改代码，也没有采纳这两个新面（当前没有场景）。
+- 运行时打包修正：引擎包 `libreoffice-kit` 的私有依赖（`fflate`）会嵌在它自己的 `node_modules` 下，旧的排除规则只看最后一段路径，于是漏下 12 个文件、在裁剪后的自检上直接失败。现在只要在引擎自己的 `node_modules` 之下，都随引擎一起移出运行时、进入按需下载的载荷。
+
+### English
+- Follow the 0.2.2-rc.3 kernel line. Upstream only added here: the sidebar's New-session row gained a decoratable HOC seat and the icon set gained upload icons; declarations, slot ids, service ids, overlay rows, the office skill list and peers were each checked and none needed a code change, and neither addition is adopted (no use case yet).
+- Runtime packaging fix: the engine package `libreoffice-kit` nests its private dependency (`fflate`) under its own `node_modules`, and the exclusion rule read only the last path segment — 12 files stayed behind and the post-trim assertion failed the build. Anything under the engine's own `node_modules` now leaves the runtime with it and travels in the on-demand payload.
+
 ## [v0.19.0] - 2026-11-12
 
 ### 中文
