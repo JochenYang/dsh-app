@@ -1180,6 +1180,12 @@ function checkDeps(target, imports, findings) {
   for (const name of packages.sort()) {
     const dependencies = target.packageOf(name)?.manifest?.dependencies ?? {}
     for (const [dependency, range] of Object.entries(dependencies)) {
+      // A line package pinned to the LINE version is not a transitive pin: this
+      // tree sitting one line behind is the expected state before a bump, and the
+      // line check plus the bump itself own that question. Leaving it in buried a
+      // real report under 11 rows of "dsh-brand 0.2.2-rc.3, we have rc.2" on the
+      // first release-day run.
+      if (dependency.startsWith('@deepseek-ai/')) continue
       if (!/^\d+\.\d+\.\d+/u.test(range)) continue // a range: not decidable here
       if (seen.has(`${dependency}@${range}`)) continue
       const ours = installedVersionOf(dependency)

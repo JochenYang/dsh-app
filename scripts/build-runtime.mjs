@@ -1604,6 +1604,19 @@ function runtimeFileExclusion(relativePath, target) {
   const nameParts = packageParts[0]?.startsWith('@') ? 2 : 1
   const name = packageParts.slice(0, nameParts).join('/')
   const entry = packageParts.slice(nameParts).join('/')
+  // A file INSIDE an engine package leaves with it, private dependencies
+  // included. The rule below reads only the last `node_modules` segment, so a
+  // package nested under the kit is read as itself — rc.3's pnpm tree nests
+  // `fflate` under `libreoffice-kit/node_modules`, and 12 of its files survived
+  // the trim as a package-less shell that then tripped the post-trim assertion
+  // (the runtime had dropped the engine but kept a copy of one of its deps).
+  const insideEngine = parts.some((part, index) =>
+    (part === DESKTOP_OFFICE_KIT_PACKAGE.slice('@deepseek-ai/'.length) || part.startsWith(`${DESKTOP_OFFICE_KIT_PACKAGE.slice('@deepseek-ai/'.length)}-`))
+    && parts[index - 1] === '@deepseek-ai'
+    // The path is relative to `node_modules`, so a top-level package has no
+    // `node_modules` segment before its scope.
+    && (index < 2 || parts[index - 2] === 'node_modules'))
+  if (insideEngine) return 'LibreOffice engine (separate artifact)'
   if (name === DESKTOP_OFFICE_KIT_PACKAGE || name.startsWith(`${DESKTOP_OFFICE_KIT_PACKAGE}-`)) {
     // The whole kit: the API package AND every engine. All of it moves to the
     // on-demand payload artifact, whose install is what the runtime's stub
