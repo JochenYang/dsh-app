@@ -29,9 +29,9 @@
 │   src/kernel/integrity.ts  sha512 verification
 └─ Brand suite (plugins/)
     plugin-brand (host)      brand settings, app info, desktop bridge (scaffold)
-    plugin-client-ui (client) brand theme + advanced models settings page + diagnostics page
+    plugin-client-ui (client) brand theme + advanced models settings page + diagnostics page + active-conversation whale
     plugin-sidebar (dual-face) native conversation view: Git
-    plugin-swarm (dual-face)   batch parallel subagent orchestration (swarm tool + /swarm command)
+    plugin-swarm (dual-face)   batch parallel subagent orchestration + live board (Overview / Board / Members)
     plugin-usage (dual-face)   usage capture/aggregation + balance card, heatmap, trend chart
     plugin-archives (dual-face) session archive manager (host list/delete + settings section)
     plugin-memory (dual-face)  cross-session memory (tools + prompt injection + curator)

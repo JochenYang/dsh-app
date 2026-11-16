@@ -2,11 +2,16 @@
 // What the two home decorations actually PAINT, measured in the running window.
 //
 // Why this probe exists in this shape: `ui-brand-official` registers a canvas
-// into `conversation.hero.frame` unconditionally (0.2.2-rc.2), and our own whale
-// layer paints the same screen. Counting canvas ELEMENTS cannot tell "two whales"
-// from "a canvas that is transparent at rest" — this counts alpha>8 pixels, which
-// is the only way to see the difference (and it is how the earlier
-// "two whales at once" reading was corrected).
+// into `conversation.hero.frame` unconditionally (0.2.2-rc.2), and our own
+// whale layer used to paint the same screen. Counting canvas ELEMENTS cannot
+// tell "two whales" from "a canvas that is transparent at rest" — this counts
+// alpha>8 pixels, which is the only way to see the difference (and it is how
+// the earlier "two whales at once" reading was corrected).
+//
+// The decision has since moved: the new-session page is upstream's alone, so
+// our canvas must paint ZERO pixels there while the official one still plays on
+// a blank click. Our layer remains the ACTIVE-conversation background (see
+// whale-background.ts); this probe covers the home page only.
 //
 // It also does not boot a kernel: the document the desktop window shows is
 // `dsh-app://app/index.html`, a scheme that exists only inside the app's own
@@ -16,12 +21,11 @@
 //   DSH_APP_DEV=1 npm start -- --remote-debugging-port=9222   (or npm run dev)
 //   node scripts/probe-whale.mjs [--cdp http://127.0.0.1:9222]
 //
-// Assertions (each one is a fact the decision in
-// docs/plans/kernel-0.2.2-rc.2-upgrade.md rests on):
-//   W1 our layer paints at rest
+// Assertions:
+//   W1 our layer is parked on the new-session page (zero painted pixels)
 //   W2 the official canvas exists and is transparent at rest
 //   W3 a blank click makes the official canvas paint, and it clears itself
-//   W4 our layer is unaffected by that click
+//   W4 our layer stays parked after that click
 import { connect, sleep } from './lib/cdp.mjs'
 
 const args = process.argv.slice(2)
@@ -85,7 +89,8 @@ try {
   } else {
     record('W0 the window is on a blank home', true, 'phase: hero')
   }
-  record('W1 our whale layer paints at rest', (idle.ours?.painted ?? 0) > 0, `${String(idle.ours?.painted)} px`)
+  record('W1 our whale layer is parked on the new-session page', (idle.ours?.painted ?? -1) === 0,
+    idle.ours === null ? 'no #dshapp-whale-bg canvas in the document' : `${String(idle.ours.painted)} px`)
   record('W2 the official canvas is transparent at rest', idle.theirs !== null && idle.theirs.painted === 0,
     idle.theirs === null ? 'no [data-home-whale] canvas in the document' : `${String(idle.theirs.painted)} px`)
 
@@ -101,11 +106,7 @@ try {
     const playing = JSON.parse(await cdp.evaluate(CENSUS))
     record('W3 a blank click paints the official canvas', (playing.theirs?.painted ?? 0) > 0,
       `${String(playing.theirs?.painted)} px after 1.6 s`)
-    // Guarded on presence: two absent readings would otherwise satisfy the
-    // tolerance trivially, and the claim is about a layer that is there.
-    const oursIdle = idle.ours?.painted ?? 0
-    const oursPlaying = playing.ours?.painted ?? 0
-    record('W4 our layer is unaffected by the click', oursIdle > 0 && Math.abs(oursPlaying - oursIdle) < oursIdle * 0.1,
+    record('W4 our layer stays parked after the click', (playing.ours?.painted ?? -1) === 0,
       `${String(idle.ours?.painted)} → ${String(playing.ours?.painted)}`)
   }
 } finally {

@@ -16,16 +16,19 @@
  *     frame, then repaint the few hundred tiles inside the disc with the
  *     radial push (displacement only — no highlight ring). Pointer leaves
  *     → decay → restore → the loop stops itself.
- *   - Phase moves (hero ⇄ active) and layout changes run a short (~0.45 s)
+ *   - Phase moves (active ⇄ settling) and layout changes run a short (~0.45 s)
  *     full re-render transition on the small canvas, then settle to idle.
  *
  * Layout is phase-aware (the conversation root carries data-phase):
- *   - hero (new session): the whale hovers directly ABOVE the centered
- *     composer card, anchored by measuring the textarea DOM box.
- *   - active (messages exist): the whale drops into the background, larger
- *     and dimmed, behind the transcript.
+ *   - active (messages exist): the whale sits in the background, large and
+ *     dimmed, behind the transcript.
+ *   - hero (new session): the whale parks itself invisible. Upstream's own
+ *     `@deepseek-ai/dsh-client-ui-brand-official` paints a click-triggered
+ *     pixel whale in `conversation.hero.frame`, and the hero also carries the
+ *     brand mark above the headline; a second brand whale there competed with
+ *     both, so the new-session page is upstream's alone.
  *   - no phase element at all (the SPA is on a foreign surface — plugins,
- *     settings, market): the whale parks itself invisible. Reading that
+ *     settings, market): the whale parks itself invisible too. Reading that
  *     state as "welcome" — which this module did until the plugin page
  *     made the consequence visible — hovered the whale over every route.
  *
@@ -71,10 +74,6 @@ const GLOW_ADD = [51, 77, 128] as const
 const TILE_SIZE = 0.06
 /** Whale dims to this alpha share while a conversation is active. */
 const ACTIVE_PHASE_ALPHA = 0.3
-/** Hero anchoring: gap between the composer card top and the whale bottom. */
-const HERO_GAP_PX = 40
-/** Hero anchoring: keep this much clearance below the app header. */
-const HERO_TOP_SAFE_PX = 64
 /** Phase/layout poll cadence (ms); both are cheap reads. */
 const POLL_MS = 250
 /** Phase-move transition duration (seconds), cubic-out ease. */
@@ -253,7 +252,7 @@ function decodeTiles(): Tile[] {
 }
 
 /** Smooth whale placement: screen-space center, art height in px, and the
- * phase alpha share (1 on hero, dimmed while chatting). */
+ * phase alpha share (dimmed while chatting, 0 while parked). */
 interface LayoutState {
   cx: number
   cy: number
@@ -391,6 +390,9 @@ export function mountWhaleBackground(): () => void {
     vw = window.innerWidth
     vh = window.innerHeight
     dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP)
+    // The active placement is the largest one, so the canvas is fixed at that
+    // size: the hero no longer draws the whale, and a later phase change never
+    // needs a fresh canvas allocation.
     const esMax = activeLayout().h / (ART_CELLS_Y * CELL)
     W = Math.ceil((ART_CELLS_X * CELL + 2 * TILE_MARGIN_U) * esMax)
     H = Math.ceil((ART_CELLS_Y * CELL + 2 * TILE_MARGIN_U) * esMax)
@@ -402,33 +404,12 @@ export function mountWhaleBackground(): () => void {
     canvas.style.height = `${H}px`
   }
 
-  /** Hero placement: hover above the composer card, following its DOM box. */
-  function heroLayout(): LayoutState {
-    // The composer input is the only main-column element carrying the input
-    // class; its class is a CSS-module hash (`InputBar_input__…`) so match on
-    // the stable local part. It renders as a DIV in current kernels (older
-    // ones used a textarea), so accept either once the class matches.
-    const seat = document.querySelector('[class*="_input"]')
-    const rect = seat instanceof HTMLElement ? seat.getBoundingClientRect() : null
-    if (rect === null || rect.width === 0) {
-      // DOM not ready yet: assume the centered composer sits slightly above
-      // the vertical middle (its stack has a 32px bottom pad).
-      const h = Math.min(vh * 0.3, vw * 0.26)
-      return { cx: vw / 2, cy: vh * 0.36 - h / 2, h, alpha: 1 }
-    }
-    const avail = rect.top - HERO_GAP_PX - HERO_TOP_SAFE_PX
-    const h = clamp(avail, 96, Math.min(vh * 0.34, vw * 0.26))
-    const cx = rect.left + rect.width / 2
-    const cy = rect.top - HERO_GAP_PX - h / 2
-    return { cx, cy, h, alpha: 1 }
-  }
-
   /**
    * Active placement: large, behind the transcript. The center column sits
    * right of the sidebar, so centering on the viewport leaves the whale
    * visibly offset from the conversation it backgrounds — anchor on the
    * conversation column's own box instead (the composer textarea shares
-   * that column, so the hero path is already column-aligned implicitly).
+   * that column).
    */
   function activeLayout(): LayoutState {
     const h = Math.min(vh * 0.46, vw * 0.4)
@@ -522,16 +503,15 @@ export function mountWhaleBackground(): () => void {
       if (!hidden) renderFrame()
     }
     // The conversation root carries data-phase (hero | active | settling).
-    // NO match means the SPA is on a foreign surface (plugins, settings,
-    // market, …): the whale is a conversation-page brand mark and parks
-    // itself invisible there. Reading "no match" as the welcome state —
-    // which this did until the plugin page made it visible — hovered the
-    // whale over every route of the app.
+    // The whale is an ACTIVE-conversation background: the new-session page
+    // belongs to upstream's own pixel whale and brand mark, so `hero` parks
+    // this layer exactly like a foreign surface does. NO match means the SPA
+    // is on a foreign surface (plugins, settings, market, …).
     const phase = document.querySelector(PHASE_SELECTOR)
     const value = phase === null ? null : phase.getAttribute('data-phase')
-    setHidden(value === null)
+    setHidden(value !== 'active' && value !== 'settling')
     if (hidden) return
-    beginTransition(value === 'active' ? activeLayout() : heroLayout())
+    beginTransition(activeLayout())
   }
 
   // ---- pointer ------------------------------------------------------------
@@ -776,11 +756,11 @@ export function mountWhaleBackground(): () => void {
 
   // ---- mount --------------------------------------------------------------
   resizeCanvas()
-  place = heroLayout()
+  place = activeLayout()
   pollState()
   // Reveal after the first paint so the CSS opacity fade actually runs
   // (double rAF beats the "class added in the insertion frame" skip). A
-  // foreign surface — pollState parked the whale — never reveals.
+  // hidden phase — hero or a foreign surface — never reveals.
   requestAnimationFrame(() => requestAnimationFrame(() => {
     if (!hidden) canvas.classList.add('is-visible')
   }))

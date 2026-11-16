@@ -203,6 +203,10 @@ window.__dshStartupShowFailure = function (config) {
     transition: background 0.5s ease;
   }
 
+  /* The central mark is the official 137-frame breach atlas, rendered by the
+     page script into #whale-canvas as pixel dots; its colour is the canvas's
+     own `color` (brand accent). */
+
   /* ========================================================== Monolithic Layout */
   .stage-monolith {
     position: relative;
@@ -227,7 +231,7 @@ window.__dshStartupShowFailure = function (config) {
   .whale-stage-wrap {
     position: relative;
     width: min(50vmin, 380px);
-    height: min(44vmin, 330px);
+    height: min(28vmin, 214px);
     margin-bottom: 22px;
     display: flex;
     align-items: center;
@@ -252,6 +256,7 @@ window.__dshStartupShowFailure = function (config) {
     width: 100%;
     height: 100%;
     cursor: default;
+    color: var(--brand-accent);
   }
 
   /* ========================================================== Brand Row */
@@ -738,8 +743,8 @@ window.__dshStartupShowFailure = function (config) {
   }
 
   .whale-stage-wrap {
-    width: min(38vmin, 300px);
-    height: min(29vmin, 228px);
+    width: min(50vmin, 380px);
+    height: min(28vmin, 214px);
     margin-bottom: 12px;
   }
 
@@ -857,8 +862,8 @@ window.__dshStartupShowFailure = function (config) {
   @media (max-height: 720px) {
     .stage-monolith { padding-top: calc(38px + 4vh); padding-bottom: 20px; transform: none; }
     .whale-stage-wrap {
-      width: min(32vmin, 220px);
-      height: min(23vmin, 158px);
+      width: min(44vmin, 280px);
+      height: min(25vmin, 160px);
       margin-bottom: 8px;
     }
     .brand-row { margin-bottom: 16px; }
@@ -1005,314 +1010,200 @@ window.__dshStartupShowFailure = function (config) {
     var errorActions = document.getElementById('startup-error-actions');
     var failureHint = document.querySelector('#startup-error .hint');
 
-    // ========================================================== Digitile Whale Base64 Data
-    var WHALE_GRID = 60;
-    var ART_CELLS_X = 60;
-    var CELL = 0.18;
-    var TILE_SIZE = 0.076;
+    // ========================================================== Official pixel whale (center)
+    // The same 137-frame atlas and point/code alternation as
+    // @deepseek-ai/dsh-client-ui-brand-official's conversation.hero.frame.
+    // It replaces the old mosaic as the splash's central mark: the atlas is
+    // contain-fit into the stage, one ripple loops every 5.7 s, and reduced
+    // motion keeps a static frame so the mark never disappears.
+    var ATLAS = { width: 192, height: 108, columns: 12, frames: 137 };
+    var FRAME_RATE = 24;
+    var RIPPLE_MS = 5700;
+    var REST_MS = 1200;
+    var ACTIVE_OPACITY = 0.9;
+    var STATIC_FRAME = 70;
 
-    var WHALE_B64 = [
-      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAOIABAAAAAPgH',
-      'OAAAAPD/P8ADAADg//8B/AAwgP//H8A/gAP8//8D/Mc/4P//f8B//wP///8P+P8/+P///4H//8H///9/8P8f/P///w///+D/',
-      '////4P8H/v///x/8P+D/////h/8A///////4AfCA/////x8AD8D/////AfAA8P/D/x8ADwD8//n/APAAgP8f/w8AHwDw/+P/',
-      'APABAP4f/g8AHwDA/8N/APADAPh//AcAPwAA//8/AOADAOD//wMAfgAA/v8/AOAHAMD//wEA/AAA+P8PAMAfAAD//wAA+AMY',
-      '8P8HAIB/wAf+PwAA8A/4wP8DAAD+gT/4HwAAwD/wB/8HAAD4n//g/wEAAP//P/w/AADg/////wMAAPz//8cfAAAA//8/AAAA',
-      'AMD//wAAAAAA8P8DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-      'AAAAAAAAAAAAAAAAAAAAAAAAxVRjZJTzRJPj8vHw8qTi8YRkk7PD09PDs5OD0vHw8PDw8YNE8fDidNPy8fDw8PDw8PDw8PDw',
-      '8PDw8OJj8PDx8oS0pFTS8fDw8PDw8PDw8PDw8PDw8PDw8NJz8PDw8PHiZMPx05Px8PDw8PDw8PDw8PDw8PDw8PDw8PDxU2Pw',
-      '8PDw8PDxZGSDg6Pi8fCzs/Hw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8XNE8fDw8PDw8NKE8vHw8PDw8PCTo/Hw8PDw8PDw8PDw',
-      '8PDw8PDw8PDw8PDw8PDxs+Lw8PDw8PDxwfHw8PDw8PDw8VSD8fDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8dOk8fDw8PDw',
-      '8PDw8PDw8PDw8OI08fDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDx4jTy8PDw8PDw8PDw8PDw8PDxdMLw8PDw8PDw8PDw',
-      '8PDw8PDw8PDw8PDw8PDw8PDw8PDw4TR08fDw8PDw8PDw8PDw8PGzRPHw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw',
-      '8OKT8fDw8PDw8PDw8PDxw7Pw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDx43Px8PDw8PDw8PHylPLw8PDw8PDw',
-      '8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8eI0svDw8PDx8tOEZPHw8fLTs7PD8/Lx8PDw8PDw8PDw8PDw8PDw8PDw8PDw',
-      '8PDw8PDxY+Lw8PDwopPw8OJ0s/Lx8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8bJDUvHw8PDwg8Pw8NN04vHw8PDw8PDw8PDw',
-      '8PDxwnOD0vHw8PDw8PDw8PDw8PDwY+Pw8ON04vHw8PDw8PDw8PDw8YPx8PDw8PDw8PDw8PDxRPPw8POz8fDw8PDw8PDw8PHS',
-      'o0Rz8fDw8PDw8PDw8PDy8/Dw8nPx8PDw8PDw8PDwsJDyk/Hw8PDw8PDw8PDT4/Dw8WRD4fDw8PDw8PDwgGDyNMLw8PDw8PDw',
-      '8PCT0/Dw8KMz4fDw8PDw8PDw8PE08fDw8PDw8PDxVLPw8PDiQ/Hw8PDw8PDw8PFjsvDw8PDw8PDik/Dw8PFEY/Hw8PDw8PDw',
-      '8OFDovDw8PDw8PGUZPHw8PCjk/Hw8PDw8PDw8PGyo9Lx8PDw8PDw8vLw8PDy0vDw8PDw8PDw8PDw8PDw8PDw8PCzw/Dw8PGU',
-      'NPHw8PDw8PDw8PDw8PDw8PDw8PFEdPHw8PDyg/Hw8PDw8PDw8PDw8PDw8PDxo+Lw8PDxw8Px8PDw8PDw8PDw8PDw8PDyhPHw',
-      '8PDxc/Lw8PDw8PDw8PDw8PDw8XTi8PDw8PFDdERk8fDw8PDw8PDw8PDw8cNk8fDw8PDhQ0Ty8cJEo/Hw8PDw8PDw8PDw4rPx',
-      '8PDw8OFT8vDw8ZPD8fDw8PDw8PDw8VTT8fDw8PDxc5Tx8PDx0jTT8fDw8PDw8PCR4/Hw8PDw8bPx8PDw8PFj0/Hw8PDw8PDx',
-      'wmTj8fDw8PDx8pNEc/Hw8PDw8PGjw/Hw8PDw8PDw8eKE0/Hw8PDw8PDx8vLx8PDw8PDw8PHSZJHw8PDw8PDw8PDxxLPx8PDw',
-      '8PDw8PDw8PDw8PDw8PDw8fLTs7Ky0sPy8fDw8PDw8ZRk4vHw8PDw8PDw8PDw8PDw8PDw8PDw8PGzVHODk4NjNJTy8fDw8PDw',
-      '8PDw8PDw8PDw8PDx4mSE4vHw8PDw8PDw8PDw8PDx0nREg7PT8/Pz8/Pj06NzNA=='
-    ].join('');
-
-    /**
-     * Centre of the cells the bitmap actually paints, in grid coordinates. The
-     * asset letterboxes a 24:18 artwork inside a 60x60 square, and its ink is
-     * not concentric with that square (columns 0..57, rows 7..49): drawing from
-     * the grid's own centre put the whale 1 cell left and 1.5 cells above the
-     * canvas centre, i.e. off the stage it is meant to sit in the middle of.
-     */
-    function inkCentre(bin) {
-      var minCol = WHALE_GRID;
-      var maxCol = -1;
-      var minRow = WHALE_GRID;
-      var maxRow = -1;
-      for (var row = 0; row < WHALE_GRID; row++) {
-        for (var col = 0; col < WHALE_GRID; col++) {
-          var bit = row * WHALE_GRID + col;
-          if (((bin.charCodeAt(bit >> 3) >> (bit & 7)) & 1) === 0) continue;
-          if (col < minCol) minCol = col;
-          if (col > maxCol) maxCol = col;
-          if (row < minRow) minRow = row;
-          if (row > maxRow) maxRow = row;
-        }
-      }
-      return { col: (minCol + maxCol) / 2, row: (minRow + maxRow) / 2 };
-    }
-
-    function decodeTiles() {
-      var bin = atob(WHALE_B64);
-      var bitmapBytes = Math.ceil((WHALE_GRID * WHALE_GRID) / 8);
-      var tiles = [];
-      var attr = bitmapBytes;
-      var centre = inkCentre(bin);
-      for (var row = 0; row < WHALE_GRID; row++) {
-        for (var col = 0; col < WHALE_GRID; col++) {
-          var bit = row * WHALE_GRID + col;
-          if (((bin.charCodeAt(bit >> 3) >> (bit & 7)) & 1) === 0) continue;
-          var a = bin.charCodeAt(attr++);
-          var gx = (col - centre.col) / ART_CELLS_X;
-          var gy = (centre.row - row) / ART_CELLS_X;
-          tiles.push({
-            gx: gx,
-            gy: gy,
-            lum: (a >> 4) / 15,
-            edge: (a & 7) / 7,
-            // Fixed per-tile face scale, matching the session page's renderer
-            // (whale-background.ts `scale: 0.5 + Math.random()`). A uniform size
-            // reads as a printed halftone; the variation is what makes the
-            // mosaic look like physical tiles.
-            scale: 0.5 + Math.random(),
-            seed: Math.random(),
-            origDist: Math.hypot(gx, gy)
-          });
-        }
-      }
-      return tiles;
-    }
-
-    var TILES = decodeTiles();
-
-    // ========================================================== Canvas 2D Engine with 3D Orbital Rings
     var canvas = document.getElementById('whale-canvas');
     var ctx = canvas.getContext('2d');
     var DPR = Math.min(2, window.devicePixelRatio || 1);
     var canvasW = 0, canvasH = 0;
-    var scale = 0;
-    var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var sceneWidth = 0, left = 0, top = 0;
+    var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+    var pixels;
+    var started;
+    var last = -Infinity;
+    var frame = 0;
+    var restTimer = 0;
+    var staticDrawn = false;
+    // Probe hook: how many ripples have started and how many frames painted.
+    var debug = { plays: 0, frames: 0 };
+    window.__dshStartupWhale = debug;
 
     function resizeCanvas() {
       // Re-read the ratio on every resize: a window dragged between monitors of
       // different scale would otherwise keep painting at the old ratio and go soft.
       DPR = Math.min(2, window.devicePixelRatio || 1);
-      var cssW = canvas.clientWidth || 360;
-      var cssH = canvas.clientHeight || 300;
-      canvasW = cssW;
-      canvasH = cssH;
-      canvas.width = Math.round(cssW * DPR);
-      canvas.height = Math.round(cssH * DPR);
+      canvasW = canvas.clientWidth || 300;
+      canvasH = canvas.clientHeight || 228;
+      canvas.width = Math.round(canvasW * DPR);
+      canvas.height = Math.round(canvasH * DPR);
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-      scale = cssW / ART_CELLS_X;
+      ctx.fillStyle = getComputedStyle(canvas).color;
+      // Contain-fit the 16:9 atlas in the stage, so the whole breach stays
+      // visible at every window size.
+      sceneWidth = Math.min(canvasW, canvasH * ATLAS.width / ATLAS.height);
+      left = (canvasW - sceneWidth) / 2;
+      top = (canvasH - sceneWidth * ATLAS.height / ATLAS.width) / 2;
     }
 
-    // Pointer dynamics. The feel is the session page's: the tracked position is
-    // smoothed toward the real one, and the push strength ramps up and then
-    // DECAYS back to zero after the pointer leaves — a hard reset to 0 made the
-    // mosaic snap flat instead of settling.
-    var pointer = { tx: -999, ty: -999, sx: -999, sy: -999, over: false, push: 0 };
-    var MOUSE_DECAY = 0.2;
-    window.addEventListener('pointermove', function (e) {
-      var rect = canvas.getBoundingClientRect();
-      var px = e.clientX - rect.left;
-      var py = e.clientY - rect.top;
-      pointer.tx = (px - canvasW / 2) / (ART_CELLS_X * scale);
-      pointer.ty = (canvasH / 2 - py) / (ART_CELLS_X * scale);
-      pointer.over = (px >= -20 && px <= canvasW + 20 && py >= -20 && py <= canvasH + 20);
-    });
-
-    var START_TIME = performance.now();
-    var ENTER_DURATION = 1100;
-    var assembled = false;
-    var lastFrame = 0;
-    // 30fps, the session page's rate: on a 60Hz display that is exactly every
-    // second frame. 24fps is 41.7ms, which no 16.7ms grid can hit evenly — it
-    // lands as alternating 50/33ms steps, i.e. visible judder.
-    var FPS = 30;
-    var FRAME_MS = 1000 / FPS;
-    var accumulator = 0;
-
-    // Push parameters in WORLD units, exactly the session page's numbers.
-    // 1 gx unit = ART_CELLS_X cells = ART_CELLS_X·CELL world units, so a 2.4-world
-    // radius is 2.4/(60·0.18) = 0.222 in gx units — 44% of the whale's half-width.
-    var PUSH_RADIUS = 2.4 / (ART_CELLS_X * CELL);
-    var PUSH_STRENGTH = 0.8;
-    var PUSH_DISTORT = 5;
-
-    /**
-     * Per-tile push, the session page's math verbatim:
-     *   · a CUBIC falloff, so only the tiles near the pointer move;
-     *   · a per-tile noise angle of up to ±MOUSE_DISTORT radians, which ROTATES the
-     *     radial direction — tiles end up travelling in near-random directions, so
-     *     neighbours cross and the mosaic locally tangles and squeezes instead of
-     *     bulging outward as one shell;
-     *   · a per-tile hash on the travel distance, so tiles at one radius do not all
-     *     land on the same ring.
-     * The displacement is snapped to whole pixels, which is what keeps the moved
-     * tiles as crisp as the resting ones.
-     */
-    function pushOffset(tl, index, time) {
-      if (pointer.push < 0.002) return [0, 0];
-      var dx = tl.gx - pointer.sx;
-      var dy = tl.gy - pointer.sy;
-      var md = Math.hypot(dx, dy);
-      if (md >= PUSH_RADIUS) return [0, 0];
-      var k = 1 - md / PUSH_RADIUS;
-      var force = k * k * k * PUSH_STRENGTH * pointer.push;
-      if (force < 0.002) return [0, 0];
-      var na = Math.sin(index * 0.37 + time * 0.5) * PUSH_DISTORT;
-      var ca = Math.cos(na);
-      var sa = Math.sin(na);
-      var hash = Math.abs((Math.sin(index * 12.9898) * 43758.5453) % 1);
-      var push = force * 1.2 * (0.35 + 0.65 * hash);
-      var rx = dx / (md || 1e-4);
-      var ry = dy / (md || 1e-4);
-      // push is in world units; one gx unit is ART_CELLS_X·CELL of them, and one
-      // gx unit is ART_CELLS_X·scale pixels.
-      var travel = push * scale / CELL;
-      return [Math.round((rx * ca - ry * sa) * travel), Math.round((rx * sa + ry * ca) * travel)];
-    }
-
-    /**
-     * Tile fill, adapted from the session page's rule: the base color is the
-     * theme's INK mixed toward a BRAND blue that varies with the tile's height
-     * (50% on dark, 70% on light; stronger than the session page so the splash's
-     * hero reads at a glance), then shaded by the
-     * tile's own luminance (0.2 + 0.916·l²), with a 0.7x floor on light so no tile
-     * sinks dark on a pale background. The colours are written out here, not read
-     * from the desktop theme, because this page runs before the theme loads; the
-     * gradient ends are this page's own choice and are not theme tokens.
-     */
-    var INK_DARK = [230, 235, 245], ALPHA_DARK = 0.82;
-    var INK_LIGHT = [15, 23, 42], ALPHA_LIGHT = 0.92;
-    // The brand colour is not one value: it runs from a lighter blue at the
-    // whale's back to a deeper one at its belly, which gives the flat mosaic a
-    // lit-from-above read. The two themes need opposite handling: on the pale
-    // field the belly goes DEEPER (more contrast); on the dark field both ends
-    // stay bright and only the saturation changes, because a darker belly there
-    // would lose contrast instead of gaining depth.
-    var BRAND_LIGHT_TOP = [82, 151, 235], BRAND_LIGHT_BOTTOM = [28, 67, 178];
-    var BRAND_DARK_TOP = [191, 219, 254], BRAND_DARK_BOTTOM = [96, 165, 250];
-    // Tile rows span roughly gy = -0.35 .. +0.35; this maps that to 0 (top) .. 1.
-    var GRADIENT_SPAN = 0.7;
-    function tileFill(isDark, lum, alphaMod, gy) {
-      var ink = isDark ? INK_DARK : INK_LIGHT;
-      var top = isDark ? BRAND_DARK_TOP : BRAND_LIGHT_TOP;
-      var bottom = isDark ? BRAND_DARK_BOTTOM : BRAND_LIGHT_BOTTOM;
-      var v = Math.max(0, Math.min(1, 0.5 - gy / GRADIENT_SPAN));
-      var k = isDark ? 0.5 : 0.7;
-      var vLight = 0.2 + 0.916 * lum * lum;
-      var shade = isDark ? vLight : 0.7 + 0.3 * vLight;
-      var rgb = [0, 0, 0];
-      for (var c = 0; c < 3; c++) {
-        var brand = top[c] + (bottom[c] - top[c]) * v;
-        rgb[c] = Math.round(Math.min(255, (ink[c] + (brand - ink[c]) * k) * shade));
+    /** Paint one atlas frame as pixel dots. */
+    function paintFrame(index, level) {
+      clear();
+      if (pixels === undefined) return;
+      var offsetX = (index % ATLAS.columns) * ATLAS.width;
+      var offsetY = Math.floor(index / ATLAS.columns) * ATLAS.height;
+      var stride = ATLAS.width * ATLAS.columns;
+      var cell = sceneWidth / ATLAS.width;
+      for (var y = 0; y < ATLAS.height; y++) {
+        for (var x = 0; x < ATLAS.width; x++) {
+          var offset = ((offsetY + y) * stride + offsetX + x) * 4;
+          var alpha = pixels[offset + 1] / 255;
+          var weight = pixels[offset] / 255;
+          if (alpha < 0.015 || weight < 0.05) continue;
+          // A minimum radius keeps the dot matrix from dissolving into
+          // anti-aliasing at the stage's size; the atlas's red channel still
+          // varies the dot size.
+          var radius = Math.max(0.9, cell * weight * 1.3);
+          ctx.globalAlpha = Math.min(1, alpha * ACTIVE_OPACITY * level * 1.15);
+          ctx.beginPath();
+          ctx.arc(left + (x + 0.5) * cell, top + (y + 0.5) * cell, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
-      var alpha = (isDark ? ALPHA_DARK : ALPHA_LIGHT) * alphaMod;
-      return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha.toFixed(3) + ')';
+      ctx.globalAlpha = 1;
     }
+
+    /** Reduced motion: one full-opacity pixel frame, never a blank mark. */
+    function renderStatic() {
+      if (pixels === undefined) return;
+      paintFrame(STATIC_FRAME, 1);
+      staticDrawn = true;
+    }
+
+    /** Start one 5.7 s ripple. */
+    function startPlayback() {
+      if (!moving() || pixels === undefined) return;
+      window.clearTimeout(restTimer);
+      restTimer = 0;
+      debug.plays += 1;
+      started = performance.now();
+      last = started - 1000 / FRAME_RATE;
+      staticDrawn = false;
+      if (frame === 0) frame = requestAnimationFrame(renderAnimation);
+    }
+
+    function moving() { return !(reduced && reduced.matches); }
+    function clear() { ctx.clearRect(0, 0, canvasW, canvasH); }
 
     function renderAnimation(now) {
-      requestAnimationFrame(renderAnimation);
-
-      // Phase accumulator instead of `now - lastFrame < period`: the naive gate
-      // drops whichever vsync tick lands just short of the period and then
-      // catches up on the next one, so the achieved interval alternates around
-      // the target. Carrying the remainder keeps every frame one period apart.
-      var delta = now - lastFrame;
-      lastFrame = now;
-      accumulator += delta;
-      if (accumulator < FRAME_MS) return;
-      // A tab that was hidden, or a long GC pause, leaves a backlog; dropping it
-      // (keeping only the phase) resumes evenly instead of bursting.
-      accumulator %= FRAME_MS;
-
-      ctx.clearRect(0, 0, canvasW, canvasH);
-
-      var isDark = root.getAttribute('data-theme') === 'dark';
-      var time = now / 1000;
-      // The canvas centre, and nothing else: the tiles already carry the ink's
-      // own offset (see inkCentre), so the mosaic is centred here by
-      // construction. The fixed +6px this replaces was an eyeball correction
-      // for a shift that scales with the stage — wrong at every size but one.
-      var cx = canvasW / 2;
-      var cy = canvasH / 2;
-
-      // The session page's pointer feel: the tracked point eases toward the real
-      // one, and the strength decays back to nothing once the pointer leaves.
-      pointer.sx += (pointer.tx - pointer.sx) * MOUSE_DECAY;
-      pointer.sy += (pointer.ty - pointer.sy) * MOUSE_DECAY;
-      pointer.push += ((pointer.over ? 1 : 0) - pointer.push) * MOUSE_DECAY;
-
-      // Digitile Whale Mosaic
-      var enterProgress = reduced ? 1 : Math.min(1, (now - START_TIME) / ENTER_DURATION);
-      if (enterProgress >= 1) assembled = true;
-      var baseS = (TILE_SIZE / CELL) * scale;
-
-      for (var i = 0; i < TILES.length; i++) {
-        var tl = TILES[i];
-        var ox = 0, oy = 0, alphaMod = 1, scaleMod = 1;
-
-        if (!assembled) {
-          var delay = Math.min(0.5, tl.origDist * 1.4);
-          var ep = Math.max(0, Math.min(1, (enterProgress - delay) / (1 - delay)));
-          if (ep <= 0) continue;
-          var ease = 1 - Math.pow(1 - ep, 3);
-          var angle = Math.atan2(tl.gy, tl.gx || 1e-4) + (1 - ease) * 0.9;
-          var dist = (1 - ease) * (0.45 + tl.seed * 0.6) * ART_CELLS_X * scale * 0.5;
-          ox = Math.cos(angle) * dist;
-          oy = Math.sin(angle) * dist;
-          alphaMod = ease;
-          scaleMod = 0.5 + ease * 0.5;
-        }
-
-        // Ambient fluid shimmer
-        var wave = Math.sin(time * 1.5 + (tl.gx + tl.gy) * 5.8);
-        var lum = Math.max(0, Math.min(1, tl.lum * (1 + wave * 0.12)));
-
-        // Interactive pointer displacement (see pushOffset).
-        var offset = pushOffset(tl, i, time);
-        var px = offset[0], py = offset[1];
-
-        var tx = cx + tl.gx * ART_CELLS_X * scale + ox + px;
-        var ty = cy - tl.gy * ART_CELLS_X * scale + oy + py;
-        // Per-tile face scale (matches the session page). While the entry
-        // animation is still running the size stays fractional so tiles grow
-        // smoothly; once assembled it snaps to whole device pixels, which is
-        // what keeps the resting mosaic crisp instead of softly anti-aliased.
-        var currentS = baseS * tl.scale * scaleMod;
-        if (assembled) currentS = Math.max(1, Math.round(currentS));
-
-        ctx.fillStyle = tileFill(isDark, lum, alphaMod, tl.gy);
-
-        var drawX = tx - currentS / 2;
-        var drawY = ty - currentS / 2;
-        // Size already snaps once assembled (above); position must too. A tile
-        // of 1-3px drawn at a fractional position is anti-aliased across its
-        // neighbours at a fraction of its alpha, which washes the whole mosaic
-        // out regardless of the colour chosen. Snapped to device pixels, every
-        // tile paints at full alpha. Skipped during the entry animation so the
-        // tiles still glide smoothly into place.
-        if (assembled) {
-          drawX = Math.round(drawX * DPR) / DPR;
-          drawY = Math.round(drawY * DPR) / DPR;
-        }
-        ctx.fillRect(drawX, drawY, currentS, currentS);
+      frame = 0;
+      debug.frames += 1;
+      if (!moving()) {
+        if (!staticDrawn) renderStatic();
+        return;
       }
+      if (pixels === undefined) return;
+      if (started === undefined) {
+        startPlayback();
+        if (started === undefined) return;
+      }
+      var progress = (now - started) / RIPPLE_MS;
+      if (progress >= 1) {
+        started = undefined;
+        clear();
+        restTimer = window.setTimeout(startPlayback, REST_MS);
+        return;
+      }
+      if (now - last + 0.5 >= 1000 / FRAME_RATE) {
+        var fade = Math.min(1, progress * 15, (1 - progress) * 10);
+        paintFrame(Math.floor(progress * ATLAS.frames), fade);
+        last = now;
+      }
+      frame = requestAnimationFrame(renderAnimation);
     }
+
+    var image = new Image();
+    image.onload = function () {
+      var source = document.createElement('canvas');
+      source.width = image.naturalWidth;
+      source.height = image.naturalHeight;
+      try {
+        if (source.width !== ATLAS.width * ATLAS.columns
+            || source.height !== ATLAS.height * Math.ceil(ATLAS.frames / ATLAS.columns)) {
+          throw new Error('breach atlas dimensions do not match its frame geometry');
+        }
+        var reader = source.getContext('2d');
+        if (reader === null) throw new Error('canvas context unavailable');
+        reader.drawImage(image, 0, 0);
+        pixels = reader.getImageData(0, 0, source.width, source.height).data;
+      } catch (error) {
+        console.warn('startup pixel whale is unavailable; the page remains usable', error);
+        canvas.style.display = 'none';
+        return;
+      } finally {
+        source.width = source.height = 0;
+        image.removeAttribute('src');
+      }
+      resizeCanvas();
+      if (moving()) startPlayback();
+      else renderStatic();
+    };
+    image.onerror = function () {
+      console.warn('startup pixel whale atlas could not be decoded; the page remains usable');
+      canvas.style.display = 'none';
+    };
+    image.src = 'breach-atlas.webp';
+
+    window.addEventListener('resize', function () {
+      resizeCanvas();
+      if (!moving() && pixels !== undefined) renderStatic();
+    });
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+        started = undefined;
+        window.clearTimeout(restTimer);
+        restTimer = 0;
+        return;
+      }
+      if (moving()) {
+        if (started === undefined) startPlayback();
+      } else if (pixels !== undefined) {
+        renderStatic();
+      }
+    });
+    if (reduced && reduced.addEventListener) {
+      reduced.addEventListener('change', function () {
+        cancelAnimationFrame(frame);
+        frame = 0;
+        window.clearTimeout(restTimer);
+        restTimer = 0;
+        started = undefined;
+        if (reduced.matches) {
+          if (pixels !== undefined) renderStatic();
+        } else if (pixels !== undefined) {
+          startPlayback();
+        }
+      });
+    }
+    if (window.MutationObserver) {
+      new MutationObserver(function () {
+        ctx.fillStyle = getComputedStyle(canvas).color;
+        if (!moving() && pixels !== undefined) renderStatic();
+      }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    }
+    resizeCanvas();
 
     // ========================================================== Multi-Stage Linear Progress Engine
     var STAGES = [
@@ -1668,10 +1559,7 @@ window.__dshStartupShowFailure = function (config) {
       showFailure(qf.config).then(qf.resolve);
     }
 
-    window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();
     setMilestoneNodes(0);
-    requestAnimationFrame(renderAnimation);
   })();
   </script>
 </body>

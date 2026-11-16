@@ -145,13 +145,43 @@ app.whenReady().then(async () => {
 
     await win.webContents.executeJavaScript(`document.querySelector('#startup-bar').dataset.mode = 'indeterminate'; window.__dshStartupUpdate({ stage: 4, message: 'normal motion', progress: null, brand: { name: 'DSH APP', version: '0.17.7' }, theme: 'light', saying: '' })`)
     await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] })
-    await sleep(150)
+    await sleep(2500)
     const motion = await win.webContents.executeJavaScript(`({ sweep: getComputedStyle(document.querySelector('#startup-bar'), '::after').animationName, stage: getComputedStyle(document.querySelector('.stage-monolith')).animationName })`)
     assert(motion.sweep === 'railSweep' && motion.stage === 'stageFadeIn', 'normal motion did not enable the restrained entrance/sweep')
+    // The official breach atlas plays on a loop under normal motion; reduced
+    // motion keeps one static frame. Count painted pixels rather than trusting
+    // the element's presence: the central renderer is the thing under test.
+    const central = await win.webContents.executeJavaScript(`(() => {
+      const canvas = document.getElementById('whale-canvas')
+      const context = canvas.getContext('2d')
+      const { data } = context.getImageData(0, 0, canvas.width, canvas.height)
+      let painted = 0
+      for (let i = 3; i < data.length; i += 4) if (data[i] > 8) painted += 1
+      return { painted, display: getComputedStyle(canvas).display }
+    })()`)
+    assert(central.display !== 'none', 'the central pixel whale canvas was hidden')
+    assert(central.painted > 1000, `the central pixel whale did not paint under normal motion (${central.painted} px)`)
+    await capture(win, '08-central-whale-normal-motion')
+    // One ripple is 5.7 s plus a 1.2 s rest; the wait below crosses that
+    // boundary. Count plays before and after: a single play is what a boot that
+    // finishes quickly shows, but the page itself has to keep looping.
+    const playsBefore = await win.webContents.executeJavaScript(`window.__dshStartupWhale.plays`)
+    await sleep(8000)
+    const playsAfter = await win.webContents.executeJavaScript(`window.__dshStartupWhale.plays`)
+    assert(playsAfter > playsBefore, `the splash whale did not loop (${playsBefore} → ${playsAfter})`)
     await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
     await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width: 900, height: 600, deviceScaleFactor: 2, mobile: false })
-    await sleep(200)
-    assert(await win.webContents.executeJavaScript(`document.querySelector('#whale-canvas').width === document.querySelector('#whale-canvas').clientWidth * 2`), 'DPR=2 canvas was not rendered at full resolution')
+    const dprOk = await win.webContents.executeJavaScript(`new Promise((resolve) => {
+      const deadline = Date.now() + 1500
+      const check = () => {
+        const canvas = document.querySelector('#whale-canvas')
+        if (canvas.width === canvas.clientWidth * 2) { resolve(true); return }
+        if (Date.now() > deadline) { resolve(false); return }
+        setTimeout(check, 50)
+      }
+      check()
+    })`)
+    assert(dprOk, 'DPR=2 canvas was not rendered at full resolution')
     await win.webContents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride', {})
     await win.webContents.executeJavaScript(view({ stage: 4, progress: 0.76 }))
     await themeReady(win, 'light')
