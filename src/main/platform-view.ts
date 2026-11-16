@@ -234,6 +234,10 @@ export class PlatformView {
   private readonly storageCleanup = new Map<Session, Promise<{ error: unknown } | null>>()
   /** Sessions that already carry the download refusal (see `open`). */
   private readonly downloadGuards = new WeakSet<Session>()
+  /** What the open document shows, kept so a hide can restore it (see {@link suspend}). */
+  private current: { page: PlatformPage, bounds: PlatformBounds } | null = null
+  /** The page a `suspend` released, waiting for the next {@link resume}. */
+  private suspended: { page: PlatformPage, bounds: PlatformBounds } | null = null
   private disposed = false
 
   /**
@@ -414,6 +418,7 @@ export class PlatformView {
     })
     this.view = view
     this.owner = owner
+    this.current = { page, bounds }
 
     // The document outlives this module's own bookkeeping in several ways, and the
     // credential must not: every one of them closes the view. The owner's own
@@ -501,6 +506,7 @@ export class PlatformView {
 
   /** @param bounds - the current viewport rectangle. */
   setBounds(bounds: PlatformBounds): void {
+    if (this.current !== null) this.current = { ...this.current, bounds }
     this.view?.setBounds(bounds)
   }
 
@@ -543,6 +549,39 @@ export class PlatformView {
   }
 
   /**
+   * Release the document but remember what it showed, for {@link resume}.
+   *
+   * Used when the owning window is hidden to the tray: the embedded page keeps a
+   * whole renderer process alive for a surface nobody can see, and that is the
+   * state a user leaves the app in for hours. Unlike {@link close}, which forgets
+   * the page, this one lets the next show put the same page back — the client
+   * overlay above it has no way to know the native view went away, so restoring
+   * what it was showing is what keeps the two in step.
+   */
+  suspend(): void {
+    const remembered = this.current
+    if (remembered === null) return
+    this.close()
+    this.suspended = remembered
+  }
+
+  /**
+   * Restore the page {@link suspend} released.
+   *
+   * Does nothing when nothing was suspended, when the credential has since gone
+   * away (signed out while hidden), or when the window is already gone. A failed
+   * load is the caller's to report: the overlay's own retry re-opens the page.
+   *
+   * @param owner - the window the view belongs to, now visible again.
+   */
+  async resume(owner: BrowserWindow): Promise<void> {
+    const remembered = this.suspended
+    this.suspended = null
+    if (remembered === null || this.disposed || this.account === null || owner.isDestroyed()) return
+    await this.open(owner, remembered.page, remembered.bounds)
+  }
+
+  /**
    * Destroy the document, release its owner listeners, and discard its storage.
    *
    * The partition is account-scoped and can be PERSISTENT (see
@@ -553,6 +592,11 @@ export class PlatformView {
    */
   close(): void {
     this.generation += 1
+    // A close that is not a suspend FORGETS the page: the user went back, signed
+    // out, or the document failed, and reopening it on the next show would be a
+    // page nobody asked for.
+    this.current = null
+    this.suspended = null
     const view = this.view
     this.view = undefined
     this.releaseOwner?.()

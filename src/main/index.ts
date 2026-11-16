@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Notification, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, Notification, session, shell } from 'electron'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -969,6 +969,18 @@ function attachMainWindowHandlers(win: BrowserWindow): void {
   })
   win.on('closed', () => {
     mainWindow = null
+  })
+  // Closing the window hides it to the tray, so this is the long-lived state a
+  // user leaves the app in. The embedded Platform page owns its own renderer
+  // (a WebContentsView); release it here and restore it on the next show, so the
+  // account surface costs nothing while the window cannot be seen.
+  win.on('hide', () => {
+    platformView?.suspend()
+  })
+  win.on('show', () => {
+    void platformView?.resume(win).catch((error: unknown) => {
+      logKernel(`[platform] could not restore the account page: ${error instanceof Error ? error.message : String(error)}`)
+    })
   })
 }
 
@@ -2079,6 +2091,12 @@ function logKernel(line: string): void {
 }
 
 async function boot(): Promise<void> {
+  // A released build ships no application menu. The default Electron menu is the
+  // only thing that offers DevTools, a reload accelerator, and an Exit item that
+  // bypasses this shell's own close choice (tray or quit); the web contents
+  // handle the editing shortcuts themselves, so nothing else is lost. macOS keeps
+  // its menu: there the clipboard, quit and window commands ARE menu roles.
+  if (app.isPackaged && process.platform !== 'darwin') Menu.setApplicationMenu(null)
   // The run's first event. Everything below is a milestone against it, and the
   // `detail` here is what a reader needs to know which build the run was.
   logEvent('app.boot.begin', {

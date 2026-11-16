@@ -92,6 +92,11 @@ const MAIN_WINDOW_OPTS = {
     contextIsolation: true,
     nodeIntegration: false,
     sandbox: true,
+    // The app is a single-window chat/code surface: no WebSQL, and hidden
+    // renderers should follow Chromium's throttling (the default, stated so a
+    // later edit cannot silently turn it off).
+    enableWebSQL: false,
+    backgroundThrottling: true,
     // ONE marker, and nothing else: the kernel's account UI exists only when the
     // page sees `window.dshDesktop` (`ui-settings-account/src/client/index.ts:28`
     // returns early without it), and without it the account section, sign-in
@@ -104,6 +109,23 @@ const MAIN_WINDOW_OPTS = {
 
 /** Debounce before the window geometry is written to disk (resize/move end). */
 const GEOMETRY_SAVE_DEBOUNCE_MS = 500
+
+/**
+ * The main window's options, with the one field that is decided at runtime.
+ *
+ * DevTools has no user-facing job in a released build, and the default menu (see
+ * the menu removal in index.ts) is the only way to reach it; a dev run keeps it,
+ * because that is where the shell is debugged. Computed here rather than inside
+ * {@link MAIN_WINDOW_OPTS} because a plain Node test loads this module with no
+ * Electron behind it (`require('electron')` answers a path string there), and a
+ * module-scope `app.isPackaged` would throw on import.
+ */
+function mainWindowOptions(): Electron.BrowserWindowConstructorOptions {
+  return {
+    ...MAIN_WINDOW_OPTS,
+    webPreferences: { ...MAIN_WINDOW_OPTS.webPreferences, devTools: !app.isPackaged },
+  }
+}
 
 /**
  * How long the window waits for its first document before showing itself anyway.
@@ -956,7 +978,7 @@ export function resetOverlayColor(win: BrowserWindow): void {
 export function createMainWindow(theme?: ThemeMode): BrowserWindow {
   const geometry = initialWindowGeometry()
   const win = new BrowserWindow({
-    ...MAIN_WINDOW_OPTS,
+    ...mainWindowOptions(),
     ...geometry,
     show: false,
     // The native strip is visible before the page's own chrome sampler runs.
@@ -1064,7 +1086,7 @@ function installNavigationFence(win: BrowserWindow): void {
     // sub-view) should open inside the app, not be kicked to the browser.
     // The splash document is allowed as well: it is the shell's own file.
     if (isShellNavigationTarget(target)) {
-      return { action: 'allow', overrideBrowserWindowOptions: MAIN_WINDOW_OPTS }
+      return { action: 'allow', overrideBrowserWindowOptions: mainWindowOptions() }
     }
     openExternalSafe(target)
     return { action: 'deny' }

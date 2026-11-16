@@ -404,6 +404,32 @@ test('a disposed view refuses to be resurrected', () => {
   assert.match(setSession[1], /if \(this\.disposed\) return/u)
 })
 
+test('a hidden window releases the account page and restores it on show', () => {
+  const view = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
+  // The embedded page is a whole renderer process for a surface nobody can see,
+  // and hiding to the tray is the state a user leaves the app in. `suspend` closes
+  // the document but REMEMBERS the page, which `resume` opens again: the client
+  // overlay above the native view has no way to learn it went away, so the pair
+  // has to travel together.
+  const suspend = /  suspend\(\): void \{([\s\S]*?)\n  \}\n/u.exec(view)
+  assert.ok(suspend !== null, 'suspend is what releases the hidden page')
+  assert.match(suspend[1], /this\.close\(\)/u)
+  assert.match(suspend[1], /this\.suspended = remembered/u)
+  const resume = /  async resume\(owner: BrowserWindow\): Promise<void> \{([\s\S]*?)\n  \}\n/u.exec(view)
+  assert.ok(resume !== null, 'resume is what puts the page back')
+  assert.match(resume[1], /this\.suspended = null/u)
+  assert.match(resume[1], /await this\.open\(owner, remembered\.page, remembered\.bounds\)/u)
+  // Any other close FORGETS the page: the user went back or signed out, and a
+  // later show must not resurrect a surface nobody asked for.
+  const close = /  close\(\): void \{([\s\S]*?)\n  \}\n/u.exec(view)
+  assert.ok(close !== null)
+  assert.match(close[1], /this\.suspended = null/u)
+  // And the window's own events are where the pair is wired.
+  const shell = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
+  assert.match(shell, /win\.on\('hide', \(\) => \{\s*platformView\?\.suspend\(\)/u)
+  assert.match(shell, /win\.on\('show', \(\) => \{\s*void platformView\?\.resume\(win\)/u)
+})
+
 test('both install paths await the discard before replacing the process', () => {
   const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'updater.ts'), 'utf8')
   // Two install paths replace the process: electron-updater's quitAndInstall and
