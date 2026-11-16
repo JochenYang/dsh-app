@@ -441,9 +441,15 @@ test('the retention cap keeps the newest manifests and collects what it drops', 
 
 test('the blob budget drops the oldest snapshots rather than growing without bound', async () => {
   const { root, home } = scratch()
-  const payload = 'x'.repeat(4096)
   for (let turn = 1; turn <= 3; turn += 1) {
-    writeFileSync(join(root, 'a.txt'), `${payload}${String(turn)}`)
+    // Each turn writes a DIFFERENT SIZE, and that is load-bearing: the capture
+    // skips reading a file whose size and mtime both match the previous
+    // manifest, and three back-to-back writes of one size land inside a single
+    // filesystem timestamp tick (measured: 183 of 200 same-size rewrites share
+    // one truncated millisecond) — so a same-size fixture would record two blobs
+    // here and read as a budget bug. Real captures are a turn apart; this loop
+    // is not, so the fixture must not depend on sub-tick timing.
+    writeFileSync(join(root, 'a.txt'), 'x'.repeat(4096 + turn))
     await captureWorkspace(home, 's', turn, root, limits(), await latestSnapshotBefore(home, 's', turn))
   }
   assert.equal(blobCount(home), 3)
