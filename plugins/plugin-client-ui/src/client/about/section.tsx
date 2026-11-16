@@ -12,10 +12,11 @@
  *    (wrapped, not ellipsised) because the point of this card is that a user
  *    can read or copy it; the diagnostics page's `shortenPath` exists for a
  *    different job.
- * 3. **操作** — the three gestures the tray also offers (check app updates,
- *    check kernel updates, restart the service). Each answers as soon as it is
- *    STARTED: the shell takes over from there and shows its own progress, so
- *    this page must not pretend to know the outcome.
+ * 3. **操作** — check app updates, check kernel updates, restart the service.
+ *    The update checks' only manual entry point (the tray keeps daily actions
+ *    and recovery alone); the restart is shared with the tray. Each answers as
+ *    soon as it is STARTED: the shell takes over from there and shows its own
+ *    progress, so this page must not pretend to know the outcome.
  *
  * Everything here comes from the `dsh-app.client-ui` namespace through the `t`
  * standard seat: the section registers with `locale: NS`, so the renderer hands
@@ -36,6 +37,26 @@ import { NS } from './locales.ts'
 
 /** How long a success notice stays on screen (same policy as the other pages). */
 const NOTICE_TIMEOUT_MS = 4_000
+
+/**
+ * One success notice's self-clear. Success is feedback, not state: it holds
+ * for {@link NOTICE_TIMEOUT_MS} and returns to idle; a failure stays on screen
+ * because the user still has to act on it. The deps are this notice's own
+ * `done` flag and a stable clear, so a neighbour's click never extends its
+ * hold, and unmount clears the timer.
+ *
+ * Why an inline status instead of the host's floating Toast: during these
+ * operations the SHELL owns the top-center banner seat (its update progress
+ * card, `update-card.ts`), and a second floating banner would land on top of
+ * it. The confirmation belongs beside its button and clears itself.
+ */
+function useSelfClearingNotice(done: boolean, clear: () => void): void {
+  useEffect(() => {
+    if (!done) return
+    const timer = setTimeout(clear, NOTICE_TIMEOUT_MS)
+    return () => { clearTimeout(timer) }
+  }, [done, clear])
+}
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type AboutSectionProps = PropsLocale<typeof NS>
@@ -71,6 +92,23 @@ export function AboutSection({ t }: AboutSectionProps): ReactNode {
   const [open, setOpen] = useState<ActionState>({ kind: 'idle' })
   const [copy, setCopy] = useState<'idle' | 'done' | 'failed'>('idle')
 
+  const clearAction = useCallback((action: AboutAction): void => {
+    setActions((current) => current[action].kind === 'done' ? { ...current, [action]: { kind: 'idle' } } : current)
+  }, [])
+  const clearAppUpdate = useCallback(() => { clearAction('check-app-update') }, [clearAction])
+  const clearKernelUpdate = useCallback(() => { clearAction('check-kernel-update') }, [clearAction])
+  const clearRestart = useCallback(() => { clearAction('restart-server') }, [clearAction])
+  const clearOpen = useCallback(() => { setOpen((current) => current.kind === 'done' ? { kind: 'idle' } : current) }, [])
+  const clearCopy = useCallback(() => { setCopy((current) => current === 'done' ? 'idle' : current) }, [])
+
+  // Every success notice on the page self-clears; failures and unsupported
+  // states persist until the next attempt replaces them.
+  useSelfClearingNotice(actions['check-app-update'].kind === 'done', clearAppUpdate)
+  useSelfClearingNotice(actions['check-kernel-update'].kind === 'done', clearKernelUpdate)
+  useSelfClearingNotice(actions['restart-server'].kind === 'done', clearRestart)
+  useSelfClearingNotice(open.kind === 'done', clearOpen)
+  useSelfClearingNotice(copy === 'done', clearCopy)
+
   const load = useCallback(async (): Promise<void> => {
     setInfo({ kind: 'loading' })
     const answer = await fetchAboutInfo()
@@ -79,14 +117,6 @@ export function AboutSection({ t }: AboutSectionProps): ReactNode {
   }, [])
 
   useEffect(() => { void load() }, [load])
-
-  // A success notice is feedback, not state: it clears itself. A failure stays —
-  // the user still has to act on it.
-  useEffect(() => {
-    if (copy !== 'done') return
-    const timer = setTimeout(() => { setCopy('idle') }, NOTICE_TIMEOUT_MS)
-    return () => { clearTimeout(timer) }
-  }, [copy])
 
   const runAction = useCallback(async (action: AboutAction): Promise<void> => {
     setActions((current) => ({ ...current, [action]: { kind: 'busy' } }))
@@ -112,6 +142,10 @@ export function AboutSection({ t }: AboutSectionProps): ReactNode {
   }, [])
 
   const copyHome = useCallback(async (value: string): Promise<void> => {
+    // Retire any previous confirmation first: copy has no busy state, so without
+    // this a re-click while 'done' would not flip the flag and the new notice
+    // could inherit the old timer's remaining hold.
+    setCopy('idle')
     try {
       await navigator.clipboard.writeText(value)
       setCopy('done')
