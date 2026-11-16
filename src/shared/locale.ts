@@ -45,16 +45,14 @@ export const LOCALE_ENV = 'DSH_APP_LOCALE'
 /** zh-CN table. Its key set is the single source of truth for `MessageKey`. */
 const ZH_CN = {
   // ------------------------------------------------------------- tray menu
-  'tray.checkKernelUpdate': '检查内核更新…',
-  'tray.checkKernelUpdateWithVersion': '检查内核更新…（当前 dsh {version}）',
   'tray.openApp': '打开 {app}',
-  'tray.checkAppUpdate': '检查应用更新…',
   'tray.restartServer': '重启服务',
   'tray.openTerminal': '打开终端（dsh 命令行）',
-  'tray.rollbackApp': '回滚到上一版本',
+  'tray.recovery': '故障排查与恢复',
+  'tray.rollbackApp': '回滚应用到上一版本',
   'tray.exitSafeMode': '退出安全模式',
   'tray.enterSafeMode': '以安全模式重启',
-  'tray.restoreConfig': '恢复上一次可用配置',
+  'tray.restoreConfig': '恢复用户配置',
   'tray.quit': '退出',
   'tray.safeModeTag': '（安全模式）',
   // The tray's "open terminal" item is the one entry that can fail for reasons
@@ -369,16 +367,14 @@ export type MessageKey = keyof typeof ZH_CN
  */
 const EN_US: Record<MessageKey, string> = {
   // ------------------------------------------------------------- tray menu
-  'tray.checkKernelUpdate': 'Check for kernel updates…',
-  'tray.checkKernelUpdateWithVersion': 'Check for kernel updates… (current dsh {version})',
   'tray.openApp': 'Open {app}',
-  'tray.checkAppUpdate': 'Check for app updates…',
   'tray.restartServer': 'Restart server',
   'tray.openTerminal': 'Open terminal (dsh CLI)',
-  'tray.rollbackApp': 'Roll back to the previous version',
+  'tray.recovery': 'Troubleshoot & recover',
+  'tray.rollbackApp': 'Roll back the app to the previous version',
   'tray.exitSafeMode': 'Leave safe mode',
   'tray.enterSafeMode': 'Restart in safe mode',
-  'tray.restoreConfig': 'Restore the last working configuration',
+  'tray.restoreConfig': 'Restore user configuration',
   'tray.quit': 'Quit',
   'tray.safeModeTag': ' (safe mode)',
   'terminal.openFailed': 'Could not open the terminal: {detail}. The log can be opened from the Maintenance → Diagnostics page.',

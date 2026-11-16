@@ -45,7 +45,7 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { noticeThemedDialog, promptThemedDialog } from './themed-dialog'
 import { createTray, destroyTray, setTrayTooltip, updateTrayMenu } from './tray'
 import { kernelCliUsable, openManagedTerminal, terminalLogLine } from './terminal'
-import { initShellUpdater, setHostTaskInspector, setPlatformCredentialDiscard, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, UPDATED_ARGV } from './updater'
+import { initShellUpdater, setHostTaskInspector, setPlatformCredentialDiscard, checkShellUpdate, consumeUpdaterInstallResult, rollbackShellUpdate, syncRollbackTarget, UPDATED_ARGV } from './updater'
 import { HOST_TASK_INSPECT_TIMEOUT_MS, KERNEL_CHECK_INTERVAL_MS, KERNEL_NODE_NAME, LEGACY_PROFILE, OFFICE_PAYLOAD_ENV, SUITE_PROFILE, resolveArtifactOwner, resolveArtifactRepo } from '../shared/constants'
 import { dropForeignProjection, dropRuntimeMirror, ensureSuiteProfile, mirrorRuntimeIntoProfile, type KernelTreeOutcome, type MigrationOutcome } from './suite-profile'
 import { healLogLine, healProfileDependencies, installIntoProfile, isInstallablePackageName, type ProfileHealOutcome } from './profile-heal'
@@ -445,6 +445,23 @@ function captureStartupCheckpoint(profileDir: string): void {
   })) return
   configCheckpointCaptured = true
   void captureConfigCheckpoint({ ...configCheckpointScope(profileDir), log: logKernel })
+    .then(() => refreshTrayRestorableConfig())
+}
+
+/**
+ * The tray's restore-config answer, cached: the menu is a synchronous snapshot
+ * while the verification is async digests. Refreshed at boot (a checkpoint may
+ * exist from a previous run, including one a failed boot left behind) and after
+ * every capture — the only writer. The failure card re-asks at click time, and
+ * a refused restore re-asks immediately (see `restoreLastWorkingConfig`), so a
+ * stale cache self-heals instead of keeping a dead row or hiding a live one.
+ */
+let trayRestorableConfig = false
+function refreshTrayRestorableConfig(): void {
+  void hasRestorableConfigCheckpoint(configCheckpointScope(suiteProfileDir())).then((restorable) => {
+    trayRestorableConfig = restorable
+    updateTrayMenu()
+  })
 }
 
 /**
@@ -474,6 +491,10 @@ async function restoreLastWorkingConfig(origin: 'failure-card' | 'tray'): Promis
     await relaunchAfterDiscard()
     return
   }
+  // A refusal means the cached tray answer may now be wrong in either
+  // direction (the checkpoint was deleted or corrupted out of band); re-ask
+  // so the menu cannot keep offering a row whose only outcome is this advice.
+  refreshTrayRestorableConfig()
   const advice = outcome.status === 'none'
     ? t('configCheckpoint.none')
     : outcome.status === 'invalid'
@@ -2274,8 +2295,6 @@ async function boot(): Promise<void> {
       if (!mainWindow) void startServerAndOpenWindow()
       else mainWindow.show()
     },
-    onCheckKernelUpdate: () => void checkKernelUpdate(true),
-    onCheckAppUpdate: () => checkShellUpdate(true, mainWindow),
     onRestartServer: () => void startServerAndOpenWindow(),
     onOpenTerminal: () => void openManagedTerminalFromTray(),
     // The row is greyed when the plan the click would build must refuse with
@@ -2284,10 +2303,14 @@ async function boot(): Promise<void> {
     canOpenTerminal: () => kernelCliUsable(kernelCliPath()),
     onToggleSafeMode: () => void restartWithSafeMode(!safeModeActive),
     onRestoreConfig: () => void restoreLastWorkingConfig('tray'),
+    canRestoreConfig: () => trayRestorableConfig,
     isSafeMode: () => safeModeActive,
     onRollbackApp: () => void rollbackShellUpdate(mainWindow),
-    getCurrentVersion: () => kernel.getCurrent()?.manifest.dshVersion ?? null,
+    canRollbackApp: () => syncRollbackTarget() !== null,
   })
+  // The checkpoint question is async; ask it once the tray exists so a boot
+  // that never reaches a window still shows the restore row when one exists.
+  refreshTrayRestorableConfig()
 
   // load() reads the on-disk kernel (or the dev checkout manifest) into
   // this.current — no network or install work. A null result means first run

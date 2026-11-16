@@ -1,7 +1,7 @@
 import { app, shell, type BrowserWindow } from 'electron'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { createReadStream } from 'node:fs'
+import { createReadStream, readFileSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import { Readable } from 'node:stream'
 import path from 'node:path'
@@ -22,6 +22,7 @@ import { errorFactsDetail, logEvent, reportUnrecordedText, trackedEventOperation
 import { readJsonFile, writeJsonFileAtomic } from './json-file'
 import { noticeThemedDialog, promptThemedDialog, resolveDialogWindow } from './themed-dialog'
 import { clearKernelProgress, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
+import { updateTrayMenu } from './tray'
 
 let initialized = false
 let busy = false
@@ -818,11 +819,48 @@ function versionHistoryFile(): string {
   return path.join(app.getPath('userData'), 'dsh-app-version-history.json')
 }
 
+/** Keep only entries that carry a version string; anything else is not a record. */
+function sanitizeVersionHistory(list: unknown): VersionHistoryEntry[] {
+  if (!Array.isArray(list)) return []
+  return list.filter((entry): entry is VersionHistoryEntry =>
+    entry !== null && typeof entry === 'object' && typeof (entry as { version?: unknown }).version === 'string')
+}
+
 async function readVersionHistory(): Promise<VersionHistoryEntry[]> {
-  const list = await readJsonFile<VersionHistoryEntry[]>(versionHistoryFile())
-  return Array.isArray(list)
-    ? list.filter((entry) => entry !== null && typeof entry.version === 'string')
-    : []
+  return sanitizeVersionHistory(await readJsonFile<unknown>(versionHistoryFile()))
+}
+
+/**
+ * The version a rollback lands on: the entry before the running one, when it
+ * is a different, usable version. ONE rule for the click and for the tray row
+ * that offers it, so the menu never offers what the click would refuse.
+ */
+export function rollbackTargetVersion(history: readonly VersionHistoryEntry[], current: string): string | null {
+  const previous = history.length >= 2 ? history[history.length - 2].version : null
+  return previous !== null && previous !== current && isSafeVersion(previous) ? previous : null
+}
+
+/**
+ * The tray menu's rollback question, answered synchronously at menu build
+ * (the template is a snapshot). Mirrors the click's STATE refusals —
+ * non-Windows, dev run, no target — and reads the same history file; a missing
+ * file is first-run state, not an error. The transient `busy` guard stays
+ * click-side: a download in flight reports itself with a toast, like the
+ * terminal row's later-decided failures.
+ *
+ * Windows-only because rollback drives the custom shell-update chain (tagged
+ * release assets + latest.yml + NSIS wizard); macOS/Linux update through
+ * electron-updater, which has no per-release asset contract to lean on.
+ */
+export function syncRollbackTarget(): string | null {
+  if (process.platform !== 'win32' || process.env.DSH_APP_DEV === '1') return null
+  let list: unknown
+  try {
+    list = JSON.parse(readFileSync(versionHistoryFile(), 'utf8'))
+  } catch {
+    return null
+  }
+  return rollbackTargetVersion(sanitizeVersionHistory(list), app.getVersion())
 }
 
 /**
@@ -836,6 +874,8 @@ async function appendVersionHistory(version: string): Promise<void> {
     if (history[history.length - 1]?.version === version) return
     const next = [...history, { version, at: new Date().toISOString() } satisfies VersionHistoryEntry].slice(-VERSION_HISTORY_MAX)
     await writeJsonFileAtomic(versionHistoryFile(), next)
+    // The tray's rollback row is a snapshot of this file; rebuild it now.
+    updateTrayMenu()
   } catch (err) {
     console.error('[shell-updater] failed to record version history:', (err as Error).message)
   }
@@ -894,6 +934,7 @@ async function reconcileVersionHistory(): Promise<void> {
   try {
     await writeJsonFileAtomic(versionHistoryFile(), next)
     console.log(`[shell-updater] version history reconciled to ${current} (was ${history[history.length - 1]?.version ?? 'empty'})`)
+    updateTrayMenu()
   } catch (err) {
     console.error('[shell-updater] failed to reconcile version history:', (err as Error).message)
   }
@@ -1311,10 +1352,8 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
   try {
     const history = await readVersionHistory()
     const current = app.getVersion()
-    // history[len-1] is the running version (recorded on its confirmation);
-    // len-2 is the state before it — where a rollback lands.
-    const previous = history.length >= 2 ? history[history.length - 2].version : null
-    if (previous === null || previous === current || !isSafeVersion(previous)) {
+    const previous = rollbackTargetVersion(history, current)
+    if (previous === null) {
       await noticeInFrame(win, 'info', APP_NAME, t('updater.noRollbackTarget'))
       return
     }

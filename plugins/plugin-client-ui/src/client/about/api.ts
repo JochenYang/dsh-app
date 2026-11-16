@@ -40,7 +40,7 @@ export interface AboutInfo extends ShellActionAnswer {
   }
 }
 
-/** The three shell-performed gestures this page offers, named as the tray names them. */
+/** The three shell-performed gestures this page offers; `restart-server` is named as the tray names it. */
 export type AboutAction = 'check-app-update' | 'check-kernel-update' | 'restart-server'
 
 /**
@@ -58,7 +58,7 @@ export async function fetchAboutInfo(): Promise<RouteOutcome<AboutInfo>> {
 }
 
 /**
- * Start one of the tray's gestures from inside the window.
+ * Start one of the shell's gestures from inside the window.
  *
  * The shell answers as soon as the action is STARTED, never when it finishes: an
  * app-update check downloads a large installer and raises its own dialogs, so

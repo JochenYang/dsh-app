@@ -117,9 +117,10 @@ const STAMP_HEADERS = [INITIATOR_HEADER, WINDOW_HEADER, STAMP_HEADER]
  * knows which kernel is active and therefore which payload it needs.
  *
  * `about-info` and the two `check-*` actions back the settings page's
- * 「关于 DSH-APP」 section: the same three things the tray offers, reachable
- * from inside the window. `restart-server` is the tray's own action, named the
- * same way here so one word means one thing in both surfaces.
+ * 「关于 DSH-APP」 section — the update checks' only manual entry point, since
+ * the tray keeps daily actions and recovery alone. `restart-server` is shared
+ * with the tray, named the same way here so one word means one thing in both
+ * surfaces.
  */
 export const SHELL_ACTIONS = [
   'open-logs',
@@ -201,13 +202,13 @@ export interface ShellActionDeps {
    */
   aboutInfo?: () => AboutInfo
   /**
-   * Start a shell-update check, exactly as the tray's row does. Resolves when
+   * Start a shell-update check, exactly as the About page's row does. Resolves when
    * the check has been STARTED, not when it finishes: the check downloads a
    * ~200 MB installer and prompts, so awaiting it would hold the request open
    * for minutes and the page would look hung.
    */
   checkAppUpdate?: () => void
-  /** Start a kernel-update check (the tray's own row). */
+  /** Start a kernel-update check (the About page's own row). */
   checkKernelUpdate?: () => void
   /** Restart the kernel child (the tray's 重启服务). */
   restartServer?: () => void
@@ -590,7 +591,7 @@ async function dispatch(action: ShellAction, request: Request, deps: ShellAction
       // STARTED, not finished: an app-update check downloads a large installer
       // and raises its own dialogs, so awaiting it would hold this request open
       // for minutes. The page reports "started" and the shell's own progress UI
-      // takes over — the same thing the tray row does.
+      // takes over — the same thing the About page row does.
       run()
       deps.log?.(`[shell-action] ${action}: started`)
       return sendJson(200, { ok: true, started: true })

@@ -362,8 +362,9 @@ export function apply(ctx: ClientContext): void {
     label: () => t('diag.nav'),
   }, DiagnosticsSection))
 
-  // --- 关于 DSH-APP: the versions, the two paths, and the three gestures the
-  // tray also offers. Its own rail row (order 26) rather than a fourth tab of
+  // --- 关于 DSH-APP: the versions, the two paths, and the update-check /
+  // restart gestures (the checks' only manual entry point; the restart is
+  // shared with the tray). Its own rail row (order 26) rather than a fourth tab of
   // 维护: "what am I running" is a question about the INSTALL, not about the
   // suite's health, and it is the one settings page a user looks for by name.
   // 26 puts it last of this suite's rows, after 维护 (24) and after upstream's

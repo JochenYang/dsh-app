@@ -6,8 +6,6 @@ import { t } from '../shared/locale'
 
 export interface TrayCallbacks {
   onOpen: () => void
-  onCheckKernelUpdate: () => void
-  onCheckAppUpdate: () => void
   onRestartServer: () => void
   /**
    * Open the user's own terminal with the shell's private `dsh`/`pnpm`/`node`
@@ -30,12 +28,22 @@ export interface TrayCallbacks {
    * boot, reachable while the failure card is not on screen.
    */
   onRestoreConfig: () => void
+  /**
+   * Whether a verified configuration checkpoint exists right now. The row is
+   * only offered when the click would act — the same principle the failure
+   * card applies to its own restore button (see `offerStartupRecovery`).
+   */
+  canRestoreConfig: () => boolean
   /** True while the shell runs in safe mode; picks the toggle's menu label. */
   isSafeMode: () => boolean
   /** Roll the shell app back to the previous recorded version. */
   onRollbackApp: () => void
-  /** Current kernel version for the tray menu label, or null when unknown. */
-  getCurrentVersion: () => string | null
+  /**
+   * Whether a rollback target exists right now (the updater's own rule, read
+   * synchronously at menu build). Like `canRestoreConfig`, keeps a row whose
+   * only outcome would be a refusal sentence out of the menu.
+   */
+  canRollbackApp: () => boolean
 }
 
 let tray: Tray | null = null
@@ -78,20 +86,8 @@ function buildTrayMenu(callbacks: TrayCallbacks): Electron.Menu {
  * @returns the template `Menu.buildFromTemplate` consumes.
  */
 export function trayMenuTemplate(callbacks: TrayCallbacks): Electron.MenuItemConstructorOptions[] {
-  const version = callbacks.getCurrentVersion()
-  const kernelLabel = version
-    ? t('tray.checkKernelUpdateWithVersion', { version })
-    : t('tray.checkKernelUpdate')
   return [
     { label: t('tray.openApp', { app: APP_NAME }), click: callbacks.onOpen },
-    { type: 'separator' },
-    { label: kernelLabel, click: callbacks.onCheckKernelUpdate },
-    { label: t('tray.checkAppUpdate'), click: callbacks.onCheckAppUpdate },
-    { type: 'separator' },
-    { label: t('tray.restartServer'), click: callbacks.onRestartServer },
-    // Same group as the restart/rollback rows: this is the "work on the running
-    // installation" set, and the terminal it opens is the CLI fallback for a
-    // plugin operation the market could not complete.
     {
       label: t('tray.openTerminal'),
       click: callbacks.onOpenTerminal,
@@ -102,32 +98,49 @@ export function trayMenuTemplate(callbacks: TrayCallbacks): Electron.MenuItemCon
       // reports itself.
       enabled: callbacks.canOpenTerminal(),
     },
-    // Windows-only: rollback drives the custom shell-update chain (tagged
-    // release assets + latest.yml + NSIS wizard); macOS/Linux update through
-    // electron-updater, which has no per-release asset contract to lean on.
-    ...(process.platform === 'win32'
-      ? [{ label: t('tray.rollbackApp'), click: callbacks.onRollbackApp }]
-      : []),
+    { label: t('tray.restartServer'), click: callbacks.onRestartServer },
     { type: 'separator' },
-    // Mutually exclusive by state: toggling safe mode relaunches the app, so
-    // the label never needs live-refreshing within one session.
-    callbacks.isSafeMode()
-      ? { label: t('tray.exitSafeMode'), click: callbacks.onToggleSafeMode }
-      : { label: t('tray.enterSafeMode'), click: callbacks.onToggleSafeMode },
-    // The other configuration-level escape hatch, in the group that owns the
-    // running installation: safe mode skips the suite overlay, this puts the
-    // user's own files back. Always present — whether a checkpoint exists is a
-    // question the click answers, with a sentence rather than a dead row.
-    { label: t('tray.restoreConfig'), click: callbacks.onRestoreConfig },
+    // The low-frequency escape hatches live one level down: the top level is
+    // the daily set, and three similar-looking "go back" rows side by side
+    // asked the user to tell app rollback, config restore and safe mode apart
+    // at a glance. The tray still carries them all — it is the only surface
+    // left when the window never opened.
+    { label: t('tray.recovery'), submenu: recoverySubmenu(callbacks) },
     { type: 'separator' },
     { label: t('tray.quit'), click: () => app.quit() },
   ]
 }
 
 /**
- * Rebuild the tray menu (e.g. after a kernel update changed the version
- * stamped into the menu label, or after the active kernel appeared — which is
- * what decides whether the terminal row is clickable). No-op before createTray.
+ * The recovery submenu: safe mode always (so the submenu is never empty), the
+ * two restores only while the shell can perform them. Update checks are NOT
+ * here: their progress and confirm dialogs draw in the window, the About page
+ * carries the same buttons, and both channels check on their own schedule.
+ */
+function recoverySubmenu(callbacks: TrayCallbacks): Electron.MenuItemConstructorOptions[] {
+  const rows: Electron.MenuItemConstructorOptions[] = [
+    // Mutually exclusive by state: toggling safe mode relaunches the app, so
+    // the label never needs live-refreshing within one session.
+    callbacks.isSafeMode()
+      ? { label: t('tray.exitSafeMode'), click: callbacks.onToggleSafeMode }
+      : { label: t('tray.enterSafeMode'), click: callbacks.onToggleSafeMode },
+  ]
+  if (callbacks.canRestoreConfig()) {
+    rows.push({ label: t('tray.restoreConfig'), click: callbacks.onRestoreConfig })
+  }
+  // The predicate owns the platform and dev refusals (see `syncRollbackTarget`
+  // in the updater, which mirrors the click), so the template stays pure.
+  if (callbacks.canRollbackApp()) {
+    rows.push({ label: t('tray.rollbackApp'), click: callbacks.onRollbackApp })
+  }
+  return rows
+}
+
+/**
+ * Rebuild the tray menu (e.g. after the active kernel appeared — which is what
+ * decides whether the terminal row is clickable — or after a recovery
+ * predicate changed: a checkpoint capture, a version-history write). No-op
+ * before createTray.
  */
 export function updateTrayMenu(): void {
   if (!tray || !savedCallbacks) return

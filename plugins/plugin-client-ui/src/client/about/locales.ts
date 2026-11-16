@@ -20,7 +20,7 @@ export { NS } from '../namespace.ts'
 /** Simplified Chinese dictionary. */
 export const zh = {
   'about.nav': '关于 DSH-APP',
-  'about.intro': '这里显示当前安装的版本信息，并提供与托盘菜单相同的几项操作。',
+  'about.intro': '这里显示当前安装的版本信息，并提供检查更新与重启服务的操作。',
   'about.versions.title': '版本信息',
   'about.loading': '读取中…',
   'about.failed': '读取失败：{message}',
@@ -43,7 +43,7 @@ export const zh = {
   'about.paths.copied': '已复制。',
   'about.paths.copyFailed': '复制失败，请手动选择文本。',
   'about.actions.title': '操作',
-  'about.actions.hint': '这几项与托盘右键菜单相同：检查更新会由外壳接管并显示进度，重启服务会重新启动内核。',
+  'about.actions.hint': '检查更新会由外壳接管并显示进度，重启服务会重新启动内核。',
   'about.actions.checkApp': '检查应用更新',
   'about.actions.checkKernel': '检查内核更新',
   'about.actions.restart': '重启服务',
@@ -59,7 +59,7 @@ export type AboutKey = keyof typeof zh
 /** English dictionary, typed against the Chinese key union. */
 export const en: Record<AboutKey, string> = {
   'about.nav': 'About DSH-APP',
-  'about.intro': 'This page shows what is installed and offers the same few actions as the tray menu.',
+  'about.intro': 'This page shows what is installed and offers update checks and a service restart.',
   'about.versions.title': 'Versions',
   'about.loading': 'Loading…',
   'about.failed': 'Could not read: {message}',
@@ -82,7 +82,7 @@ export const en: Record<AboutKey, string> = {
   'about.paths.copied': 'Copied.',
   'about.paths.copyFailed': 'Copy failed — select the text by hand.',
   'about.actions.title': 'Actions',
-  'about.actions.hint': 'These match the tray menu: an update check is taken over by the shell, which shows its own progress, and restarting the service restarts the kernel.',
+  'about.actions.hint': 'An update check is taken over by the shell, which shows its own progress; restarting the service restarts the kernel.',
   'about.actions.checkApp': 'Check for app updates',
   'about.actions.checkKernel': 'Check for kernel updates',
   'about.actions.restart': 'Restart service',

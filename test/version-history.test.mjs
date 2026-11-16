@@ -15,7 +15,7 @@ import { createRequire } from 'node:module'
 import { test } from 'node:test'
 
 const require = createRequire(import.meta.url)
-const { reconciledVersionHistory } = require('../dist/main/updater.js')
+const { reconciledVersionHistory, rollbackTargetVersion } = require('../dist/main/updater.js')
 
 const AT = '2026-09-19T00:00:00.000Z'
 const entry = (version) => ({ version, at: AT })
@@ -58,4 +58,17 @@ test('a version that cannot be spliced into a filename is never recorded', () =>
   // into the same path-building code — an unusable value must not enter it.
   assert.equal(reconciledVersionHistory([entry('0.12.5')], '../evil', AT), null)
   assert.equal(reconciledVersionHistory([entry('0.12.5')], '', AT), null)
+})
+
+test('the rollback target is the entry before the running one', () => {
+  // The same rule the tray row and the click read, so the menu never offers
+  // what the click would refuse.
+  assert.equal(rollbackTargetVersion([entry('0.12.4'), entry('0.12.5')], '0.12.5'), '0.12.4')
+})
+
+test('no rollback target without two entries, or with an unusable previous version', () => {
+  assert.equal(rollbackTargetVersion([], '0.12.5'), null)
+  assert.equal(rollbackTargetVersion([entry('0.12.5')], '0.12.5'), null)
+  assert.equal(rollbackTargetVersion([entry('0.12.5'), entry('0.12.5')], '0.12.5'), null)
+  assert.equal(rollbackTargetVersion([entry('../evil'), entry('0.12.5')], '0.12.5'), null)
 })
