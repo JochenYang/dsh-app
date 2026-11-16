@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.19.2] - 2026-11-16
+
+### 中文
+- 托盘右键菜单收拢为日常操作：顶层只留「打开 / 打开终端 / 重启服务 / 退出」，安全模式、恢复用户配置、回滚应用移入「故障排查与恢复」子菜单。恢复与回滚两行只在真的可执行时出现（有验证过的配置快照、有回滚目标），不再是点了只回一句话的死行；两条「检查更新」行移除——关于页的按钮与自动检查已经覆盖，菜单标签也不再挤版本号（就绪时 tooltip 本来就有）。回滚文案改为「回滚应用到上一版本」，与内核回滚、配置恢复区分开。
+- 关于页的「已开始 / 已打开 / 已复制」提示改为 4 秒后自动消失，不再常驻到切换页面；失败与不支持提示仍留在屏幕上，直到下一次操作替换它。关于页文案也不再声称这几项与托盘菜单相同。
+
+### English
+- The tray menu now keeps the daily actions on the top level (open / open terminal / restart server / quit) and moves safe mode, configuration restore and app rollback into a "Troubleshoot & recover" submenu. The restore and rollback rows appear only while they can actually act (a verified configuration checkpoint, a rollback target), so neither is a row whose only outcome is a sentence; the two update-check rows are gone — the About page's buttons and the automatic checks already cover them, and the menu label no longer carries the version (the ready-state tooltip already does). The rollback copy now names its object, so it cannot be read as a kernel rollback or a configuration restore.
+- About page success notices (started / opened / copied) now clear themselves after 4s instead of staying until you leave the page; failure and unsupported notices still stay on screen until the next attempt replaces them. The page copy no longer claims those actions match the tray menu.
+
 ## [v0.19.1] - 2026-11-13
 
 ### 中文
