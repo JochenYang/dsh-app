@@ -28,7 +28,6 @@
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import { projectSwarmConfig, SWARM_CONFIG_FIELDS, SwarmConfigValidationError, validateSwarmConfigPatch, type SwarmConfigValues } from './user-config.ts'
 import type { HostText } from './wire.ts'
-import type { SwarmBoardSnapshot } from './board-types.ts'
 
 /**
  * Route namespace on the shared Connection `/api` channel. The registry admits
@@ -62,14 +61,6 @@ export interface SwarmConfigEditor {
   readonly documentPath?: string
 }
 
-/** The board's two read/write faces, supplied by the plugin's registry. */
-export interface SwarmBoardDeps {
-  /** The current snapshot for one caller session. */
-  snapshot(sessionId: string): SwarmBoardSnapshot
-  /** Request cancellation of one running batch. */
-  cancel(sessionId: string, batchId: string): boolean
-}
-
 /** Everything the settings routes read from the host half. */
 export interface SwarmSettingsDeps {
   /** Current effective values, read per request. */
@@ -80,8 +71,6 @@ export interface SwarmSettingsDeps {
   entry(): unknown
   /** The kernel's config editor; absent on a host whose profile has none. */
   readonly editor?: SwarmConfigEditor
-  /** The live board; absent only in a composition that never mounted the tool. */
-  readonly board?: SwarmBoardDeps
 }
 
 /** GET/POST response payload: defaults, overrides, and the merged result. */
@@ -132,23 +121,14 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
 }
 
 /**
- * A board identifier is a map key, never a path: cap it and refuse control
- * characters. The value is not logged or interpolated into anything else.
- */
-function validBoardId(value: string): boolean {
-  return value.length > 0 && value.length <= 200 && !/[\u0000-\u001f]/u.test(value)
-}
-
-/**
- * Register the swarm settings and board routes on the Connection exact-Fetch
- * registry.
+ * Register the swarm settings route on the Connection exact-Fetch registry.
  *
- * The route owns its exact paths and methods; another method of the same
+ * The route owns its exact path and methods; another method of the same
  * path falls through to the shared channel's own 404 rather than a route body.
  *
  * @param connectionFetch - the Connection exact-Fetch registry (`ctx.connection.fetch`).
- * @param deps - the host half's readers, the kernel config editor, and the board.
- * @returns disposer removing every route.
+ * @param deps - the host half's readers and the kernel config editor.
+ * @returns disposer removing the route.
  */
 export function registerSwarmRoutes(
   connectionFetch: HostConnectionFetch,
@@ -219,58 +199,6 @@ export function registerSwarmRoutes(
     },
   })
   disposers.push(dispose)
-
-  const board = deps.board
-  if (board !== undefined) {
-    disposers.push(connectionFetch.register({
-      path: `${ROUTE_PREFIX}/board`,
-      methods: ['GET'],
-      requestBody: 'buffered',
-      fetch: (request) => {
-        const sessionId = new URL(request.url).searchParams.get('session') ?? ''
-        if (!validBoardId(sessionId)) {
-          return Promise.resolve(fail(400, 'bad-request', {
-            code: 'route.invalidSession',
-            text: 'the board request carries no usable session id',
-          }))
-        }
-        return Promise.resolve(ok(board.snapshot(sessionId)))
-      },
-    }))
-
-    disposers.push(connectionFetch.register({
-      path: `${ROUTE_PREFIX}/board/cancel`,
-      methods: ['POST'],
-      requestBody: 'buffered',
-      fetch: async (request) => {
-        let body: Record<string, unknown>
-        try {
-          body = await readJsonBody(request)
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : 'invalid body'
-          if (message === 'payload-too-large') {
-            return fail(413, 'payload-too-large', { code: 'route.bodyTooLarge', text: 'request body too large (8 KiB cap)' })
-          }
-          return fail(400, 'bad-request', { code: 'route.invalidBody', params: { detail: message }, text: message })
-        }
-        const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
-        const batchId = typeof body.batchId === 'string' ? body.batchId : ''
-        if (!validBoardId(sessionId) || !validBoardId(batchId)) {
-          return fail(400, 'bad-request', {
-            code: 'route.invalidSession',
-            text: 'the cancel request carries no usable session or batch id',
-          })
-        }
-        if (!board.cancel(sessionId, batchId)) {
-          return fail(404, 'not-found', {
-            code: 'route.unknownBatch',
-            text: 'no running batch with that id in this session',
-          })
-        }
-        return ok(board.snapshot(sessionId))
-      },
-    }))
-  }
 
   return async () => {
     for (const close of disposers) await close()

@@ -72,8 +72,7 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { projectOutputItems, runSwarmBatch, type SwarmBatchOptions, type SwarmBatchOutcome, type SwarmItemOutcome } from './orchestrator.ts'
-import { clampUtf8, resolveExecutionMode, startSwarmBackground, utf8Bytes, type SwarmBackgroundStart, type SwarmJobs } from './background.ts'
-import { SwarmBoard } from './board.ts'
+import { clampUtf8, resolveExecutionMode, startSwarmBackground, utf8Bytes, type SwarmJobs } from './background.ts'
 import { MIN_ITEMS, expandTasks } from './expand.ts'
 import type { SwarmToolArgs } from './expand.ts'
 import { projectSwarmConfig, readRetiredSwarmConfig, retireSwarmConfigFile, type SwarmConfigValues } from './user-config.ts'
@@ -424,11 +423,6 @@ function batchCounts(outcome: SwarmBatchOutcome): string {
   return `: ${outcome.completed} completed, ${outcome.failed} failed, ${outcome.aborted} aborted (${concurrencyNote}, ${outcome.durationMs}ms${usageNote}${budgetNote})`
 }
 
-/** One line of an unexpected error, without losing the original type. */
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 /** The batch header line: the label, then {@link batchCounts}. */
 function batchHeader(outcome: SwarmBatchOutcome): string {
   return `swarm "${outcome.label}"${batchCounts(outcome)}`
@@ -760,13 +754,6 @@ export const SWARM_ITEM_SCHEMA = {
 
 export function apply(ctx: Context, baseConfig: Config): void {
   /**
-   * The live board: an observer of the tool's own progress stream, keyed by
-   * the calling session. Created at activation so the route and the header
-   * view exist even while no batch runs; it owns no execution.
-   */
-  const board = new SwarmBoard()
-
-  /**
    * The kernel's persistent config editor, when this host has one. It appends
    * the rows it stores for a setting to the profile's `cordis.patch.yml`, the
    * document the desktop shell preserves verbatim (`src/main/brand-suite.ts`,
@@ -842,10 +829,6 @@ export function apply(ctx: Context, baseConfig: Config): void {
       layerDefaults: () => configEditor()?.configuration?.().find(row => row.entry === owningEntry(ctx))?.inherited,
       entry: () => owningEntry(ctx),
       editor: configEditor(),
-      board: {
-        snapshot: (sessionId) => board.snapshot(sessionId),
-        cancel: (sessionId, batchId) => board.cancel(sessionId, batchId),
-      },
     }),
     'plugin-swarm: settings routes',
   )
@@ -1053,7 +1036,7 @@ export function apply(ctx: Context, baseConfig: Config): void {
         const lines = value.items.map((item) => {
           const mark = item.status === 'completed' ? '✓' : item.status === 'failed' ? '✗' : '−'
           const detail = item.status === 'failed' && item.failureKind !== undefined ? ` (${item.failureKind})` : ''
-          return `${mark} [${item.index}] ${item.item}${detail}`
+          return `${mark} [${item.index + 1}] ${item.item}${detail}`
         })
         const seconds = value.durationMs === undefined ? '' : ` · ${(value.durationMs / 1000).toFixed(1)}s`
         const tokens = value.usage === undefined ? '' : ` · ${value.usage.totalTokens ?? value.usage.inputTokens + value.usage.outputTokens} tok`
@@ -1079,9 +1062,6 @@ export function apply(ctx: Context, baseConfig: Config): void {
             throw new Error(`swarm: resume_entries need a provider with continuable children, but provider "${live.provider}" does not support them — restart the failed work as fresh items instead`)
           }
         }
-        // The board's member rows open the child session; the address needs the
-        // child kind the provider actually creates.
-        const childMode: 'one-shot' | 'continuable' = provider?.prepareContinuable === undefined ? 'one-shot' : 'continuable'
         const expanded = expandTasks(args, live.maxItems)
         const concurrency = resolveConcurrency(args.max_concurrency, live)
         // An explicit max_concurrency pins the pool: adaptive feedback may
@@ -1130,8 +1110,6 @@ export function apply(ctx: Context, baseConfig: Config): void {
           maxDepth: live.maxDepth,
         }
         const callId = exec.callId === undefined ? undefined : String(exec.callId)
-        const sessionId = String(parent.id)
-        const boardTasks = expanded.tasks.map(task => ({ index: task.index, item: task.item }))
         if (resolveExecutionMode(args.mode, callId, live.backgroundInPtc) === 'background') {
           // Detach BEFORE anything can abort this call. A batch nested inside a
           // run_code program dies with the program's deadline — the runtime
@@ -1143,39 +1121,24 @@ export function apply(ctx: Context, baseConfig: Config): void {
           if (jobs === undefined) {
             throw new Error('swarm: this composition provides no host job registry (ctx.jobs), so a background batch cannot start — rerun with mode "inline"')
           }
-          const batchId = board.begin({ sessionId, label, mode: 'background', childMode, concurrency, tasks: boardTasks })
-          let started: SwarmBackgroundStart
-          try {
-            started = startSwarmBackground({
-              ctx,
-              jobs,
-              parent,
-              batch: batchOptions,
-              warnings: expanded.warnings,
-              ...callId === undefined ? {} : { callId },
-              onProgress: event => board.observe(sessionId, batchId, event),
-              onSettled: (settlement) => {
-                board.settle(sessionId, batchId, settlement.outcome, {
-                  cancelled: settlement.cancelled,
-                  ...settlement.error === undefined ? {} : { error: errorText(settlement.error) },
-                })
-              },
-              // The bounded renderer keeps the header and names every item; the
-              // job tooling below it truncates from the TAIL, which would be the
-              // header.
-              render: (batchOutcome, batchWarnings, budgetBytes) => renderBatchBounded(
-                // The same projection the synchronous result applies, so an explicit
-                // output_mode is honoured on the collected report too.
-                { ...batchOutcome, items: projectOutputItems(batchOutcome.items, args.output_mode ?? 'full') },
-                batchWarnings,
-                budgetBytes,
-              ),
-            })
-          } catch (error) {
-            board.settle(sessionId, batchId, undefined, { error: errorText(error) })
-            throw error
-          }
-          board.attachCancel(sessionId, batchId, started.cancel)
+          const started = startSwarmBackground({
+            ctx,
+            jobs,
+            parent,
+            batch: batchOptions,
+            warnings: expanded.warnings,
+            ...callId === undefined ? {} : { callId },
+            // The bounded renderer keeps the header and names every item; the
+            // job tooling below it truncates from the TAIL, which would be the
+            // header.
+            render: (batchOutcome, batchWarnings, budgetBytes) => renderBatchBounded(
+              // The same projection the synchronous result applies, so an explicit
+              // output_mode is honoured on the collected report too.
+              { ...batchOutcome, items: projectOutputItems(batchOutcome.items, args.output_mode ?? 'full') },
+              batchWarnings,
+              budgetBytes,
+            ),
+          })
           return {
             kind: 'swarm-background' as const,
             jobId: started.jobId,
@@ -1185,36 +1148,9 @@ export function apply(ctx: Context, baseConfig: Config): void {
             ...expanded.warnings.length > 0 ? { warnings: expanded.warnings } : {},
           }
         }
-        const batchId = board.begin({ sessionId, label, mode: 'inline', childMode, concurrency, tasks: boardTasks })
-        // The board's stop control and the caller share one signal: either may
-        // cancel, and the orchestrator's own sweep is what interrupts children.
-        const batchAbort = new AbortController()
-        board.attachCancel(sessionId, batchId, (reason) => { batchAbort.abort(new Error(reason)) })
-        const onCallerAbort = (): void => { batchAbort.abort(exec.signal.reason) }
-        if (exec.signal.aborted) batchAbort.abort(exec.signal.reason)
-        else exec.signal.addEventListener('abort', onCallerAbort, { once: true })
-        let outcome: SwarmBatchOutcome
-        try {
-          outcome = await runSwarmBatch(ctx, {
-            ...batchOptions,
-            signal: batchAbort.signal,
-            onProgress: event => board.observe(sessionId, batchId, event),
-          })
-        } catch (error) {
-          board.settle(sessionId, batchId, undefined, {
-            error: errorText(error),
-            cancelled: batchAbort.signal.aborted,
-          })
-          throw error
-        } finally {
-          exec.signal.removeEventListener('abort', onCallerAbort)
-        }
-        board.settle(sessionId, batchId, outcome, { cancelled: batchAbort.signal.aborted })
+        const outcome = await runSwarmBatch(ctx, { ...batchOptions, signal: exec.signal })
         if (exec.signal.aborted) {
           throw new Error('swarm batch was cancelled')
-        }
-        if (batchAbort.signal.aborted) {
-          throw new Error('swarm batch was stopped from the swarm board')
         }
         if (outcome.completed === 0 && outcome.failed > 0) {
           // Every child failed: surface the batch as a tool error so the model

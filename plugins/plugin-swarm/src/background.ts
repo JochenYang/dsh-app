@@ -49,7 +49,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { runSwarmBatch, type SwarmBatchOptions, type SwarmBatchOutcome, type SwarmItemOutcome, type SwarmProgressEvent } from './orchestrator.ts'
+import { runSwarmBatch, type SwarmBatchOptions, type SwarmBatchOutcome, type SwarmItemOutcome } from './orchestrator.ts'
 
 /** A pull source a job producer may name instead of pushing chunks itself. */
 export interface SwarmJobSource {
@@ -78,13 +78,6 @@ export interface SwarmJobOutcome {
 export interface SwarmJobHooks {
   readonly done: Promise<SwarmJobOutcome>
   cancel(reason: string): void
-}
-
-/** One settlement as an observer sees it: aggregate, broken call, or cancellation. */
-export interface SwarmBackgroundSettlement {
-  readonly outcome?: SwarmBatchOutcome
-  readonly error?: unknown
-  readonly cancelled: boolean
 }
 
 /** One job registration. Only the fields this producer uses are declared. */
@@ -218,16 +211,6 @@ export interface SwarmBackgroundOptions {
   /** The executing call's id, recorded with the job for correlation. */
   readonly callId?: string
   /**
-   * Live progress, forwarded from the orchestrator. Observers are advisory: a
-   * throwing consumer never breaks the job.
-   */
-  readonly onProgress?: (event: SwarmProgressEvent) => void
-  /**
-   * The batch's settlement, including the broken-call path the job's report
-   * cannot express to a status view. Advisory in the same way.
-   */
-  readonly onSettled?: (settlement: SwarmBackgroundSettlement) => void
-  /**
    * Render a settled batch inside the byte budget.
    *
    * The renderer owns the budget rather than the caller: it is the only place
@@ -241,11 +224,6 @@ export interface SwarmBackgroundOptions {
 /** The handle a detached batch hands back to the tool result. */
 export interface SwarmBackgroundStart {
   readonly jobId: string
-  /**
-   * Stop the batch from outside the job registry (the board's stop control).
-   * `job_kill` uses the same controller; calling either twice is harmless.
-   */
-  cancel(reason: string): void
 }
 
 /**
@@ -289,14 +267,6 @@ export function startSwarmBackground(options: SwarmBackgroundOptions): SwarmBack
     ...options.callId === undefined ? {} : { toolCall: { toolName: 'swarm', callId: options.callId } },
     run: (handle) => {
       handle.updateProgress(`0/${total} settled`)
-      /** Announce a settlement to the optional status observer. */
-      const notifySettled = (settlement: SwarmBackgroundSettlement): void => {
-        try {
-          options.onSettled?.(settlement)
-        } catch {
-          // A status view is an observer, never a participant.
-        }
-      }
       const done = (async (): Promise<SwarmJobOutcome> => {
         let outcome: SwarmBatchOutcome
         try {
@@ -311,11 +281,6 @@ export function startSwarmBackground(options: SwarmBackgroundOptions): SwarmBack
             // observation the orchestrator settles on is delivery-independent.
             delivery: 'caller',
             onProgress: (event) => {
-              try {
-                options.onProgress?.(event)
-              } catch {
-                // Advisory, exactly like the job progress line below.
-              }
               if (event.type !== 'item-settled') return
               settled += 1
               handle.updateProgress(progressLine(total, settled, event.outcome))
@@ -329,7 +294,6 @@ export function startSwarmBackground(options: SwarmBackgroundOptions): SwarmBack
           // call reaches here. The job still settles with something the model
           // can act on rather than a silent crash — inside the same byte budget,
           // because this path bypasses the renderer entirely.
-          notifySettled({ error, cancelled: controller.signal.aborted })
           const text = clampUtf8(
             `swarm "${batch.label}" failed before settlement: ${error instanceof Error ? error.message : String(error)}`,
             SWARM_REPORT_BYTES,
@@ -337,7 +301,6 @@ export function startSwarmBackground(options: SwarmBackgroundOptions): SwarmBack
           handle.append(text)
           return { status: controller.signal.aborted ? 'killed' : 'failed', detail: text.slice(0, 300) }
         }
-        notifySettled({ outcome, cancelled: controller.signal.aborted })
         const report = options.render(outcome, warnings, SWARM_REPORT_BYTES)
         // ONE model-facing write: the notice inlines it when it fits and
         // otherwise points at job_output, whose read then opens at the header.
@@ -360,11 +323,7 @@ export function startSwarmBackground(options: SwarmBackgroundOptions): SwarmBack
   }
 
   try {
-    const jobId = jobs.start(spec)
-    return {
-      jobId,
-      cancel: (reason: string) => { controller.abort(new Error(reason)) },
-    }
+    return { jobId: jobs.start(spec) }
   } catch (error: unknown) {
     // Nothing started, so this is a plain tool error the model can act on
     // rather than a failed job nobody can read.
