@@ -45,6 +45,7 @@ test('board: begin records every worker as waiting and opens the feed', () => {
     sessionId: SESSION,
     label: 'audit',
     mode: 'inline',
+    childMode: 'continuable',
     concurrency: 2,
     tasks: [{ index: 0, item: 'alpha' }, { index: 1, item: 'beta' }],
   })
@@ -65,6 +66,7 @@ test('board: progress updates a worker, keeps a bounded preview, and settles the
     sessionId: SESSION,
     label: 'audit',
     mode: 'inline',
+    childMode: 'continuable',
     concurrency: 2,
     tasks: [{ index: 0, item: 'alpha' }, { index: 1, item: 'beta' }],
   })
@@ -114,6 +116,7 @@ test('board: cancel requests reach the batch controller and settle as cancelled'
     sessionId: SESSION,
     label: 'audit',
     mode: 'inline',
+    childMode: 'continuable',
     concurrency: 1,
     tasks: [{ index: 0, item: 'alpha' }],
   })
@@ -194,6 +197,7 @@ test('board route: GET returns the session snapshot and refuses a missing sessio
     sessionId: SESSION,
     label: 'audit',
     mode: 'inline',
+    childMode: 'continuable',
     concurrency: 1,
     tasks: [{ index: 0, item: 'alpha' }],
   })
@@ -217,6 +221,7 @@ test('board route: POST cancel rejects an unknown batch and forwards a known one
     sessionId: SESSION,
     label: 'audit',
     mode: 'inline',
+    childMode: 'continuable',
     concurrency: 1,
     tasks: [{ index: 0, item: 'alpha' }],
   })

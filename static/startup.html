@@ -9,11 +9,17 @@
 <script>
 (function() {
   try {
-    var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    // The shell passes the persisted appearance in the URL, so the splash's
+    // first paint is the app's theme rather than the OS preference. Fall back
+    // to the media query only when the shell did not name one.
+    var forced = null;
+    try { forced = new URLSearchParams(window.location.search).get('theme'); } catch (e) {}
+    var isDark = forced === 'dark'
+      || (forced !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
     if (isDark) {
       document.documentElement.setAttribute('data-theme', 'dark');
       var m = document.querySelector('meta[name="theme-color"]');
-      if (m) m.setAttribute('content', 'rgba(7, 10, 19, 0)');
+      if (m) m.setAttribute('content', 'rgba(21, 21, 23, 0)');
     }
   } catch (e) {}
 })();
@@ -100,11 +106,10 @@ window.__dshStartupShowFailure = function (config) {
 
   html[data-theme="dark"] {
     /* Dark Theme (Abyssal Cosmic Midnight) */
-    --bg-base: #0d1220;
+    --bg-base: #151517;
     --bg-gradient:
-      radial-gradient(ellipse 60% 45% at 8% 0%, rgba(59, 130, 246, 0.14), transparent 70%),
-      radial-gradient(ellipse 55% 45% at 96% 100%, rgba(99, 102, 241, 0.14), transparent 70%),
-      radial-gradient(circle at 50% 32%, #16203a 0%, #101728 55%, #0a0f1c 100%);
+      radial-gradient(ellipse 38% 30% at 50% 30%, rgba(96, 165, 250, 0.07), transparent 70%),
+      #151517;
     --text-title: #f8fafc;
     --text-subtitle: #94a3b8;
     --text-dim: #7c8da4;
@@ -114,7 +119,7 @@ window.__dshStartupShowFailure = function (config) {
     --pill-border: rgba(255, 255, 255, 0.15);
     --pill-text: #94a3b8;
     --pill-bg: rgba(96, 165, 250, 0.12);
-    /* A 0.07-alpha track is all but invisible over #070a13, which made the bar
+    /* A 0.07-alpha track is all but invisible over #151517, which made the bar
        look shorter than it is; 0.10 draws the whole channel without competing
        with the fill. */
     --rail-bg: rgba(255, 255, 255, 0.10);
@@ -125,14 +130,14 @@ window.__dshStartupShowFailure = function (config) {
     --node-inactive: rgba(255, 255, 255, 0.45);
     /* Dark-on-bright-fill, the mirror of the light theme: this line's fill runs
        to a bright cyan, where a white notch measures 1.8:1 and vanishes. */
-    --node-done: rgba(7, 10, 19, 0.68);
+    --node-done: rgba(21, 21, 23, 0.68);
     --check-done: #10b981;
     --check-active: #60a5fa;
     --check-mark: #052e22;
     --step-ring: rgba(255, 255, 255, 0.30);
     --step-current-bg: rgba(96, 165, 250, 0.12);
     --step-current-ring: rgba(96, 165, 250, 0.22);
-    --whale-halo: rgba(96, 165, 250, 0.14);
+    --whale-halo: rgba(96, 165, 250, 0.10);
     --brand-app-gradient: linear-gradient(135deg, #93c5fd 0%, #3b82f6 100%);
     --rail-sheen: rgba(255, 255, 255, 0.30);
     --step-done-text: #cbd5e1;
@@ -147,7 +152,7 @@ window.__dshStartupShowFailure = function (config) {
     --btn-border: rgba(255, 255, 255, 0.14);
     --btn-text: #f8fafc;
     --btn-primary-bg: #60a5fa;
-    --btn-primary-fg: #070a13;
+    --btn-primary-fg: #151517;
   }
 
   * { box-sizing: border-box; }
@@ -257,6 +262,14 @@ window.__dshStartupShowFailure = function (config) {
     height: 100%;
     cursor: default;
     color: var(--brand-accent);
+  }
+
+  /* Dark theme: the pixel atlas needs a lighter ink and a small glow to read
+     against the app's own #151517 base; a large halo turned into a pale cloud
+     that competed with the mark. */
+  html[data-theme="dark"] #whale-canvas {
+    color: #bfdbfe;
+    filter: drop-shadow(0 0 5px rgba(96, 165, 250, 0.28));
   }
 
   /* ========================================================== Brand Row */
@@ -1435,7 +1448,7 @@ window.__dshStartupShowFailure = function (config) {
       root.setAttribute('data-theme', theme);
       if (metaTheme) {
         // Sets alpha 0 so window controls stay 100% transparent on Windows while passing luminance
-        metaTheme.content = theme === 'dark' ? 'rgba(7, 10, 19, 0)' : 'rgba(240, 245, 253, 0)';
+        metaTheme.content = theme === 'dark' ? 'rgba(21, 21, 23, 0)' : 'rgba(240, 245, 253, 0)';
       }
 
       // 3. Progress calculation (Linear & Guaranteed 100% on Stage 5)

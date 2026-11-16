@@ -19,6 +19,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // right-Sidebar services (sidebarRight / sidebarRightTabs) into scope.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SidebarRightTabInfo, UseSidebarRightTabInfo } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
+import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { SlotHookFactory } from '@deepseek-ai/dsh-client-ui-slots'
 import { useMemo } from 'react'
 // Type-only: pulls the locale runtime's Context merge (ctx.locale).
@@ -113,7 +115,7 @@ export function apply(ctx: ClientContext): void {
   // header's status pill. Optional injection keeps the settings page working
   // on a composition that omits the right Sidebar; the board simply never
   // mounts there, and the capacity tool is unaffected. ---
-  ctx.inject(['sidebarRight', 'sidebarRightTabs'], (scope) => {
+  ctx.inject(['sidebarRight', 'sidebarRightTabs', 'uiWorkspace'], (scope) => {
     scope.effect(() => scope.sidebarRightTabs.register({
       id: BOARD_ID,
       kind: BOARD_KIND,
@@ -138,7 +140,10 @@ export function apply(ctx: ClientContext): void {
       name: 'sidebar.right.pane.tab',
       key: BOARD_ID,
       locale: NS,
-      inject: () => ({ hooks: { tabInfo: boardTabInfoFactory } }),
+      inject: () => ({
+        hooks: { tabInfo: boardTabInfoFactory },
+        openWorker: (address: SubagentAddress) => { scope.uiWorkspace.openSession(address) },
+      }),
     }, SwarmBoardTab)), 'plugin-swarm: board tab body')
 
     // 11 = directly after the kernel's subagent catalog (10). The pill renders

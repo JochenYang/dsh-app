@@ -67,6 +67,8 @@ export interface SwarmBoardBatch {
   readonly id: string
   readonly label: string
   readonly mode: SwarmBoardBatchMode
+  /** Child kind the kernel started: continuable sessions can be resumed/opened. */
+  readonly childMode: 'one-shot' | 'continuable'
   readonly status: SwarmBoardBatchStatus
   /** Set while a stop request is in flight. */
   readonly cancelRequested?: boolean

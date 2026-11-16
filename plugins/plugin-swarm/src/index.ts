@@ -1073,12 +1073,15 @@ export function apply(ctx: Context, baseConfig: Config): void {
         // Fail a resume batch up front when the provider cannot back it: the
         // alternative (fresh items succeed, resume items fail mid-batch) wastes
         // the whole call and reports a confusing half-outcome.
+        const provider = ctx.subagents.getProvider(live.provider)
         if (args.resume_entries !== undefined && args.resume_entries.length > 0) {
-          const provider = ctx.subagents.getProvider(live.provider)
           if (provider?.prepareContinuable === undefined) {
             throw new Error(`swarm: resume_entries need a provider with continuable children, but provider "${live.provider}" does not support them — restart the failed work as fresh items instead`)
           }
         }
+        // The board's member rows open the child session; the address needs the
+        // child kind the provider actually creates.
+        const childMode: 'one-shot' | 'continuable' = provider?.prepareContinuable === undefined ? 'one-shot' : 'continuable'
         const expanded = expandTasks(args, live.maxItems)
         const concurrency = resolveConcurrency(args.max_concurrency, live)
         // An explicit max_concurrency pins the pool: adaptive feedback may
@@ -1140,7 +1143,7 @@ export function apply(ctx: Context, baseConfig: Config): void {
           if (jobs === undefined) {
             throw new Error('swarm: this composition provides no host job registry (ctx.jobs), so a background batch cannot start — rerun with mode "inline"')
           }
-          const batchId = board.begin({ sessionId, label, mode: 'background', concurrency, tasks: boardTasks })
+          const batchId = board.begin({ sessionId, label, mode: 'background', childMode, concurrency, tasks: boardTasks })
           let started: SwarmBackgroundStart
           try {
             started = startSwarmBackground({
@@ -1182,7 +1185,7 @@ export function apply(ctx: Context, baseConfig: Config): void {
             ...expanded.warnings.length > 0 ? { warnings: expanded.warnings } : {},
           }
         }
-        const batchId = board.begin({ sessionId, label, mode: 'inline', concurrency, tasks: boardTasks })
+        const batchId = board.begin({ sessionId, label, mode: 'inline', childMode, concurrency, tasks: boardTasks })
         // The board's stop control and the caller share one signal: either may
         // cancel, and the orchestrator's own sweep is what interrupts children.
         const batchAbort = new AbortController()

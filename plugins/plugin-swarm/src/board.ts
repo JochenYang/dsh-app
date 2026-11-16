@@ -45,6 +45,7 @@ export interface SwarmBoardStart {
   readonly sessionId: string
   readonly label: string
   readonly mode: SwarmBoardBatchMode
+  readonly childMode: 'one-shot' | 'continuable'
   readonly concurrency: number
   readonly tasks: readonly { readonly index: number, readonly item: string }[]
 }
@@ -112,6 +113,7 @@ export class SwarmBoard {
         id,
         label: start.label,
         mode: start.mode,
+        childMode: start.childMode,
         status: 'running',
         startedAt: at,
         concurrency: start.concurrency,

@@ -245,6 +245,7 @@ test('runSwarmBatch (one-shot): aggregates outputs, per-item durationMs, and bat
   const outcome = await runSwarmBatch(ctx, { ...baseOptions(), tasks: tasksOf('alpha', 'beta') })
   assert.equal(outcome.completed, 2)
   assert.equal(outcome.items[0].output, 'alpha done')
+  assert.equal(outcome.items[0].childId, 'child-alpha', 'a one-shot child still carries the session handle the board opens')
   assert.equal(outcome.items[0].name, 'alpha', 'the kernel name rides the item, so a report and list_agents agree')
   assert.equal(outcome.items[1].name, 'beta')
   assert.ok(outcome.items[0].durationMs !== undefined)

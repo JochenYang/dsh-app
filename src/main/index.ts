@@ -1486,7 +1486,7 @@ async function startServerAndOpenWindow(): Promise<void> {
       // The tray's "restart server" path, where the window was destroyed while the
       // host was down. The normal boot created it far earlier, with the loading
       // page — see boot().
-      mainWindow = createMainWindow()
+      mainWindow = createMainWindow(activeThemeMode())
       attachMainWindowHandlers(mainWindow)
     }
     ensurePlatformView()
@@ -2105,7 +2105,7 @@ async function boot(): Promise<void> {
   // instead of in front of one. Measured on this machine, the kernel is up in
   // ~8 s (bare node start 44 ms, CLI load 81 ms, the rest is plugin-tree
   // composition), so what the user perceives is decided here.
-  mainWindow = createMainWindow()
+  mainWindow = createMainWindow(activeThemeMode())
   attachMainWindowHandlers(mainWindow)
   // The loading page lives in the main window now: bind the splash module to it
   // so status pushes, the pause control, the failure card and the digest all

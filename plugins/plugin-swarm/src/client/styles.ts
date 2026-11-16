@@ -279,7 +279,7 @@ const cssText = `
 }
 .dshs_boardStats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   flex: none;
 }
@@ -435,8 +435,27 @@ const cssText = `
 }
 .dshs_feedTools {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   flex: none;
+}
+.dshs_feedSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dshs_feedTokens {
+  color: var(--dsw-alias-label-tertiary);
+  opacity: 0.85;
 }
 .dshs_feed {
   display: flex;
@@ -455,7 +474,7 @@ const cssText = `
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
   gap: 6px;
-  align-items: start;
+  align-items: center;
   min-width: 0;
 }
 .dshs_eventTime {
@@ -500,7 +519,67 @@ const cssText = `
 .dshs_memberRow {
   min-width: 0;
 }
+.dshs_memberContent {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+.dshs_memberOpen {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+.dshs_memberOpen:hover {
+  color: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dshs_memberOpen:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+}
+.dshs_memberLayout {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+  width: 100%;
+}
+.dshs_memberTitle {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dshs_memberItem {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
 .dshs_workerMeta {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--dsw-alias-label-tertiary);
   font-size: 10.5px;
   line-height: 15px;

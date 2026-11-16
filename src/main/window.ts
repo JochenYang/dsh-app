@@ -13,6 +13,7 @@ import {
 } from './window-bounds'
 import { UPDATE_CARD_SCRIPT, UPDATE_CARD_TONE_BG, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardTone } from './update-card'
 import { isShellNavigationTarget, SPLASH_PAGE } from './nav-policy'
+import type { ThemeMode } from './theme'
 
 /** Height of the title-bar overlay (matches the injected drag top bars). */
 const OVERLAY_HEIGHT = 36
@@ -952,9 +953,23 @@ export function resetOverlayColor(win: BrowserWindow): void {
  * window's background colour is already the splash's own by then (see
  * startup-window.ts's applyWindowTheme).
  */
-export function createMainWindow(): BrowserWindow {
+export function createMainWindow(theme?: ThemeMode): BrowserWindow {
   const geometry = initialWindowGeometry()
-  const win = new BrowserWindow({ ...MAIN_WINDOW_OPTS, ...geometry, show: false })
+  const win = new BrowserWindow({
+    ...MAIN_WINDOW_OPTS,
+    ...geometry,
+    show: false,
+    // The native strip is visible before the page's own chrome sampler runs.
+    // Start it on the splash's palette so a dark app does not flash a white
+    // title bar; the page takes ownership as soon as it paints.
+    ...(theme === undefined ? {} : {
+      titleBarOverlay: {
+        color: theme === 'dark' ? '#151517' : '#f0f5fd',
+        symbolColor: theme === 'dark' ? '#e6ebf5' : '#1a1a1a',
+        height: OVERLAY_HEIGHT,
+      },
+    }),
+  })
   // Electron reports a MAXIMIZED window's bounds as the screen's own rect, so
   // persisting `getBounds()` on close would store "screen-sized at 0,0" and
   // lose the size the user had before they maximized. `getNormalBounds()` is
@@ -1013,7 +1028,11 @@ export function createMainWindow(): BrowserWindow {
   // The splash installs the same state handlers the standalone window did, so
   // the shell keeps driving it through updateStartupWindow/showStartupFailure.
   markLoadingPage(win)
-  void win.loadFile(SPLASH_PAGE)
+  // The persisted appearance rides the URL so the splash's FIRST paint is the
+  // app's theme, not the OS preference the static page would otherwise read.
+  // Without this, a dark app on a light OS flashed light before the first
+  // pushed view arrived.
+  void win.loadFile(SPLASH_PAGE, theme === undefined ? undefined : { query: { theme } })
 
   // Real-time overlay sync: an injected page observer pushes the effective
   // strip color the moment it changes (theme switch, modal mask open/close,

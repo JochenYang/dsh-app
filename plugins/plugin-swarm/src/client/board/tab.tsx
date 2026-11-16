@@ -21,25 +21,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
-  Button, DisclosureRow, IconRefreshOutlineRegular, Pill, SegmentedTabs, StateDot,
+  Button, DisclosureRow, IconRefreshOutlineRegular, IconRightUpOutlineRegular, Pill, SegmentedTabs, StateDot, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SwarmBoardBatch, SwarmBoardEvent } from '../../board-types.ts'
+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
+import type { SwarmBoardBatch } from '../../board-types.ts'
 import type { NS } from '../locales.ts'
 import type { SwarmKey } from '../locales.ts'
 import {
   batchDot, batchStatusKey, clockText, durationText, elapsedSeconds, memberKey, memberRows, mergedEvents,
   settledShare, tokenText, workerDot, workerStatusKey, workingCount,
 } from './format.ts'
-import type { MemberRow } from './format.ts'
+import type { MemberRow, MergedBoardEvent } from './format.ts'
 import { useBoardSnapshot } from './use-board.ts'
 
 /** The board's route base; the cancel write appends `/cancel`. */
 const ROUTE = '/api/plugins/dsh-app/plugin-swarm/board'
 
+/** The board's injected action face. */
+export interface SwarmBoardInjected {
+  /** Open one worker's child Session in the main conversation. */
+  readonly openWorker: (address: SubagentAddress) => void
+}
+
 /** Props delivered by the keyed `sidebar.right.pane.tab` seat. */
 export type SwarmBoardTabProps = PropsRuntime<'sidebar.right.pane.tab'>
   & PropsLocale<typeof NS>
+  & InjectFace<SwarmBoardInjected>
 
 type BoardView = 'overview' | 'board' | 'members'
 
@@ -132,12 +141,14 @@ function BatchCard({
 
 /** One member row with its disclosure. */
 function Member({
-  row, open, t, onToggle,
+  row, parentSessionId, open, t, onToggle, openWorker,
 }: {
   readonly row: MemberRow
+  readonly parentSessionId: SessionId
   readonly open: boolean
   readonly t: (key: SwarmKey, params?: Record<string, unknown>) => string
   readonly onToggle: () => void
+  readonly openWorker: (address: SubagentAddress) => void
 }): ReactNode {
   const { worker, batch } = row
   const detail = worker.error ?? worker.outputPreview
@@ -148,16 +159,48 @@ function Member({
     worker.retries === undefined || worker.retries === 0 ? undefined : t('swarm.board.retries', { count: worker.retries }),
     batch.label,
   ].filter((part): part is string => part !== undefined)
+  const title = worker.name === undefined ? `[${worker.index}]` : `[${worker.index}] ${worker.name}`
+  const address: SubagentAddress | undefined = worker.childId === undefined
+    ? undefined
+    : {
+        parentSessionId,
+        childSessionId: worker.childId as SessionId,
+        mode: batch.childMode,
+      }
+  const openChild = address === undefined
+    ? undefined
+    : (): void => { openWorker(address) }
   return (
     <DisclosureRow
       icon={<StateDot state={workerDot(worker.status)} size={10} />}
-      title={`[${worker.index}] ${worker.item}`}
+      title={title}
       open={open}
       expandable={detail !== undefined}
       onToggle={onToggle}
       expandOnRowClick
-      collapsedContent={<span className="dshs_workerMeta">{meta.join(' · ')}</span>}
+      keepContentWhenOpen
+      collapsedContent={
+        <>
+          <span className="dshs_memberItem">{worker.item}</span>
+          <span className="dshs_workerMeta">{meta.join(' · ')}</span>
+        </>
+      }
+      headerAccessory={openChild === undefined ? undefined : (
+        <Tooltip label={t('swarm.board.worker.open')} side="bottom">
+          <button
+            type="button"
+            className="dshs_memberOpen"
+            aria-label={t('swarm.board.worker.open')}
+            onClick={openChild}
+          >
+            <IconRightUpOutlineRegular size={14} />
+          </button>
+        </Tooltip>
+      )}
       className="dshs_memberRow"
+      contentClassName="dshs_memberContent"
+      contentLayoutClassName="dshs_memberLayout"
+      titleClassName="dshs_memberTitle"
     >
       {worker.name === undefined && worker.childId === undefined ? null : (
         <div className="dshs_workerIds">
@@ -182,8 +225,14 @@ function Member({
 }
 
 /** Event dot by event type. */
-function eventDot(event: SwarmBoardEvent): 'done' | 'warning' | 'ongoing' | 'error' | 'idle' {
-  if (event.type === 'batch-started' || event.type === 'worker-started') return 'ongoing'
+function eventDot(event: MergedBoardEvent): 'done' | 'warning' | 'ongoing' | 'error' | 'idle' {
+  if (event.type === 'batch-started') return batchDot(event.batch)
+  if (event.type === 'worker-started') {
+    // The event is historical; its dot follows the worker's CURRENT state, so
+    // a finished batch never leaves a row pulsing as if it were still loading.
+    const worker = event.batch.workers.find(entry => entry.index === event.index)
+    return worker === undefined ? 'ongoing' : workerDot(worker.status)
+  }
   if (event.type === 'batch-cancel-requested') return 'warning'
   if (event.type === 'batch-settled') {
     if (event.status === 'completed') return 'done'
@@ -197,7 +246,7 @@ function eventDot(event: SwarmBoardEvent): 'done' | 'warning' | 'ongoing' | 'err
 
 /** Localized sentence for one feed row. */
 function eventText(
-  event: SwarmBoardEvent & { readonly batchLabel: string },
+  event: MergedBoardEvent,
   t: (key: SwarmKey, params?: Record<string, unknown>) => string,
 ): string {
   if (event.type === 'batch-started') return t('swarm.board.event.batchStarted', { label: event.batchLabel })
@@ -217,7 +266,7 @@ function eventText(
 }
 
 /** The tab body. */
-export function SwarmBoardTab({ sessionId, t, useTabInfo }: SwarmBoardTabProps): ReactNode {
+export function SwarmBoardTab({ sessionId, t, useTabInfo, openWorker }: SwarmBoardTabProps): ReactNode {
   const { tab } = useTabInfo()
   const { snapshot, error, refresh } = useBoardSnapshot(String(sessionId))
   const [view, setView] = useState<BoardView>('overview')
@@ -236,7 +285,9 @@ export function SwarmBoardTab({ sessionId, t, useTabInfo }: SwarmBoardTabProps):
   const running = batches.filter(batch => batch.status === 'running')
   const working = batches.reduce((sum, batch) => sum + workingCount(batch), 0)
   const totalWorkers = batches.reduce((sum, batch) => sum + batch.total, 0)
+  const completed = batches.reduce((sum, batch) => sum + batch.completed, 0)
   const failed = batches.reduce((sum, batch) => sum + batch.failed, 0)
+  const tokens = batches.reduce((sum, batch) => sum + (batch.tokens ?? 0), 0)
   const events = useMemo(() => mergedEvents(batches), [batches])
   const rows = useMemo(() => memberRows(batches), [batches])
   const now = Date.now()
@@ -323,7 +374,14 @@ export function SwarmBoardTab({ sessionId, t, useTabInfo }: SwarmBoardTabProps):
       {actionError ? <div className="dshs_boardError" role="alert">{t('swarm.board.stopFailed')}</div> : null}
 
       {snapshot === null ? (
-        <p className="dshs_boardEmpty">{t('swarm.board.loading')}</p>
+        error ? (
+          <div className="dshs_boardEmpty">
+            <p>{t('swarm.board.error')}</p>
+            <Button variant="outline" size="sm" onClick={refresh}>{t('swarm.board.retry')}</Button>
+          </div>
+        ) : (
+          <p className="dshs_boardEmpty">{t('swarm.board.loading')}</p>
+        )
       ) : batches.length === 0 ? (
         <div className="dshs_boardEmpty">
           <p>{t('swarm.board.empty')}</p>
@@ -333,7 +391,8 @@ export function SwarmBoardTab({ sessionId, t, useTabInfo }: SwarmBoardTabProps):
         <div className="dshs_boardBody" id="dshs-board-panel-overview" role="tabpanel" aria-labelledby="dshs-board-tab-overview">
           <div className="dshs_boardStats">
             <Stat label={t('swarm.board.statBatches')} value={String(batches.length)} />
-            <Stat label={t('swarm.board.statWorking')} value={`${working}/${totalWorkers}`} />
+            <Stat label={t('swarm.board.statWorking')} value={String(working)} />
+            <Stat label={t('swarm.board.statCompleted')} value={`${completed}/${totalWorkers}`} />
             <Stat label={t('swarm.board.statFailed')} value={String(failed)} tone={failed > 0 ? 'bad' : undefined} />
           </div>
           <div className="dshs_batchList">
@@ -354,6 +413,11 @@ export function SwarmBoardTab({ sessionId, t, useTabInfo }: SwarmBoardTabProps):
       ) : view === 'board' ? (
         <div className="dshs_boardBody dshs_boardBodyFeed" id="dshs-board-panel-board" role="tabpanel" aria-labelledby="dshs-board-tab-board">
           <div className="dshs_feedTools">
+            <span className="dshs_feedSummary">
+              <StateDot state={running.length > 0 ? 'ongoing' : failed > 0 ? 'warning' : 'done'} size={8} />
+              {t('swarm.board.feedSummary', { running: running.length, completed, total: totalWorkers, failed })}
+              {tokens > 0 ? <span className="dshs_feedTokens">{t('swarm.board.tokens', { count: tokenText(tokens) ?? String(tokens) })}</span> : null}
+            </span>
             <Pill active={follow} onClick={() => { setFollow(value => !value) }}>{t('swarm.board.follow')}</Pill>
           </div>
           <div className="dshs_feed" ref={feedRef} role="log" aria-label={t('swarm.board.feedLabel')}>
@@ -362,7 +426,9 @@ export function SwarmBoardTab({ sessionId, t, useTabInfo }: SwarmBoardTabProps):
                 <span className="dshs_eventTime">{clockText(event.at)}</span>
                 <StateDot state={eventDot(event)} size={8} />
                 <div className="dshs_eventBody">
-                  <span className="dshs_eventBatch">{event.batchLabel}</span>
+                  {event.type === 'batch-started' || event.type === 'batch-settled'
+                    ? <span className="dshs_eventBatch">{event.batchLabel}</span>
+                    : null}
                   <span>{eventText(event, t)}</span>
                   {event.detail === undefined ? null : <span className="dshs_eventDetail" title={event.detail}>{event.detail}</span>}
                 </div>
@@ -377,9 +443,11 @@ export function SwarmBoardTab({ sessionId, t, useTabInfo }: SwarmBoardTabProps):
               <Member
                 key={memberKey(row)}
                 row={row}
+                parentSessionId={sessionId}
                 open={expanded.has(memberKey(row))}
                 t={t}
                 onToggle={() => { toggleMember(memberKey(row)) }}
+                openWorker={openWorker}
               />
             ))}
           </div>

@@ -1033,6 +1033,7 @@ async function runOneShotTask(
     // tool value — the kernel's lossless snapshot rejects the whole batch for it.
     const metrics = {
       durationMs,
+      childId: String(activation.childId),
       ...activation.name === undefined ? {} : { name: activation.name },
       ...usage === undefined ? {} : { usage },
     }
@@ -1068,6 +1069,7 @@ async function runOneShotTask(
         ...typeof code === 'string' ? { failureCode: code } : {},
       },
       // The activation may have been created before the failure surfaced.
+      ...activation === undefined ? {} : { childId: String(activation.childId) },
       ...activation === undefined ? {} : { name: activation.name },
     }
   } finally {

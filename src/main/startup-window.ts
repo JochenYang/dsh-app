@@ -42,7 +42,7 @@ const SPLASH_PAGE = path.join(__dirname, '..', 'static', 'startup.html')
  * the strip stays transparent and the page shows through it rather than
  * becoming an opaque bar.
  */
-const SPLASH_BG_DARK = '#070a13'
+const SPLASH_BG_DARK = '#151517'
 const SPLASH_BG_LIGHT = '#f0f5fd'
 
 /**

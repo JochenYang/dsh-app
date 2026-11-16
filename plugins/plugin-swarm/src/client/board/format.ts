@@ -84,10 +84,17 @@ export function workingCount(batch: SwarmBoardBatch): number {
   return batch.workers.filter(worker => worker.status === 'working').length
 }
 
+/** One event plus the batch it belongs to, for status-aware rendering. */
+export type MergedBoardEvent = SwarmBoardEvent & {
+  readonly batchId: string
+  readonly batchLabel: string
+  readonly batch: SwarmBoardBatch
+}
+
 /** Events across all batches, oldest first. */
-export function mergedEvents(batches: readonly SwarmBoardBatch[]): readonly (SwarmBoardEvent & { readonly batchId: string, readonly batchLabel: string })[] {
+export function mergedEvents(batches: readonly SwarmBoardBatch[]): readonly MergedBoardEvent[] {
   return batches
-    .flatMap(batch => batch.events.map(event => ({ ...event, batchId: batch.id, batchLabel: batch.label })))
+    .flatMap(batch => batch.events.map(event => ({ ...event, batchId: batch.id, batchLabel: batch.label, batch })))
     .sort((left, right) => left.seq - right.seq)
 }
 

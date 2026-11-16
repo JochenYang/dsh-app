@@ -10,7 +10,7 @@
  */
 
 import type { ReactNode } from 'react'
-import { StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { StateDot, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { NS } from '../locales.ts'
 import { useBoardSnapshot } from './use-board.ts'
@@ -44,18 +44,20 @@ export function SwarmHeaderAction({ sessionId, t, openBoard, useSession }: Swarm
   const total = batches.reduce((sum, batch) => sum + batch.total, 0)
   const working = batches.reduce((sum, batch) => sum + batch.workers.filter(worker => worker.status === 'working').length, 0)
   const anyFailed = batches.some(batch => batch.status === 'failed')
+  const label = t('swarm.board.headerAria', { working, total, running: running.length })
   return (
-    <button
-      type="button"
-      className="dshs_headerAction"
-      aria-label={t('swarm.board.headerAria', { working, total, running: running.length })}
-      title={t('swarm.board.headerAria', { working, total, running: running.length })}
-      onClick={openBoard}
-    >
-      <StateDot state={running.length > 0 ? 'ongoing' : anyFailed ? 'warning' : 'done'} size={8} />
-      <span>{running.length > 0
-        ? t('swarm.board.headerRunning', { working, total })
-        : t('swarm.board.headerDone', { total })}</span>
-    </button>
+    <Tooltip label={label} side="bottom">
+      <button
+        type="button"
+        className="dshs_headerAction"
+        aria-label={label}
+        onClick={openBoard}
+      >
+        <StateDot state={running.length > 0 ? 'ongoing' : anyFailed ? 'warning' : 'done'} size={8} />
+        <span>{running.length > 0
+          ? t('swarm.board.headerRunning', { working, total })
+          : t('swarm.board.headerDone', { total })}</span>
+      </button>
+    </Tooltip>
   )
 }

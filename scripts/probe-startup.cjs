@@ -198,6 +198,9 @@ app.whenReady().then(async () => {
 
     await win.webContents.executeJavaScript(view({ theme: 'dark' }))
     await themeReady(win, 'dark')
+    // The page fades its background over 0.45 s; sample after it settles so the
+    // screenshot shows the real dark palette, not a light-to-dark blend.
+    await sleep(650)
     const dark = await inspect(win, '02-dark-1440x900', 1)
     assert(dark.theme === 'dark', 'dark theme not applied')
     assert(dark.sheen === 'none', 'determinate sheen should stay removed')
@@ -261,6 +264,16 @@ app.whenReady().then(async () => {
     assert(await win.webContents.executeJavaScript(`document.querySelector('#startup-percent').textContent === '100%' && [...document.querySelectorAll('#startup-steps .step-item')].every(item => item.dataset.state === 'done')`), 'completion does not reach 100% with all steps done')
     write('light-alpha-check', JSON.stringify({ meanAlpha: light.canvas.meanAlpha, smallMeanAlpha: small.canvas.meanAlpha }))
     assert(light.canvas.meanAlpha > 0.3 && small.canvas.meanAlpha > 0.3, 'light whale is too faint')
+    // The shell's persisted appearance rides the URL; the page must paint that
+    // theme before any pushed view arrives, or a dark app on a light OS flashes
+    // light for one frame.
+    const splashUrl = pathToFileURL(path.join(root, 'dist', 'static', 'startup.html')).href
+    await win.loadURL(`${splashUrl}?theme=dark`)
+    await sleep(250)
+    assert(await win.webContents.executeJavaScript(`document.documentElement.dataset.theme`) === 'dark', 'theme query did not apply dark')
+    await win.loadURL(`${splashUrl}?theme=light`)
+    await sleep(250)
+    assert(await win.webContents.executeJavaScript(`document.documentElement.dataset.theme`) === 'light', 'theme query did not apply light')
     assert(errors.length === 0, `page errors: ${errors.join('; ')}`)
     write('PASS: startup geometry, themes, states, and recovery checks')
   } finally {
