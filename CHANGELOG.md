@@ -8,6 +8,20 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.19.3] - 2026-11-17
+
+### 中文
+- 窗口隐藏到托盘期间，账户页（用量 / 充值）的独立渲染进程会被释放；再次显示窗口时自动恢复同一页面，页面偏好保留。托盘常驻不再为一个看不见的页面占一份渲染进程。
+- 发布版移除默认应用菜单与开发者工具入口：`Ctrl+Shift+I` 不再打开 DevTools，菜单里的刷新快捷键与 Exit 一并去掉（退出仍走关闭窗口时的托盘 / 退出选择）。开发运行保持原样。
+- 启动页深色基底改为与内核默认一致的黑色，鲸鱼光晕减弱，深色主题下不再发蓝。
+- 新会话页交还官方动态鲸鱼，不再叠加我们的品牌鲸鱼；启动页中央换成官方像素鲸鱼动画。并行子代理的 one-shot 结果补上 childId，便于定位与续跑。
+
+### English
+- While the window is hidden to the tray, the account page's (usage / top-up) own renderer is released; showing the window again restores the same page with its preferences. A tray-resident app no longer keeps a renderer for a surface nobody can see.
+- Release builds drop the default application menu and the DevTools entry: Ctrl+Shift+I no longer opens DevTools, and the menu's reload accelerator and Exit item go with it (quitting still goes through the close-window choice). Dev runs are unchanged.
+- The splash dark base now matches the kernel's own black and the whale halo is softer, so the dark theme no longer reads blue.
+- The new-session page hands its whale back to upstream instead of stacking our brand whale on top, and the splash center now uses the official pixel whale animation. One-shot swarm results carry the childId, so they can be located and resumed.
+
 ## [v0.19.2] - 2026-11-16
 
 ### 中文
