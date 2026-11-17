@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DSH APP 更新</title>
+<style>
+  :root {
+    --font: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    --bg: #151517; --text: #f1f5f9; --muted: #8b98a9; --faint: #64748b;
+    --edge: rgba(255,255,255,.075); --track: rgba(255,255,255,.075);
+    --accent: #3b82f6; --accent2: #60a5fa; --ok: #4ade80;
+  }
+  html[data-theme="light"] {
+    --bg: #f0f5fd; --text: #0f172a; --muted: #64748b; --faint: #94a3b8;
+    --edge: #e2e8f0; --track: #e2e8f0;
+    --accent: #2563eb; --accent2: #3b82f6; --ok: #16a34a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    display: flex; align-items: stretch;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    overflow: hidden;
+  }
+  .wrap { flex: 1; display: flex; flex-direction: column; gap: 22px; padding: 30px 32px 24px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand img { width: 40px; height: 40px; border-radius: 11px; }
+  .brandtext { display: flex; flex-direction: column; gap: 3px; }
+  .brandname { font-size: 14.5px; font-weight: 600; letter-spacing: .01em; }
+  .tag { font-size: 9.5px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--faint); }
+  .headline { margin: 0 0 8px; font-size: 24px; font-weight: 650; letter-spacing: -.012em; }
+  .versions { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .target { font-weight: 600; color: var(--accent2); }
+  .sep { opacity: .4; }
+  .progress { display: flex; flex-direction: column; gap: 9px; }
+  .status { font-size: 12.5px; color: var(--muted); }
+  .track { height: 6px; border-radius: 999px; background: var(--track); overflow: hidden; position: relative; }
+  .fill {
+    height: 100%; border-radius: 999px; position: relative; overflow: hidden;
+    width: 38%;
+    background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.22);
+    animation: slide 1.4s ease-in-out infinite;
+  }
+  .fill::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent);
+    transform: translateX(-100%);
+    animation: sheen 1.6s ease-in-out infinite;
+  }
+  @keyframes slide { 0% { margin-left: -38%; } 100% { margin-left: 100%; } }
+  @keyframes sheen { to { transform: translateX(100%); } }
+  .steps { display: flex; flex-direction: column; gap: 11px; font-size: 12.5px; }
+  .step { display: flex; align-items: center; gap: 11px; color: var(--faint); }
+  .step.done { color: var(--muted); }
+  .step.active { color: var(--text); }
+  .dot { width: 15px; height: 15px; border-radius: 50%; flex: 0 0 15px; display: flex; align-items: center; justify-content: center; font-size: 8.5px; font-weight: 700; }
+  .dot.done { background: rgba(34,197,94,.16); color: var(--ok); box-shadow: 0 0 0 1px rgba(34,197,94,.35) inset; }
+  html[data-theme="light"] .dot.done { background: #ecfdf5; box-shadow: 0 0 0 1px #bbf7d0 inset; }
+  .dot.run { border: 2px solid var(--track); border-top-color: var(--accent2); animation: spin .9s linear infinite; }
+  .dot.todo { border: 1.5px solid var(--track); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .foot { margin-top: auto; padding-top: 14px; border-top: 1px solid var(--edge); display: flex; justify-content: space-between; font-size: 11.5px; color: var(--faint); }
+  .trust { display: flex; align-items: center; gap: 6px; }
+  .tick { width: 13px; height: 13px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; background: rgba(34,197,94,.15); color: var(--ok); }
+  html[data-theme="light"] .tick { background: #ecfdf5; }
+  body.failed .fill { animation: none; margin-left: 0; width: 100%; background: #dc2626; box-shadow: none; }
+  body.failed .fill::after { animation: none; }
+  body.failed .dot.run { border-color: #dc2626; animation: none; }
+  @media (prefers-reduced-motion: reduce) { .fill, .fill::after, .dot.run { animation: none; } }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">
+      <img src="app-logo.png" alt="">
+      <div class="brandtext">
+        <span class="brandname">DSH APP</span>
+        <span class="tag">DeepSeek Harness</span>
+      </div>
+    </div>
+
+    <div>
+      <h1 class="headline" id="headline">正在安装更新</h1>
+      <div class="versions">
+        <span id="fromVersion">v—</span><span class="sep">→</span><span class="target" id="toVersion">v—</span>
+        <span class="sep">·</span><span id="note">安装完成后应用会自动重新打开</span>
+      </div>
+    </div>
+
+    <div class="progress">
+      <div class="status" id="status">正在安装新版本，请稍候…</div>
+      <div class="track"><div class="fill"></div></div>
+    </div>
+
+    <div class="steps">
+      <div class="step done"><span class="dot done">✓</span>已关闭当前版本</div>
+      <div class="step active"><span class="dot run"></span><span id="activeStep">正在写入新版本文件…</span></div>
+      <div class="step"><span class="dot todo"></span>完成安装并重新启动</div>
+    </div>
+
+    <div class="foot">
+      <span id="footNote">请不要关闭此窗口</span>
+      <span class="trust"><span class="tick">✓</span>安装包已校验</span>
+    </div>
+  </div>
+
+<script>
+  (function () {
+    var params = new URLSearchParams(location.search);
+    var theme = params.get('theme') === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = theme;
+    var from = params.get('from') || '';
+    var to = params.get('to') || '';
+    document.getElementById('fromVersion').textContent = from ? 'v' + from : 'v—';
+    document.getElementById('toVersion').textContent = to ? 'v' + to : 'v—';
+
+    window.dshProgress = {
+      fail: function (reason) {
+        document.body.classList.add('failed');
+        document.getElementById('headline').textContent = '安装未完成';
+        document.getElementById('note').textContent = '可以稍后重试，或从关于页再次检查更新';
+        document.getElementById('status').textContent = reason ? '安装器返回：' + reason : '安装器未能完成安装';
+        document.getElementById('activeStep').textContent = '安装没有完成';
+        document.getElementById('footNote').textContent = '下次启动时会提示这次更新未完成';
+      },
+    };
+  })();
+</script>
+</body>
+</html>

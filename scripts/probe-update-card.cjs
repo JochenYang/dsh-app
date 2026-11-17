@@ -199,6 +199,69 @@ run({ message: '正在下载 dsh…', progress: 0.1, tone: 'progress' })
   assert.strictEqual(card.children[1].children[1].children[0].style.width, '30%', 're-added bar width')
   assert.strictEqual(card.children[0], icon, 'icon identity kept across bar re-add')
   console.log('pass 5/5: same-tone in-place update keeps the spinner spinning')
+
+// 6. The two controls a shell notice may carry: a countdown cancel button
+//    (silent install) and a release-notes link (post-update notice). The button
+//    is not a channel — it only records the clicked id on the window, which the
+//    shell polls — and a same-tone countdown tick must keep the same button
+//    element so its disabled state survives the re-render.
+resetDom()
+run({
+  message: '将在 10 秒后安装并重启',
+  progress: null,
+  tone: 'progress',
+  actions: [
+    { id: 'cancel-install', label: '取消' },
+    { id: 'install-now', label: '立即安装', primary: true },
+  ],
+})
+{
+  const card = documentStub.body.children[0]
+  assert.strictEqual(card.style['pointer-events'], 'auto', 'a card with a control accepts pointer events')
+  const cancel = card.children[2]
+  const now = card.children[3]
+  assert.strictEqual(cancel.tag, 'button', 'cancel rendered as a button')
+  assert.strictEqual(cancel.textContent, '取消')
+  assert.strictEqual(now.tag, 'button', 'install-now rendered as a button')
+  assert.strictEqual(now.textContent, '立即安装')
+  assert.match(now.style.background, /rgba\(255,255,255,\.92\)/u, 'the primary button is filled')
+  assert.match(cancel.style.background, /transparent/u, 'the secondary button is outlined')
+  const messageNode = card.children[1].children[0]
+  run({
+    message: '将在 9 秒后安装并重启',
+    progress: null,
+    tone: 'progress',
+    actions: [
+      { id: 'cancel-install', label: '取消' },
+      { id: 'install-now', label: '立即安装', primary: true },
+    ],
+  })
+  assert.strictEqual(documentStub.body.children[0], card, 'countdown reuses the card')
+  assert.strictEqual(card.children[2], cancel, 'cancel identity kept across countdown ticks')
+  assert.strictEqual(card.children[3], now, 'install-now identity kept across countdown ticks')
+  assert.strictEqual(messageNode.textContent, '将在 9 秒后安装并重启', 'countdown text updated in place')
+  now.click()
+  assert.strictEqual(windowStub.__dshUpdateCardAction, 'install-now', 'click reports the action id')
+  assert.strictEqual(now.disabled, true, 'button disables itself after the click')
+}
+run({
+  message: '已更新到 DSH APP 0.19.4。',
+  progress: null,
+  tone: 'success',
+  autoHide: 8000,
+  link: { label: '查看更新内容', href: 'https://github.com/o/r/releases/tag/v0.19.4' },
+})
+{
+  const card = documentStub.body.children[0]
+  const link = card.children[2]
+  assert.strictEqual(link.tag, 'a', 'link rendered as an anchor')
+  assert.strictEqual(link.textContent, '查看更新内容')
+  assert.strictEqual(link.href, 'https://github.com/o/r/releases/tag/v0.19.4')
+  assert.strictEqual(link.target, '_blank', 'opens outside the app frame')
+  assert.strictEqual(link.rel, 'noreferrer noopener')
+  assert.strictEqual(card.style['pointer-events'], 'auto', 'link is clickable')
+  console.log('pass 6/6: countdown buttons (install now / cancel) + release-notes link')
+}
 }
 
 console.log('\nprobe-update-card: all assertions passed')

@@ -15,12 +15,35 @@ import type { KernelChannel } from '../shared/types'
 
 export type UpdateCardTone = 'progress' | 'success' | 'error'
 
+/** A button on the card. The click sets `window.__dshUpdateCardAction = id`; the
+ * shell polls that flag (see window.ts `readUpdateCardAction`) rather than
+ * giving the sandboxed page a channel of its own. */
+export interface UpdateCardAction {
+  /** Stable id the shell compares against. */
+  id: string
+  label: string
+  /** Render as the filled primary button (at most one per card). */
+  primary?: boolean
+}
+
+/** A link on the card. It is an ordinary anchor: the window's navigation guard
+ * turns an external target into the system browser (window.ts `will-navigate`),
+ * so no new capability is granted to the page. */
+export interface UpdateCardLink {
+  label: string
+  href: string
+}
+
 export interface UpdateCardPayload {
   message: string
   progress: number | null
   tone: UpdateCardTone
   /** Auto-hide after this many ms; 0/undefined keeps the card until cleared. */
   autoHide?: number
+  /** Optional buttons (countdown: install now / cancel). */
+  actions?: UpdateCardAction[]
+  /** Optional link (release notes after an update). */
+  link?: UpdateCardLink
 }
 
 /** Card background per tone, shared by the in-page script and shell-side toasts. */
@@ -86,7 +109,8 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
       'z-index:2147483647;display:flex;align-items:center;gap:10px;' +
       'max-width:520px;padding:8px 14px;border-radius:10px;font-size:13px;' +
       'line-height:1.5;color:#fff;background:' + bg + ';' +
-      'box-shadow:0 4px 16px rgba(0,0,0,.25);pointer-events:none;' +
+      'box-shadow:0 4px 16px rgba(0,0,0,.25);' +
+      'pointer-events:' + (p.actions || p.link ? 'auto' : 'none') + ';' +
       'transition:opacity .3s;opacity:1;' +
       'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;';
     root.textContent = '';
@@ -120,6 +144,41 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
       bar = made.bar;
       fill = made.fill;
       fill.style.width = clampWidth(p.progress);
+    }
+    // The optional controls are built once, with the card: the same-tone fast
+    // path above only rewrites the message, so a countdown's buttons and a
+    // post-update link keep their identity (and a pressed button's disabled
+    // state) across the throttled re-renders.
+    if (p.actions) {
+      for (const spec of p.actions) {
+        const action = document.createElement('button');
+        action.type = 'button';
+        action.textContent = spec.label;
+        action.style.cssText =
+          'pointer-events:auto;flex:0 0 auto;font:inherit;font-size:12px;' +
+          'padding:3px 10px;border-radius:6px;cursor:pointer;color:#fff;' +
+          (spec.primary
+            ? 'background:rgba(255,255,255,.92);color:#1a1a1a;border:1px solid transparent;'
+            : 'background:transparent;border:1px solid rgba(255,255,255,.7);');
+        action.addEventListener('click', function () {
+          window.__dshUpdateCardAction = spec.id;
+          action.disabled = true;
+          action.style.opacity = '0.6';
+          action.style.cursor = 'default';
+        });
+        root.appendChild(action);
+      }
+    }
+    if (p.link) {
+      const link = document.createElement('a');
+      link.textContent = p.link.label;
+      link.href = p.link.href;
+      link.target = '_blank';
+      link.rel = 'noreferrer noopener';
+      link.style.cssText =
+        'pointer-events:auto;flex:0 0 auto;font-size:12px;color:#fff;' +
+        'text-decoration:underline;text-underline-offset:2px;';
+      root.appendChild(link);
     }
     root.__dshCard = { tone: p.tone, content: content, text: text, bar: bar, fill: fill };
   }

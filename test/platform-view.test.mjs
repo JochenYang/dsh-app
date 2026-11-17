@@ -435,10 +435,11 @@ test('both install paths await the discard before replacing the process', () => 
   // Two install paths replace the process: electron-updater's quitAndInstall and
   // the Windows installer spawn. Each call site must AWAIT the discard, and the
   // discard must come first — a fire-and-forget clear can be lost with the
-  // process that scheduled it.
+  // process that scheduled it. (The arguments themselves are pinned in
+  // updater-silent-install.test.mjs: both paths install silently.)
   const calls = [...source.matchAll(/await discardPlatformCredentialsForRestart\(\)/gu)]
   assert.equal(calls.length, 2, `expected both install paths to await the discard, saw ${calls.length}`)
-  for (const [which, handover] of [[0, /autoUpdater\.quitAndInstall\(\)/u], [1, /spawn\(dest,/u]]) {
+  for (const [which, handover] of [[0, /autoUpdater\.quitAndInstall\([^)]*\)/u], [1, /spawn\(dest,/u]]) {
     const callAt = calls[which].index
     const handoverAt = source.search(handover)
     assert.ok(handoverAt !== -1, 'each discard must precede a process handover')

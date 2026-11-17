@@ -309,7 +309,7 @@ query 规则注释声称能保住 `&next=/x`，实际被其后的裸规则吃掉
 - **验收**：更新日志出现 `To download:` 且**实测值接近 44% 而非接近全量**（该行由
   `DifferentialDownloader.js doDownload` 打印）。
 - **不回归**：**删掉旧安装包缓存后能自动回退全量并安装成功**；差分与全量共用同一 sha512 校验函数；
-  skip-version、可见 NSIS 向导、pending-install 记录、托盘回滚四项能力迁移后不能丢。
+  skip-version、静默安装（无点击、无向导页）、pending-install 记录、托盘回滚四项能力迁移后不能丢。
 
 ### 2.3 内核分层 tgz → 任务 5
 

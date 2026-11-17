@@ -19,7 +19,7 @@
 │   src/main/server.ts       dsh child process: spawn, health, restart, shutdown
 │   src/main/window.ts       sandboxed main window + desktop chrome + update card
 │   src/main/tray.ts         tray menu
-│   src/main/updater.ts      shell channel: Windows mirror download + VISIBLE NSIS wizard; else electron-updater
+│   src/main/updater.ts      shell channel: Windows mirror download + progress-page NSIS update; else electron-updater
 │   src/main/brand-suite.ts  suite wiring: $DSH_HOME plugin links + the overlay rows it writes into the profile patch
 │   src/main/update-card.ts  injected card script (message + progress bar)
 ├─ Kernel manager
@@ -433,12 +433,21 @@ asserted in both the build and CI — see `docs/agents/build-and-release.md` §3
 - Shell updates: Windows uses a custom in-app flow — latest.yml detection via
   the GitHub `releases/latest` alias, arch-matched installer download with a
   mirror-first / official-GitHub fallback chain, sha512 verification, then a
-  **visible** NSIS install wizard (`updater.ts`: the app writes a
-  pending-install record and quits; the GUI installer is spawned directly —
-  a detached cmd watcher always flashes a console window on Windows, even
-  with `windowsHide` — and the next boot deletes the leftover package and
-  confirms the version advanced, toasting when it did not).
-  macOS/Linux keep `electron-updater`.
+  silent NSIS install (`updater.ts` spawns the assisted installer with
+  `--updated /S --force-run`, so no wizard appears and the new build is started
+  again). Because the installer is silent and the main app must quit, the
+  progress UI is its own kernel-less process: `--update-progress` starts a
+  window-only pass (`src/main/update-progress.ts`) that shows
+  `static/update-progress.html` in the app's theme, waits for the main pid,
+  runs the installer and exits. The app writes a pending-install record and
+  quits, and the next boot deletes the leftover package and confirms the
+  version advanced, toasting when it did not. The user sees one approval dialog, an optional host-task gate, a
+  10-second cancellable countdown card (which also offers "install now"), and a
+  post-update toast naming the new version with a link to its release page. A
+  deferred install keeps the ~250 MB package for seven days, and the next check
+  goes straight to the countdown on those verified bytes.
+  macOS/Linux keep `electron-updater` (`quitAndInstall(true, true)`).
+
 - Kernel artifacts: CI matrix builds `dsh-runtime-<platform>-<arch>-<version>.tgz`
   per platform/arch and attaches them to a dedicated `runtime-<dshVersion>`
   release (created published), which `GitHubArtifactResolver` resolves; kernel

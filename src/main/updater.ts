@@ -1,4 +1,4 @@
-import { app, shell, type BrowserWindow } from 'electron'
+import { app, nativeTheme, shell, type BrowserWindow } from 'electron'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createReadStream, readFileSync } from 'node:fs'
@@ -21,7 +21,8 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { errorFactsDetail, logEvent, reportUnrecordedText, trackedEventOperation } from './event-log'
 import { readJsonFile, writeJsonFileAtomic } from './json-file'
 import { noticeThemedDialog, promptThemedDialog, resolveDialogWindow } from './themed-dialog'
-import { clearKernelProgress, showKernelProgress, showToastWhenLoaded, showUpdateToast } from './window'
+import { UPDATE_PROGRESS_ARGV } from './update-progress'
+import { clearKernelProgress, hideUpdateCard, readUpdateCardAction, resetUpdateCardAction, showKernelProgress, showToastWhenLoaded, showUpdateCard, showUpdateToast } from './window'
 import { updateTrayMenu } from './tray'
 
 let initialized = false
@@ -139,6 +140,59 @@ async function confirmNoActiveTasks(win: BrowserWindow | null): Promise<boolean>
 }
 
 /**
+ * How long the install waits before it closes the app, giving the user a
+ * moment to cancel. The countdown is a card, not a dialog: nothing blocks, and
+ * a click on "cancel" is the only interaction left in the whole flow.
+ */
+const INSTALL_COUNTDOWN_MS = 10_000
+
+/** Countdown tick; also the cancel-poll interval. */
+const INSTALL_COUNTDOWN_STEP_MS = 1_000
+
+/** Action ids the countdown card's buttons report. */
+const CANCEL_INSTALL_ACTION = 'cancel-install'
+const INSTALL_NOW_ACTION = 'install-now'
+
+/**
+ * Give the user a last chance to stop the install — or to skip the wait.
+ *
+ * The user already chose "update and restart", so there is no question to ask:
+ * the card counts down and installs, and its buttons exist for the two things a
+ * countdown cannot know (start now, or not now). With no visible window (tray,
+ * minimised boot, loading page) there is nothing on screen to disturb and
+ * nothing to click, so the install proceeds at once.
+ *
+ * @returns true when the install may start; false when the user cancelled.
+ */
+async function confirmSilentInstall(win: BrowserWindow | null): Promise<boolean> {
+  if (win === null || win.isDestroyed() || !win.isVisible()) return true
+  resetUpdateCardAction(win)
+  const deadline = Date.now() + INSTALL_COUNTDOWN_MS
+  for (;;) {
+    const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1_000))
+    if (seconds === 0) break
+    showUpdateCard(win, t('updater.installCountdown', { seconds }), 'progress', [
+      { id: CANCEL_INSTALL_ACTION, label: t('updater.cancelInstall') },
+      { id: INSTALL_NOW_ACTION, label: t('updater.installNow'), primary: true },
+    ])
+    await new Promise((resolve) => setTimeout(resolve, INSTALL_COUNTDOWN_STEP_MS))
+    const chosen = await readUpdateCardAction(win)
+    if (chosen === CANCEL_INSTALL_ACTION) {
+      hideUpdateCard(win)
+      console.log('[shell-updater] install cancelled by the user')
+      return false
+    }
+    if (chosen === INSTALL_NOW_ACTION) {
+      hideUpdateCard(win)
+      console.log('[shell-updater] install started by the user, skipping the countdown')
+      return true
+    }
+  }
+  hideUpdateCard(win)
+  return true
+}
+
+/**
  * macOS/Linux (`electron-updater`) flow state. Those listeners are registered
  * once at boot, before any window exists and before any check knows whether
  * the user asked for it, so the check has to be remembered for them: `manual`
@@ -207,8 +261,8 @@ async function noticeInFrame(
  * `releases/latest` alias first, its ModelScope mirror and the proxy prefixes
  * as fallback), pick the installer for the running arch, download with a
  * ModelScope-first byte chain, verify the sha512 from latest.yml, then run the
- * NSIS installer silently and quit. This is what makes app updates work
- * without a proxy in mainland China.
+ * NSIS installer as an update (progress page, no questions, auto-restart) and
+ * quit. This is what makes app updates work without a proxy in mainland China.
  *
  * macOS / Linux: keep electron-updater (native update formats), but surface
  * errors in a dialog and offer a release-page fallback. The ModelScope mirror
@@ -326,7 +380,13 @@ export function initShellUpdater(): void {
       // The embedded Platform document holds credentials issued by the host that
       // is about to stop; they are discarded before the install, not after.
       await discardPlatformCredentialsForRestart()
-      autoUpdater.quitAndInstall()
+      // Silent install and force-run, explicitly: `isSilent` makes Linux's
+      // AppImage updater replace the file without a prompt, and `isForceRunAfter`
+      // is what starts the new build again (BaseUpdater only honours it when
+      // silent). macOS ignores both — Squirrel swaps the bundle and relaunches
+      // on its own — but stating them keeps the three platforms on one contract
+      // instead of relying on `autoRunAppAfterInstall`'s default.
+      autoUpdater.quitAndInstall(true, true)
     }
   })
 
@@ -645,6 +705,11 @@ async function showDownloadError(message: string): Promise<void> {
 
 const UPDATER_OWNER = resolveArtifactOwner()
 const UPDATER_REPO = resolveArtifactRepo()
+
+/** The GitHub release page for one installed version (the "what changed" link). */
+function releasePageUrl(version: string): string {
+  return `https://github.com/${UPDATER_OWNER}/${UPDATER_REPO}/releases/tag/v${version}`
+}
 
 /** Parsed metadata plus the source that served it (drives asset ordering). */
 interface LatestMetadata {
@@ -1013,7 +1078,7 @@ async function promptSkippedVersionConfirm(win: BrowserWindow | null, version: s
   return proceed ? 'install' : 'cancel'
 }
 
-/** Windows custom update flow (mirror fallback + sha512 + silent install). */
+/** Windows custom update flow (mirror fallback + sha512 + click-free install). */
 async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null): Promise<void> {
   if (process.env.DSH_APP_DEV === '1') return
   if (busy) {
@@ -1062,23 +1127,26 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
     // states — the reported "the dialog says a new version is here, the toast
     // behind it still says checking".
     clearKernelProgress(win)
-    const choice = decision === 'skipped'
-      ? await promptSkippedVersionConfirm(win, yaml.version)
-      : await promptUpdateConfirm(win, current, yaml.version)
-    if (choice === 'skip') {
-      await recordSkippedVersion(win, yaml.version)
-      return
-    }
-    if (choice !== 'install') {
-      clearKernelProgress(win)
-      return
+    // An installer this exact version already downloaded and verified is a
+    // DECISION the user made last time: asking "update available?" again would
+    // make them repeat it. The countdown below is the confirmation, and the
+    // bytes are reused (the digest is re-checked, never the file name).
+    const alreadyDownloaded = await cachedInstallerReady(yaml.version, asset.sha512)
+    if (!alreadyDownloaded) {
+      const choice = decision === 'skipped'
+        ? await promptSkippedVersionConfirm(win, yaml.version)
+        : await promptUpdateConfirm(win, current, yaml.version)
+      if (choice === 'skip') {
+        await recordSkippedVersion(win, yaml.version)
+        return
+      }
+      if (choice !== 'install') {
+        clearKernelProgress(win)
+        return
+      }
     }
 
-    await downloadAndInstallPackage(win, yaml.version, asset, assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url), {
-      title: t('updater.readyTitle', { app: APP_NAME }),
-      message: t('updater.installPromptMessage', { app: APP_NAME, version: yaml.version }),
-      detail: t('updater.installPromptDetail'),
-    })
+    await downloadAndInstallPackage(win, yaml.version, asset, assetCandidates(UPDATER_OWNER, UPDATER_REPO, asset.url), 'update')
   } catch (err) {
     console.error('[shell-updater]', (err as Error).message)
     clearKernelProgress(win)
@@ -1090,18 +1158,27 @@ async function checkShellUpdateWin32(manual: boolean, win: BrowserWindow | null)
 
 /**
  * Shared Windows installer tail: download with progress (mirror fallback +
- * sha512), confirm, stage the pending-install record, spawn the visible NSIS
- * wizard and quit. Returns when the user defers; the host process quits when
- * the install starts.
+ * sha512), wait for a moment the user can cancel, stage the pending-install
+ * record, spawn the installer silently and quit. Returns when the user defers;
+ * the host process quits when the install starts.
+ *
+ * The install runs the assisted NSIS build in silent mode with the same three
+ * arguments electron-updater passes its own NSIS updater (`NsisUpdater`):
+ * `--updated` (skip the wizard pages and the "app is running" prompt),
+ * `/S` (silent) and `--force-run` (assisted installers only start the app when
+ * silent AND this flag is set — `installSection.nsh`). The user already
+ * approved "update and restart" at the availability prompt, so the second
+ * confirmation this function used to show is gone; what remains is the host
+ * task gate and a countdown that can be cancelled.
  */
 async function downloadAndInstallPackage(
   win: BrowserWindow | null,
   version: string,
   asset: UpdateFileEntry,
   candidates: string[],
-  installPrompt: { title: string; message: string; detail: string },
+  kind: PendingInstallKind,
 ): Promise<void> {
-  const dest = path.join(app.getPath('temp'), `dsh-app-update-${version}-${process.arch}.exe`)
+  const dest = installerPathFor(version)
   // Throttle card updates (~4/s) like the kernel downloader: every callback
   // is an executeJavaScript hop into the renderer, and the per-chunk stream
   // fires far faster than the eye can perceive.
@@ -1119,119 +1196,124 @@ async function downloadAndInstallPackage(
   // card painted on the first byte leaves that whole window blank, which reads
   // as "the click did nothing". Indeterminate is the honest state for it.
   paintDownloading(null)
-  // The installer download is the shell's largest transfer, so it is bracketed
-  // like the kernel's own: which mirror served it, and how long it took, are the
-  // two facts a "the update never finished" report needs.
-  const downloadedFrom = await trackedEventOperation(
-    'shell.update.download',
-    { version, arch: process.arch, source: 'windows-installer' },
-    () => downloadWithFallback(
-      candidates,
-      dest,
-      asset.sha512,
-      (received, total) => {
-        const now = Date.now()
-        if (now - lastEmit < 250 && !(total > 0 && received >= total)) return
-        lastEmit = now
-        paintDownloading(total > 0 ? Math.min(1, received / total) : null)
-      },
-      // A candidate that dies mid-transfer (500, sha512 mismatch, stall) must not
-      // leave its last percentage on screen while the next one restarts at zero:
-      // that stale number is what a "the download restarted itself" report looks
-      // like. Back to indeterminate, and clear the throttle so the new
-      // candidate's first chunk paints immediately.
-      () => {
-        lastEmit = 0
-        paintDownloading(null)
-      },
-    ),
-  )
+  const reused = await cachedInstallerMatches(version, asset.sha512, dest)
+  let downloadedFrom: string | null = null
+  if (reused) {
+    // A deferral costs nothing the second time: the bytes are verified against
+    // the SAME digest the metadata carries, so this is the download without the
+    // transfer, not a trust shortcut.
+    showUpdateToast(win, t('updater.reusingDownload', { app: APP_NAME, version }), 'progress', 3_000)
+  } else {
+    // The installer download is the shell's largest transfer, so it is bracketed
+    // like the kernel's own: which mirror served it, and how long it took, are the
+    // two facts a "the update never finished" report needs.
+    downloadedFrom = await trackedEventOperation(
+      'shell.update.download',
+      { version, arch: process.arch, source: 'windows-installer' },
+      () => downloadWithFallback(
+        candidates,
+        dest,
+        asset.sha512,
+        (received, total) => {
+          const now = Date.now()
+          if (now - lastEmit < 250 && !(total > 0 && received >= total)) return
+          lastEmit = now
+          paintDownloading(total > 0 ? Math.min(1, received / total) : null)
+        },
+        // A candidate that dies mid-transfer (500, sha512 mismatch, stall) must not
+        // leave its last percentage on screen while the next one restarts at zero:
+        // that stale number is what a "the download restarted itself" report looks
+        // like. Back to indeterminate, and clear the throttle so the new
+        // candidate's first chunk paints immediately.
+        () => {
+          lastEmit = 0
+          paintDownloading(null)
+        },
+      ),
+    )
+    await rememberCachedInstaller(version, dest, asset.sha512)
+  }
   // Which transport actually served the bytes. It only exists on the console
   // line below, which a packaged Windows build has no console for — and the
   // mirror chain is exactly what someone diagnosing a slow or dead update needs.
   // The LABEL, not the URL: a prefix is user configuration and can carry
   // userinfo, and this event is written to the file the user is asked to send
   // (see `sourceLabel`).
-  const servedBy = sourceLabel(downloadedFrom)
+  const servedBy = downloadedFrom === null ? 'cache' : sourceLabel(downloadedFrom)
   logEvent('shell.update.mirror', { detail: { version, from: servedBy } })
-  console.log(`[shell-updater] downloaded ${asset.url} from ${servedBy}`)
-  showUpdateToast(win, t('updater.downloadedToast', { app: APP_NAME, version }), 'success', 3_000)
+  console.log(`[shell-updater] installer for ${asset.url} from ${servedBy}`)
+  if (downloadedFrom !== null) showUpdateToast(win, t('updater.downloadedToast', { app: APP_NAME, version }), 'success', 3_000)
 
-  const install = await confirmInFrame(
-    {
-      title: installPrompt.title,
-      message: installPrompt.message,
-      detail: installPrompt.detail,
-      buttons: [
-        { label: t('common.later'), value: 'later' },
-        { label: t('updater.installNow'), value: 'install', primary: true },
-      ],
-      cancelValue: 'later',
-      enterValue: 'install',
-    },
-    {
-      type: 'question',
-      title: installPrompt.title,
-      message: installPrompt.message,
-      detail: installPrompt.detail,
-      buttons: [t('updater.installNow'), t('common.later')],
-      defaultId: 0,
-      cancelId: 1,
-    },
-    'install',
-  )
-  if (!install) {
-    // The user chose "later": the download is already on disk and nothing else
-    // will ever collect it. The pending-install record is only written on the
-    // install path, so without this removal the file sits in the temp directory
-    // until the OS cleans it — measured 2026-10-02: nothing else in the shell
-    // names this file (a ~200 MB installer per deferred update, never reused
-    // because the name carries the version).
-    await fs.rm(dest, { force: true }).catch(() => undefined)
-    return
-  }
   // The last gate before the app is replaced: a host that still holds work must
-  // be named, not silently killed (see confirmNoActiveTasks).
-  if (!await confirmNoActiveTasks(win)) {
-    // Same reason as above: nothing will collect this file if the install never
-    // happens, and the app stays running so no next-boot cleanup applies.
-    await fs.rm(dest, { force: true }).catch(() => undefined)
-    return
-  }
-  // VISIBLE NSIS install: the app must be closed so the installer can
-  // replace the running binaries; the wizard then shows the same flow as a
-  // first-time install (user clicks through, completion page relaunches
-  // the app). The installer is a GUI-subsystem binary spawned DIRECTLY —
-  // no cmd wrapper: a detached cmd.exe always flashes a console window on
-  // Windows, even with windowsHide.
+  // be named, not silently killed (see confirmNoActiveTasks). This is the only
+  // interruption left — the "install now" confirmation that used to follow the
+  // download asked the user to approve the same decision twice.
+  //
+  // A deferral KEEPS the installer for a week (see the cache record): a user who
+  // clicked "later" should not pay a ~250 MB transfer to change their mind.
+  if (!await confirmNoActiveTasks(win)) return
+  if (!await confirmSilentInstall(win)) return
+  // SILENT NSIS install: `/S` plus `--updated` runs the assisted build
+  // headlessly (pages are skipped by `skipPageIfUpdated`, and a launch carrying
+  // `--updated` is treated as an update, so no "app is running" prompt), and
+  // `--force-run` is what starts the new build again (an assisted installer
+  // only does that when `${Silent}` AND `${isForceRun}` hold). The installer is
+  // a GUI-subsystem binary spawned DIRECTLY — no cmd wrapper: a detached
+  // cmd.exe always flashes a console window on Windows.
   //
   // `windowsHide` must NOT be set on a GUI binary: libuv maps it to
-  // STARTF_USESHOWWINDOW + SW_HIDE, which Windows applies to the GUI
-  // process's first window — the wizard then runs invisibly and the user
-  // sees nothing (learned the hard way; the flag only ever hides console
-  // windows, and a GUI binary has none to hide).
+  // STARTF_USESHOWWINDOW + SW_HIDE, which Windows applies to the GUI process's
+  // first window; a failed install must still be able to show its own message.
   //
   // Completion is verified on the next boot instead of by a watcher
   // process (the host quits right after spawning, so it cannot observe the
   // exit itself): the pending-install record holds the target version and
   // the installer path, so the next run deletes the leftover package and
-  // toasts when the version did not advance (wizard cancelled or failed).
+  // toasts when the version did not advance (install failed).
   // Premise: per-user asInvoker NSIS (perMachine:false) installs in one
   // process; an elevation hop would change what the version check means.
   await fs.writeFile(
     pendingInstallFile(),
-    `${JSON.stringify({ version, installerPath: dest } satisfies PendingInstall)}\n`,
+    `${JSON.stringify({ version, installerPath: dest, kind } satisfies PendingInstall)}\n`,
     'utf8',
   )
   // The install itself: an event pair would be a lie here — this process hands
-  // the wizard over and quits, so there is no end to observe. `install.begin`
+  // the install over and quits, so there is no end to observe. `install.begin`
   // plus `install.spawned` (or `install.failed`) is the whole truth this run can
   // report, and the next boot's own events say whether the version moved.
   logEvent('shell.update.install.begin', { detail: { version, source: 'windows-installer', installer: path.basename(dest) } })
   // The embedded Platform document holds credentials issued by the host that is
   // about to stop; discard them before the installer closes this process.
   await discardPlatformCredentialsForRestart()
-  const child = spawn(dest, [], { detached: true, stdio: 'ignore' })
+  // The progress window: a second, kernel-less process of this same app shows
+  // the themed page while the installer runs — the installer is silent, and the
+  // main process is about to quit, so this is the only place a progress UI can
+  // live (see src/main/update-progress.ts). The helper waits for THIS pid to
+  // exit before starting the installer, because the installer cannot replace
+  // files the running app holds open.
+  //
+  // In a dev run there is no packaged executable to re-launch, so the installer
+  // is spawned directly; dev never installs updates in practice.
+  let child
+  if (app.isPackaged) {
+    child = spawn(
+      process.execPath,
+      [
+        UPDATE_PROGRESS_ARGV,
+        `--installer=${dest}`,
+        `--from=${app.getVersion()}`,
+        `--to=${version}`,
+        `--theme=${nativeTheme.shouldUseDarkColors ? 'dark' : 'light'}`,
+      ],
+      {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, DSH_UPDATE_PARENT_PID: String(process.pid) },
+      },
+    )
+  } else {
+    child = spawn(dest, ['--updated', '/S', '--force-run'], { detached: true, stdio: 'ignore' })
+  }
   // Spawn failure is otherwise invisible (the app is about to quit).
   child.on('error', (err) => {
     // A spawn error's message is the command line and the path it tried
@@ -1399,11 +1481,7 @@ export async function rollbackShellUpdate(win: BrowserWindow | null = null): Pro
       previous,
       asset,
       releaseAssetCandidates(UPDATER_OWNER, UPDATER_REPO, previous, asset.url),
-      {
-        title: t('updater.rollbackReadyTitle', { app: APP_NAME }),
-        message: t('updater.rollbackReadyMessage', { app: APP_NAME, previous }),
-        detail: t('updater.installPromptDetail'),
-      },
+      'rollback',
     )
   } catch (err) {
     clearKernelProgress(win)
@@ -1482,13 +1560,124 @@ export function checkShellUpdate(manual = false, win: BrowserWindow | null = nul
  * for the installer. The next boot consumes it: delete the leftover package
  * and confirm the running version actually advanced.
  */
+/** What the install was FOR; decides the notice the next boot shows. */
+type PendingInstallKind = 'update' | 'rollback'
+
 interface PendingInstall {
   readonly version: string
   readonly installerPath: string
+  /** Absent in records written before the field existed: treated as an update. */
+  readonly kind?: PendingInstallKind
 }
 
 function pendingInstallFile(): string {
   return path.join(app.getPath('userData'), 'updater-pending-install.json')
+}
+
+/**
+ * How long a deferred installer's bytes stay worth keeping.
+ *
+ * A user who clicked "later" changing their mind a week later is paying for a
+ * new transfer either way: by then the release itself usually moved on.
+ */
+const CACHED_INSTALLER_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000
+
+/** A downloaded installer kept for a deferred install (see `updater.reusingDownload`). */
+interface CachedInstaller {
+  readonly version: string
+  readonly path: string
+  /** Base64 sha512 from latest.yml — the same digest the download was gated on. */
+  readonly sha512: string
+  /** When the bytes landed (epoch ms). */
+  readonly at: number
+}
+
+function cachedInstallerFile(): string {
+  return path.join(app.getPath('userData'), 'updater-cached-installer.json')
+}
+
+/** The cache record, or null when it is missing or not shaped like one. */
+async function readCachedInstaller(): Promise<CachedInstaller | null> {
+  const value = await readJsonFile<Partial<CachedInstaller>>(cachedInstallerFile())
+  if (value === null || typeof value.version !== 'string' || typeof value.path !== 'string'
+    || typeof value.sha512 !== 'string' || typeof value.at !== 'number') return null
+  return { version: value.version, path: value.path, sha512: value.sha512, at: value.at }
+}
+
+/** Where the installer for one version lands, and where a deferred one lives. */
+function installerPathFor(version: string): string {
+  return path.join(app.getPath('temp'), `dsh-app-update-${version}-${process.arch}.exe`)
+}
+
+/**
+ * Whether this exact version's installer is already on disk and verifies.
+ *
+ * The check runs BEFORE the availability prompt: a package the user already
+ * approved and downloaded is a decision, not a question to repeat. The digest
+ * is recomputed, so a tampered or truncated file falls through to a download.
+ */
+async function cachedInstallerReady(version: string, sha512: string): Promise<boolean> {
+  return cachedInstallerMatches(version, sha512, installerPathFor(version))
+}
+
+/**
+ * Whether the bytes already on disk ARE this update's installer.
+ *
+ * Version, path and digest all have to agree, and the file's digest is
+ * re-computed: the record lives in userData, which anything running as the user
+ * can write, so it is a hint about a file, never proof about its content.
+ */
+async function cachedInstallerMatches(version: string, sha512: string, dest: string): Promise<boolean> {
+  const cached = await readCachedInstaller()
+  if (cached === null || cached.version !== version || cached.path !== dest || cached.sha512 !== sha512) return false
+  try {
+    return await sha512Base64(dest) === sha512
+  } catch {
+    return false
+  }
+}
+
+/** Record the installer just downloaded, dropping a previous version's bytes. */
+async function rememberCachedInstaller(version: string, dest: string, sha512: string): Promise<void> {
+  const previous = await readCachedInstaller()
+  if (previous !== null && previous.path !== dest) {
+    await fs.rm(previous.path, { force: true }).catch(() => undefined)
+  }
+  await writeJsonFileAtomic(cachedInstallerFile(), { version, path: dest, sha512, at: Date.now() } satisfies CachedInstaller)
+}
+
+/**
+ * Whether a cache record should be dropped: its bytes are gone or stale.
+ *
+ * Pure and exported so the rule can be tested without Electron's `app`: a
+ * missing file and an expired record both mean the same thing to boot cleanup.
+ *
+ * @param at - when the bytes landed (epoch ms).
+ * @param now - the current time (epoch ms).
+ * @param present - whether the file the record names still exists.
+ */
+export function cachedInstallerExpired(at: number, now: number, present: boolean): boolean {
+  return !present || now - at > CACHED_INSTALLER_MAX_AGE_MS
+}
+
+/**
+ * Drop the cached installer when it expired or its file is gone.
+ *
+ * Runs on every boot: the record is the only thing that knows a ~250 MB file is
+ * ours, and a missed expiry would leave it in the temp directory forever.
+ */
+async function pruneCachedInstaller(): Promise<void> {
+  const cached = await readCachedInstaller()
+  if (cached === null) return
+  let present = true
+  try {
+    await fs.access(cached.path)
+  } catch {
+    present = false
+  }
+  if (!cachedInstallerExpired(cached.at, Date.now(), present)) return
+  await fs.rm(cached.path, { force: true }).catch(() => undefined)
+  await fs.rm(cachedInstallerFile(), { force: true }).catch(() => undefined)
 }
 
 /**
@@ -1506,6 +1695,9 @@ function pendingInstallFile(): string {
  */
 export async function consumeUpdaterInstallResult(win: BrowserWindow | null = null): Promise<void> {
   await reconcileVersionHistory()
+  // A deferred installer is only worth its bytes until it expires; the check is
+  // cheap and belongs on the same boot that reconciles everything else.
+  await pruneCachedInstaller()
   const file = pendingInstallFile()
   let pending: PendingInstall
   try {
@@ -1522,6 +1714,8 @@ export async function consumeUpdaterInstallResult(win: BrowserWindow | null = nu
   if (installer !== '' && path.resolve(installer).startsWith(tempDir + path.sep)) {
     await fs.rm(installer, { force: true }).catch(() => undefined)
   }
+  // The installer is gone, so the cache record that described it is too.
+  await fs.rm(cachedInstallerFile(), { force: true }).catch(() => undefined)
   const target = typeof pending.version === 'string' ? pending.version : ''
   if (target === '') return
   const current = app.getVersion()
@@ -1534,6 +1728,20 @@ export async function consumeUpdaterInstallResult(win: BrowserWindow | null = nu
     // record, and record the advance the tray rollback menu reads.
     await clearSkippedVersion()
     await appendVersionHistory(current)
+    // Say which version is on screen now. A successful install used to leave
+    // only a log line, so the app simply reappeared with no explanation; the
+    // notice is a toast (never a dialog) and carries the release page for the
+    // version that just landed. A rollback is named as one — the pending record
+    // says which it was.
+    void showToastWhenLoaded(
+      win,
+      pending.kind === 'rollback'
+        ? t('updater.rollbackDoneToast', { app: APP_NAME, version: current })
+        : t('updater.updatedToast', { app: APP_NAME, version: current }),
+      'success',
+      8_000,
+      { label: t('updater.viewReleaseNotes'), href: releasePageUrl(current) },
+    )
     return
   }
   // The wizard was cancelled or failed: still on the old version.
