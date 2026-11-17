@@ -120,7 +120,11 @@ function ReasoningEditor(props: {
   const { value, onChange, handDeclared, index, disabled, t } = props
   const mode = value === undefined ? 'inherit' : value === false ? 'off' : 'custom'
   const dict = mode === 'custom' && typeof value === 'object' && value !== null ? value : {}
+  // Canonical order, not insertion order: a level added later ("medium" on top
+  // of low/high) must slot between its neighbours, because the rows are what
+  // the user reads as the ladder.
   const rows = Object.entries(dict)
+    .sort(([a], [b]) => REASONING_LEVELS.indexOf(a) - REASONING_LEVELS.indexOf(b))
   const used = new Set(rows.map(([level]) => level))
 
   const setMode = (next: string): void => {
@@ -200,10 +204,14 @@ function ReasoningEditor(props: {
                     onChange={(event) => {
                       const nextLevel = event.target.value
                       if (nextLevel === level) return
-                      // The wire spelling belongs to the OLD level: a renamed row keeps
-                      // its custom spelling only between real levels, and an `off` row
-                      // must send no parameter rather than the previous level's value.
-                      const nextWire = nextLevel === 'off' ? null : level === 'off' ? nextLevel : spelling
+                      // The wire spelling FOLLOWS the level: the right-hand field
+                      // is that level's default spelling, not a value carried
+                      // over from the row's previous name. A provider that needs
+                      // a custom spelling (level "medium" sent as "max") edits it
+                      // in the field afterwards — the mapping is then explicit
+                      // rather than inherited from a rename the user did not
+                      // associate with it.
+                      const nextWire = nextLevel === 'off' ? null : nextLevel
                       const next: Record<string, string | null> = {}
                       for (const [key, wire] of rows) next[key === level ? nextLevel : key] = wire
                       next[nextLevel] = nextWire
