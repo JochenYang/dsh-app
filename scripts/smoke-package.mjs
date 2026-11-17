@@ -36,10 +36,10 @@ const REQUIRED_ASAR_ENTRIES = [
 /** What the splash ships beside itself, under `dist/static`.
  *
  * The single-file rule exists because a stale setup UI once shipped here. The
- * splash is now self-contained apart from its brand mark, so the exception is
- * spelled out as an exact filename rather than a subdirectory: a build that
- * grows a second asset has to say so here, which is what keeps a retired UI
- * from slipping back in. */
+ * splash is now self-contained apart from its brand mark and the pixel-whale
+ * atlas, so each exception is spelled out as an exact filename rather than a
+ * subdirectory: a build that grows another asset has to say so here, which is
+ * what keeps a retired UI from slipping back in. */
 const STATIC_DIR = 'dist/static/'
 /** The splash page itself. */
 const SPLASH_PAGE = `${STATIC_DIR}startup.html`
@@ -50,8 +50,14 @@ const SPLASH_PAGE = `${STATIC_DIR}startup.html`
  * real asset is the intent, and a silent regression to the fallback is exactly
  * the kind of drift this gate exists to catch. */
 const SPLASH_LOGO = `${STATIC_DIR}app-logo.png`
+/** The frame atlas the splash decodes into its pixel whale (`image.src`).
+ *
+ * Load-bearing, unlike the brand mark: without it the page stays usable but the
+ * whale is gone, and the only trace is a console warning in a packaged build
+ * that has no console. So it is both allowed and required below. */
+const SPLASH_ATLAS = `${STATIC_DIR}breach-atlas.webp`
 /** Every entry `dist/static` may hold at its top level. */
-const STATIC_ALLOWED = [SPLASH_PAGE, SPLASH_LOGO]
+const STATIC_ALLOWED = [SPLASH_PAGE, SPLASH_LOGO, SPLASH_ATLAS]
 
 /** Files electron-builder's `extraResources` filter is allowed to place there. */
 const REQUIRED_KERNEL_FILES = ['kernel.tgz', 'kernel.tgz.sha512', 'manifest.json']
@@ -146,12 +152,13 @@ async function main() {
     const staticEntries = entries.filter((entry) => entry.startsWith(STATIC_DIR) && entry !== STATIC_DIR)
     const unexpected = staticEntries.filter((entry) => !STATIC_ALLOWED.includes(entry))
     check(
-      'asar ships only the splash and its brand mark under dist/static',
+      'asar ships only the splash, its brand mark and the whale atlas under dist/static',
       unexpected.length === 0,
       unexpected.length === 0 ? '' : `unexpected: ${unexpected.join(', ')}`,
     )
     check('asar ships the splash page', staticEntries.includes(SPLASH_PAGE), `found ${staticEntries.join(', ') || '(none)'}`)
     check('asar ships the splash brand mark', staticEntries.includes(SPLASH_LOGO), `found ${staticEntries.join(', ') || '(none)'}`)
+    check('asar ships the splash whale atlas', staticEntries.includes(SPLASH_ATLAS), `found ${staticEntries.join(', ') || '(none)'}`)
     if (entries.includes('package.json')) {
       const pkg = JSON.parse(extractFile(asarPath, 'package.json').toString('utf8'))
       check('package.json main points at the built entry', pkg.main === 'dist/main/index.js', String(pkg.main))
