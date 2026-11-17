@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.19.6] - 2026-11-17
+
+### 中文
+- 修复更新安装：不再用已安装的同一个可执行文件显示进度（它锁住旧文件，安装器退出 0 却不替换）；倒计时卡片位于标题拖拽区导致按钮点不动的问题一并修好。
+
+### English
+- Fix the update install: the progress helper no longer runs from the installed executable (it held the old binaries open, so the installer exited 0 without replacing anything); the countdown card's buttons now work inside the title drag region.
+
 ## [v0.19.5] - 2026-11-17
 
 ### 中文
