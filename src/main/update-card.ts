@@ -63,6 +63,11 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
     style.textContent = '@keyframes dshCardSpin { to { transform: rotate(360deg); } }';
     document.head.appendChild(style);
   }
+  // Which controls the card carries. A same-tone update that changes them (a
+  // progress toast becoming the post-update notice with a link) must rebuild:
+  // the fast path below only rewrites text, so a link added there would never
+  // exist and the root would keep its old pointer-events:none.
+  const controls = (p.link ? 'L' + p.link.href : '') + (p.actions ? 'A' + p.actions.map(function (a) { return a.id; }).join(',') : '');
   const clampWidth = function (v) {
     return Math.min(100, Math.max(0, Math.round(v * 100))) + '%';
   };
@@ -81,7 +86,7 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
   // progress callback (~4/s during a download), so the spinner would twitch
   // at a quarter turn instead of ever completing a rotation.
   const st = root && root.__dshCard;
-  if (st && st.tone === p.tone) {
+  if (st && st.tone === p.tone && st.controls === controls) {
     st.text.textContent = p.message;
     if (typeof p.progress === 'number') {
       if (!st.bar) {
@@ -180,7 +185,7 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
         'text-decoration:underline;text-underline-offset:2px;';
       root.appendChild(link);
     }
-    root.__dshCard = { tone: p.tone, content: content, text: text, bar: bar, fill: fill };
+    root.__dshCard = { tone: p.tone, controls: controls, content: content, text: text, bar: bar, fill: fill };
   }
   const KEY = '__dshCardTimer';
   if (window[KEY]) { clearTimeout(window[KEY]); window[KEY] = null; }

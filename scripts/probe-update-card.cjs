@@ -264,6 +264,44 @@ run({
 }
 }
 
+// 7. A same-tone update that ADDS a control must rebuild the card: the fast
+//    path rewrites text only, so without this a success toast that follows
+//    another success toast would keep pointer-events:none and never gain its
+//    "view release notes" link (the reported dead link).
+resetDom()
+run({ message: '下载完成', progress: null, tone: 'success', autoHide: 3000 })
+{
+  const before = documentStub.body.children[0]
+  assert.strictEqual(before.style['pointer-events'], 'none', 'a plain toast is not interactive')
+  run({
+    message: '已更新到 DSH APP 0.19.4。',
+    progress: null,
+    tone: 'success',
+    autoHide: 8000,
+    link: { label: '查看更新内容', href: 'https://github.com/o/r/releases/tag/v0.19.4' },
+  })
+  const after = documentStub.body.children[0]
+  assert.strictEqual(after, before, 'the same element is reused')
+  assert.strictEqual(after.style['pointer-events'], 'auto', 'the card becomes interactive')
+  const link = after.children[2]
+  assert.strictEqual(link.tag, 'a', 'the link is added by the rebuild')
+  assert.strictEqual(link.href, 'https://github.com/o/r/releases/tag/v0.19.4')
+}
+
+// ...while an unchanged control set must NOT rebuild: that is what keeps the
+// countdown's buttons alive (same element, same disabled state) across ticks.
+resetDom()
+{
+  const actions = [{ id: 'cancel-install', label: '取消' }, { id: 'install-now', label: '立即安装', primary: true }]
+  run({ message: '将在 3 秒后安装并重启', progress: null, tone: 'progress', actions })
+  const card = documentStub.body.children[0]
+  const button = card.children[2]
+  run({ message: '将在 2 秒后安装并重启', progress: null, tone: 'progress', actions })
+  assert.strictEqual(documentStub.body.children[0], card, 'same actions keep the card')
+  assert.strictEqual(card.children[2], button, 'same actions keep the button identity')
+  console.log('pass 7/7: adding a control rebuilds; unchanged controls do not')
+}
+
 console.log('\nprobe-update-card: all assertions passed')
 
 // --------------------------------------------------------------------------
