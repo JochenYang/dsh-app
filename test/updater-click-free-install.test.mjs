@@ -27,12 +27,14 @@ test('the windows install is silent, asks nothing, and relaunches the app', () =
   // file stays free of page customisation: the installer shows nothing, and the
   // themed progress UI belongs to the app, not to NSIS (see the design note in
   // the changeset).
-  // A packaged run hands the install to the kernel-less progress helper; the
-  // helper waits for this pid, then runs the silent installer (see
-  // src/main/update-progress.ts). The direct spawn is the dev fallback.
-  assert.match(source, /UPDATE_PROGRESS_ARGV,/u)
-  assert.match(source, /DSH_UPDATE_PARENT_PID/u)
+  // The installer is spawned directly and silently. A separate progress helper
+  // that ran from this same installed executable was removed in 0.19.6: it kept
+  // the old binaries open, so the installer exited 0 without installing.
   assert.match(source, /spawn\(dest, \['--updated', '\/S', '--force-run'\]/u)
+  assert.ok(!source.includes('UPDATE_PROGRESS_ARGV'), 'no in-process helper is spawned')
+  assert.ok(!source.includes('update-progress'), 'the helper module is gone')
+  // The pre-install card is the only thing left on screen.
+  assert.match(source, /t\('updater\.installing'/u)
   const hooks = readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'installer', 'installer-hooks.nsh'), 'utf8')
   assert.match(hooks, /!macro customInstall/u)
   assert.match(hooks, /!macro customCheckAppRunning/u)
@@ -128,23 +130,3 @@ test('the installed copy matches what the flow does', () => {
   assert.match(t('updater.viewReleaseNotes'), /更新/u)
 })
 
-test('the progress helper only starts for a well-formed request', () => {
-  const { parseUpdateProgressArgs } = require('../dist/main/update-progress.js')
-  // Absolute on every platform: the helper spawns the path, so a relative one is
-  // refused rather than resolved against an unknown cwd.
-  const installer = path.resolve('dsh-app-update-0.19.5-x64.exe')
-  const base = ['--update-progress', `--installer=${installer}`, '--from=0.19.4', '--to=0.19.5', '--theme=dark']
-  assert.deepEqual(parseUpdateProgressArgs(base), {
-    installer,
-    from: '0.19.4',
-    to: '0.19.5',
-    theme: 'dark',
-  })
-  // A normal launch never enters the mode.
-  assert.equal(parseUpdateProgressArgs(['--updated']), null)
-  // A relative or missing installer is refused.
-  assert.equal(parseUpdateProgressArgs(['--update-progress', '--installer=relative.exe']), null)
-  assert.equal(parseUpdateProgressArgs(['--update-progress']), null)
-  // Anything but `dark` is the light page.
-  assert.equal(parseUpdateProgressArgs([...base.slice(0, 4), '--theme=light']).theme, 'light')
-})

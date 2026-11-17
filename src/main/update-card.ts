@@ -116,6 +116,9 @@ export const UPDATE_CARD_SCRIPT = (payload: UpdateCardPayload): string => `(func
       'line-height:1.5;color:#fff;background:' + bg + ';' +
       'box-shadow:0 4px 16px rgba(0,0,0,.25);' +
       'pointer-events:' + (p.actions || p.link ? 'auto' : 'none') + ';' +
+      // The card sits in the app's draggable title strip; without this a click
+      // starts a window drag instead of reaching the button.
+      '-webkit-app-region:no-drag;' +
       'transition:opacity .3s;opacity:1;' +
       'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;';
     root.textContent = '';

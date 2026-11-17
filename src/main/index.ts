@@ -23,7 +23,6 @@ import { checkConfigSchema } from './config-schema'
 import { detectLocalProxy, hasProxyEnv, isProxyAlive, withDetectedProxy } from './proxy-detect'
 import { USER_DATA_DIR_NAME, alignUserDataDir } from './user-data'
 import { installCrashLogging } from './crash-log'
-import { disposeProgressProfile, parseUpdateProgressArgs, prepareProgressProfile, runUpdateProgress } from './update-progress'
 import { appendRotatingLog } from './log-file'
 import { configureEventLog, errorFactsDetail, logEvent, reportUnrecordedText, trackedEventOperation } from './event-log'
 import { PLATFORM_IPC, PlatformView, installPlatformIpc, platformPreloadPath, type PlatformLocale } from './platform-view'
@@ -2432,24 +2431,15 @@ async function boot(): Promise<void> {
 // change the default userData path and orphan the installed kernel + settings.
 // The rename is same-volume on every platform, so the install survives it; the
 // one-spelling rule and what breaks without it are in src/main/user-data.ts.
-//
-// The update-progress helper is the one exception: the main app still holds the
-// real profile while it exits, so the helper gets a throwaway directory under
-// the temp root, removed when it quits (see src/main/update-progress.ts).
-const updateProgress = parseUpdateProgressArgs(process.argv)
 const appDataDir = app.getPath('appData')
-const progressProfileDir = updateProgress === null
-  ? ''
-  : path.join(app.getPath('temp'), `dsh-app-update-progress-${process.pid}`)
-const userDataDir = updateProgress === null ? alignUserDataDir(appDataDir) : progressProfileDir
-if (updateProgress === null && path.basename(userDataDir) !== USER_DATA_DIR_NAME) {
+const userDataDir = alignUserDataDir(appDataDir)
+if (path.basename(userDataDir) !== USER_DATA_DIR_NAME) {
   console.warn(
     `[userData] ${appDataDir} will not take the "${USER_DATA_DIR_NAME}" spelling; ` +
       `using ${userDataDir} — every path handed to the kernel must use this exact ` +
       'string, or its modules load twice and settings writes are refused',
   )
 }
-if (progressProfileDir !== '') prepareProgressProfile(progressProfileDir)
 app.setPath('userData', userDataDir)
 
 // The structured event sink (`<logs>/dsh-events.jsonl`, see event-log.ts) is
@@ -2484,27 +2474,9 @@ let hostStartedAt = 0
 // stays up — is in src/main/crash-log.ts.
 installCrashLogging(logKernel)
 
-// The update-progress helper takes no lock: the main app is still quitting and
-// holds it, and this process must start regardless. Its own exit is driven by
-// window close (see runUpdateProgress).
-const gotLock = updateProgress !== null ? true : app.requestSingleInstanceLock()
+const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
-} else if (updateProgress !== null) {
-  // The progress helper: show the page, run the installer, exit. No boot, no
-  // tray, no kernel child — see src/main/update-progress.ts.
-  void app.whenReady()
-    .then(() => runUpdateProgress(updateProgress))
-    .catch((error: unknown) => {
-      const message = error instanceof Error ? `${error.message}
-${error.stack ?? ''}` : String(error)
-      console.error('[update-progress] failed:', message)
-      logKernel(`[update-progress] failed: ${message}`)
-    })
-    .finally(() => {
-      if (progressProfileDir !== '') void disposeProgressProfile(progressProfileDir)
-      app.quit()
-    })
 } else {
   app.on('second-instance', (_event, argv, workingDirectory) => {
     // A second launch can carry a folder too (open-with, a folder dropped on

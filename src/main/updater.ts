@@ -1,4 +1,4 @@
-import { app, nativeTheme, shell, type BrowserWindow } from 'electron'
+import { app, shell, type BrowserWindow } from 'electron'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createReadStream, readFileSync } from 'node:fs'
@@ -21,7 +21,6 @@ import { inFrameDialogScript } from './in-frame-dialog'
 import { errorFactsDetail, logEvent, reportUnrecordedText, trackedEventOperation } from './event-log'
 import { readJsonFile, writeJsonFileAtomic } from './json-file'
 import { noticeThemedDialog, promptThemedDialog, resolveDialogWindow } from './themed-dialog'
-import { UPDATE_PROGRESS_ARGV } from './update-progress'
 import { openChangelogDialog } from './changelog-dialog'
 import { clearKernelProgress, hideUpdateCard, readUpdateCardAction, resetUpdateCardAction, showKernelProgress, showToastWhenLoaded, showUpdateCard, showUpdateToast } from './window'
 import { updateTrayMenu } from './tray'
@@ -1278,38 +1277,17 @@ async function downloadAndInstallPackage(
   // plus `install.spawned` (or `install.failed`) is the whole truth this run can
   // report, and the next boot's own events say whether the version moved.
   logEvent('shell.update.install.begin', { detail: { version, source: 'windows-installer', installer: path.basename(dest) } })
+  // Last thing on screen: the installer is silent, so say what is happening
+  // before this window goes away (no buttons — nothing here is the user's to
+  // press). The helper process that used to show a themed page from the SAME
+  // installed executable was removed in 0.19.6: it kept `DSH APP.exe` open, so
+  // the installer could not replace the binaries and exited 0 without
+  // installing.
+  showUpdateCard(win, t('updater.installing', { app: APP_NAME, version }), 'progress')
   // The embedded Platform document holds credentials issued by the host that is
   // about to stop; discard them before the installer closes this process.
   await discardPlatformCredentialsForRestart()
-  // The progress window: a second, kernel-less process of this same app shows
-  // the themed page while the installer runs — the installer is silent, and the
-  // main process is about to quit, so this is the only place a progress UI can
-  // live (see src/main/update-progress.ts). The helper waits for THIS pid to
-  // exit before starting the installer, because the installer cannot replace
-  // files the running app holds open.
-  //
-  // In a dev run there is no packaged executable to re-launch, so the installer
-  // is spawned directly; dev never installs updates in practice.
-  let child
-  if (app.isPackaged) {
-    child = spawn(
-      process.execPath,
-      [
-        UPDATE_PROGRESS_ARGV,
-        `--installer=${dest}`,
-        `--from=${app.getVersion()}`,
-        `--to=${version}`,
-        `--theme=${nativeTheme.shouldUseDarkColors ? 'dark' : 'light'}`,
-      ],
-      {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, DSH_UPDATE_PARENT_PID: String(process.pid) },
-      },
-    )
-  } else {
-    child = spawn(dest, ['--updated', '/S', '--force-run'], { detached: true, stdio: 'ignore' })
-  }
+  const child = spawn(dest, ['--updated', '/S', '--force-run'], { detached: true, stdio: 'ignore' })
   // Spawn failure is otherwise invisible (the app is about to quit).
   child.on('error', (err) => {
     // A spawn error's message is the command line and the path it tried
