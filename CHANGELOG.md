@@ -8,6 +8,18 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.19.5] - 2026-11-17
+
+### 中文
+- 关于页新增「更新日志」：安装包自带最近几个版本的说明，离线可看；更新提示里的「查看更新内容」改为应用内弹窗；关于页补上带图标的 GitHub 仓库入口。
+- 供应商配置的推理等级：切换等级后右侧字段跟随新等级，等级行按 low → medium → high 的规范顺序排列。
+- 更新完成提示里的「查看更新内容」现在可以点击：同色调提示切换控件时会重建卡片，不再沿用上一张不可点击的卡片。
+
+### English
+- The About page gains a changelog: the last few releases ship with the app and read offline; the notice's entry now opens that sheet in-app, and the About page gains a GitHub repository link with its mark.
+- Provider reasoning levels: changing the level now updates its wire field, and rows follow the canonical low → medium → high order.
+- The post-update notice's "what changed" link is clickable again: a same-tone toast that gains a control now rebuilds its card instead of reusing a non-interactive one.
+
 ## [v0.19.4] - 2026-11-17
 
 ### 中文
