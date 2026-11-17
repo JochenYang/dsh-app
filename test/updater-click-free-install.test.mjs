@@ -76,7 +76,11 @@ test('a deferred install keeps its bytes instead of deleting them', () => {
 
 test('the next boot names the installed version and links to its release', () => {
   assert.match(source, /t\('updater\.updatedToast', \{ app: APP_NAME, version: current \}\)/u)
-  assert.match(source, /t\('updater\.viewReleaseNotes'\), href: releasePageUrl\(current\)/u)
+  // The notice opens the IN-APP changelog: a mainland user cannot reach the
+  // GitHub release page, and the sheet's own external link is the mirror.
+  assert.match(source, /label: t\('updater\.viewReleaseNotes'\) \}/u)
+  assert.match(source, /openChangelogDialog\(win\)/u)
+  assert.ok(!source.includes('releases/tag/v'), 'no GitHub release link is built by the updater')
   // A rollback is named as a rollback, not as an update.
   assert.match(source, /t\('updater\.rollbackDoneToast', \{ app: APP_NAME, version: current \}\)/u)
 })

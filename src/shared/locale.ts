@@ -250,6 +250,10 @@ const ZH_CN = {
   'updater.cancelInstall': '取消',
   'updater.installNow': '立即安装',
   'updater.updatedToast': '已更新到 {app} {version}。',
+  'changelog.title': '更新日志',
+  'changelog.close': '关闭',
+  'changelog.empty': '这个版本没有更新说明。',
+
   'updater.viewReleaseNotes': '查看更新内容',
   'updater.rollbackDoneToast': '已回滚到 {app} {version}。',
   'updater.rollbackDevUnsupported': '开发模式下不支持回滚应用版本（当前运行的是未打包构建）。',
@@ -555,6 +559,10 @@ const EN_US: Record<MessageKey, string> = {
   'updater.cancelInstall': 'Cancel',
   'updater.installNow': 'Install now',
   'updater.updatedToast': 'Updated to {app} {version}.',
+  'changelog.title': 'Changelog',
+  'changelog.close': 'Close',
+  'changelog.empty': 'No release notes for this version.',
+
   'updater.viewReleaseNotes': 'What changed',
   'updater.rollbackDoneToast': 'Rolled back to {app} {version}.',
   'updater.rollbackDevUnsupported': 'Rolling back the app version is not supported in dev mode (this is an unpackaged build).',

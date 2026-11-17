@@ -29,11 +29,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { fetchAboutInfo, startAboutAction, type AboutAction, type AboutInfo } from './api.ts'
 import { noticeText } from '../diagnostics/api.ts'
 import type { RouteNotice } from '../diagnostics/api.ts'
 import { openLogDirectory } from '../diagnostics/api.ts'
 import { NS } from './locales.ts'
+import { ChangelogCard } from './changelog.tsx'
 
 /** How long a success notice stays on screen (same policy as the other pages). */
 const NOTICE_TIMEOUT_MS = 4_000
@@ -80,6 +82,15 @@ interface Field {
   readonly key: string
   readonly label: string
   readonly value: string
+}
+
+/** The GitHub mark: the one brand icon this page carries, currentColor only. */
+function GitHubMark(): ReactNode {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false" fill="currentColor">
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+    </svg>
+  )
 }
 
 export function AboutSection({ t }: AboutSectionProps): ReactNode {
@@ -195,6 +206,17 @@ export function AboutSection({ t }: AboutSectionProps): ReactNode {
       <div className="dshAbout-card">
         <div className="dshAbout-cardHead">
           <span className="dshAbout-cardTitle">{t('about.versions.title')}</span>
+          <Tooltip label={t('about.repo')} side="bottom">
+            <a
+              className="dshAbout-repo"
+              href="https://github.com/JochenYang/dsh-app"
+              target="_blank"
+              rel="noreferrer noopener"
+              aria-label={t('about.repo')}
+            >
+              <GitHubMark />
+            </a>
+          </Tooltip>
           {info.kind === 'loading' ? <span className="dshAbout-badge" role="status">{t('about.loading')}</span> : null}
           {info.kind === 'failed' ? (
             <>
@@ -216,6 +238,8 @@ export function AboutSection({ t }: AboutSectionProps): ReactNode {
           ))}
         </dl>
       </div>
+
+      <ChangelogCard t={t} />
 
       <div className="dshAbout-card">
         <div className="dshAbout-cardHead">
@@ -274,20 +298,27 @@ export function AboutSection({ t }: AboutSectionProps): ReactNode {
  * (`AGENTS.md` §5) — the class prefix keeps every rule off the other pages.
  */
 const ABOUT_CSS = `
-.dshAbout-root { display: flex; flex-direction: column; gap: 12px; padding-top: 16px; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); }
-.dshAbout-intro { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); line-height: 1.6; }
-.dshAbout-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 10px; background: var(--dsw-alias-bg-layer-1, #fff); }
+.dshAbout-root { display: flex; flex-direction: column; gap: 14px; padding-top: 16px; font-size: 13px; color: var(--dsw-alias-label-primary, #0f172a); }
+.dshAbout-intro { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); line-height: 1.6; max-width: 52ch; }
+.dshAbout-repo { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; color: var(--dsw-alias-label-secondary, #64748b); }
+.dshAbout-repo:hover { color: var(--dsw-alias-brand-primary, #3b82f6); background: var(--dsw-alias-bg-layer-2, rgba(148,163,184,.14)); }
+.dshAbout-repo:hover { text-decoration: underline; }
+.dshAbout-card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 10px; background: var(--dsw-alias-bg-layer-1, #fff); }
+.dshAbout-rowCard { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; border: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); border-radius: 10px; background: var(--dsw-alias-bg-layer-1, #fff); }
+.dshAbout-rowText { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dshAbout-rowTitle { font-weight: 600; }
 .dshAbout-cardHead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .dshAbout-cardTitle { font-weight: 600; }
 .dshAbout-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; background: var(--dsw-alias-bg-layer-2, rgba(148,163,184,.16)); color: var(--dsw-alias-label-secondary, #64748b); }
-.dshAbout-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 16px; margin: 0; }
+.dshAbout-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; margin: 0; }
 .dshAbout-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .dshAbout-fieldLabel { color: var(--dsw-alias-label-secondary, #64748b); font-size: 11.5px; }
-.dshAbout-fieldValue { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.dshAbout-fieldValue { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .dshAbout-hint { margin: 0; color: var(--dsw-alias-label-secondary, #64748b); font-size: 12px; line-height: 1.5; }
 .dshAbout-hintBlocked { padding: 6px 10px; border-left: 2px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); background: var(--dsw-alias-bg-layer-2, #f1f5f9); border-radius: 0 6px 6px 0; }
-.dshAbout-pathRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.dshAbout-pathLabel { color: var(--dsw-alias-label-secondary, #64748b); font-size: 11.5px; flex: none; min-width: 84px; }
+.dshAbout-pathRow { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; align-items: center; gap: 8px 12px; }
+.dshAbout-pathRow > .dshAbout-notice, .dshAbout-pathRow > .dshAbout-hint, .dshAbout-pathRow > .dshAbout-error { grid-column: 1 / -1; }
+.dshAbout-pathLabel { color: var(--dsw-alias-label-secondary, #64748b); font-size: 11.5px; }
 .dshAbout-path { margin: 0; padding: 2px 6px; border-radius: 4px; background: var(--dsw-alias-bg-layer-2, #f8fafc); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; overflow-wrap: anywhere; }
 .dshAbout-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* The three actions sit side by side: they are peers — same weight, same trigger,
@@ -301,4 +332,14 @@ const ABOUT_CSS = `
 .dshAbout-button { padding: 5px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; cursor: pointer; font-size: 12.5px; }
 .dshAbout-button:disabled { opacity: .5; cursor: default; }
 .dshAbout-buttonPrimary { border-color: transparent; background: var(--dsw-alias-brand-primary, #3b82f6); color: var(--dsw-alias-label-primary-foreground, #fff); }
+.dshAbout-changelogModal { width: min(640px, calc(100vw - 48px)); max-height: 100%; }
+.dshAbout-changelogScroll { max-height: min(60vh, 520px); overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+.dshAbout-changelogEntry { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
+.dshAbout-changelogEntry:last-child { border-bottom: none; padding-bottom: 0; }
+.dshAbout-changelogHead { display: flex; align-items: baseline; gap: 8px; }
+.dshAbout-changelogVersion { font-weight: 600; font-variant-numeric: tabular-nums; }
+.dshAbout-changelogDate { font-size: 11.5px; color: var(--dsw-alias-label-secondary, #64748b); }
+.dshAbout-changelogList { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; line-height: 1.6; font-size: 12.5px; }
+.dshAbout-changelogLink { color: var(--dsw-alias-brand-primary, #3b82f6); font-size: 12px; text-decoration: none; }
+.dshAbout-changelogLink:hover { text-decoration: underline; }
 `

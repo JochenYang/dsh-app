@@ -11,7 +11,7 @@ import {
   writeWindowBounds,
   type WindowSize,
 } from './window-bounds'
-import { UPDATE_CARD_SCRIPT, UPDATE_CARD_TONE_BG, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardAction, type UpdateCardLink, type UpdateCardTone } from './update-card'
+import { UPDATE_CARD_SCRIPT, UPDATE_CARD_TONE_BG, KERNEL_UPDATE_CARD_SCRIPT, type KernelUpdateCardOption, type UpdateCardAction, type UpdateCardTone } from './update-card'
 import { isShellNavigationTarget, SPLASH_PAGE } from './nav-policy'
 import type { ThemeMode } from './theme'
 
@@ -800,19 +800,19 @@ function reinjectKernelProgress(win: BrowserWindow): void {
 /**
  * Transient notification toast (e.g. background update findings).
  * @param durationMs - auto-hide delay; undefined keeps the card until cleared.
- * @param link - optional "view release notes" anchor; the window's navigation
- *   guard routes the external target into the system browser.
+ * @param action - optional button (the post-update "what changed" seat); the
+ *   shell polls {@link readUpdateCardAction} for the click.
  */
 export function showUpdateToast(
   win: BrowserWindow | null,
   message: string,
   tone: UpdateCardTone = 'progress',
   durationMs?: number,
-  link?: UpdateCardLink,
+  action?: UpdateCardAction,
 ): void {
   if (!win || win.isDestroyed()) return
   win.webContents
-    .executeJavaScript(UPDATE_CARD_SCRIPT({ message, progress: null, tone, autoHide: durationMs, ...(link === undefined ? {} : { link }) }))
+    .executeJavaScript(UPDATE_CARD_SCRIPT({ message, progress: null, tone, autoHide: durationMs, ...(action === undefined ? {} : { actions: [action] }) }))
     .catch(() => undefined)
 }
 
@@ -916,7 +916,7 @@ export async function showToastWhenLoaded(
   message: string,
   tone: UpdateCardTone = 'progress',
   durationMs = 5_000,
-  link?: UpdateCardLink,
+  action?: UpdateCardAction,
 ): Promise<void> {
   if (!win || win.isDestroyed()) return
   const wc = win.webContents
@@ -924,7 +924,7 @@ export async function showToastWhenLoaded(
     const loaded = new Promise<void>((resolve) => wc.once('did-finish-load', () => resolve()))
     await Promise.race([loaded, new Promise((resolve) => setTimeout(resolve, 10_000))])
   }
-  showUpdateToast(win, message, tone, durationMs, link)
+  showUpdateToast(win, message, tone, durationMs, action)
 }
 
 /** Remove the update status card immediately. */

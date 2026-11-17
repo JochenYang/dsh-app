@@ -124,7 +124,8 @@ function ReasoningEditor(props: {
   // of low/high) must slot between its neighbours, because the rows are what
   // the user reads as the ladder.
   const rows = Object.entries(dict)
-    .sort(([a], [b]) => REASONING_LEVELS.indexOf(a) - REASONING_LEVELS.indexOf(b))
+    .sort(([a], [b]) => REASONING_LEVELS.indexOf(a as typeof REASONING_LEVELS[number])
+      - REASONING_LEVELS.indexOf(b as typeof REASONING_LEVELS[number]))
   const used = new Set(rows.map(([level]) => level))
 
   const setMode = (next: string): void => {

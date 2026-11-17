@@ -22,6 +22,7 @@ import { errorFactsDetail, logEvent, reportUnrecordedText, trackedEventOperation
 import { readJsonFile, writeJsonFileAtomic } from './json-file'
 import { noticeThemedDialog, promptThemedDialog, resolveDialogWindow } from './themed-dialog'
 import { UPDATE_PROGRESS_ARGV } from './update-progress'
+import { openChangelogDialog } from './changelog-dialog'
 import { clearKernelProgress, hideUpdateCard, readUpdateCardAction, resetUpdateCardAction, showKernelProgress, showToastWhenLoaded, showUpdateCard, showUpdateToast } from './window'
 import { updateTrayMenu } from './tray'
 
@@ -705,11 +706,6 @@ async function showDownloadError(message: string): Promise<void> {
 
 const UPDATER_OWNER = resolveArtifactOwner()
 const UPDATER_REPO = resolveArtifactRepo()
-
-/** The GitHub release page for one installed version (the "what changed" link). */
-function releasePageUrl(version: string): string {
-  return `https://github.com/${UPDATER_OWNER}/${UPDATER_REPO}/releases/tag/v${version}`
-}
 
 /** Parsed metadata plus the source that served it (drives asset ordering). */
 interface LatestMetadata {
@@ -1733,15 +1729,29 @@ export async function consumeUpdaterInstallResult(win: BrowserWindow | null = nu
     // notice is a toast (never a dialog) and carries the release page for the
     // version that just landed. A rollback is named as one — the pending record
     // says which it was.
-    void showToastWhenLoaded(
-      win,
-      pending.kind === 'rollback'
-        ? t('updater.rollbackDoneToast', { app: APP_NAME, version: current })
-        : t('updater.updatedToast', { app: APP_NAME, version: current }),
-      'success',
-      8_000,
-      { label: t('updater.viewReleaseNotes'), href: releasePageUrl(current) },
-    )
+    const OPEN_CHANGELOG_ACTION = 'open-changelog'
+    void (async () => {
+      await showToastWhenLoaded(
+        win,
+        pending.kind === 'rollback'
+          ? t('updater.rollbackDoneToast', { app: APP_NAME, version: current })
+          : t('updater.updatedToast', { app: APP_NAME, version: current }),
+        'success',
+        8_000,
+        { id: OPEN_CHANGELOG_ACTION, label: t('updater.viewReleaseNotes') },
+      )
+      // The button is a flag in the page, so a click is only known by polling.
+      // The window is the first thing the user sees, so this stays short: a
+      // click after the toast is gone can still use the About page's entry.
+      const deadline = Date.now() + 20_000
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        if (await readUpdateCardAction(win) === OPEN_CHANGELOG_ACTION) {
+          openChangelogDialog(win)
+          return
+        }
+      }
+    })()
     return
   }
   // The wizard was cancelled or failed: still on the old version.

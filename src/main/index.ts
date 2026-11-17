@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, Menu, Notification, session, shell } from 'electron'
-import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { KernelManager } from '../kernel/manager'
@@ -2304,7 +2304,36 @@ async function boot(): Promise<void> {
       () => (mainWindow === null || mainWindow.isDestroyed() ? undefined : mainWindow.webContents.id),
     ),
   ])
-  installDshAppProtocol(() => (server.isRunning ? server : null), shellActions)
+  // The About page reads the changelog the build generated from CHANGELOG.md.
+  // Served same-origin (a plain fetch from the page), localized here because the
+  // shell is the only side that knows the active UI language; no IPC channel is
+  // involved and nothing in the request can steer the path.
+  const serveChangelog = async (request: Request): Promise<Response | null> => {
+    let url: URL
+    try {
+      url = new URL(request.url)
+    } catch {
+      return null
+    }
+    if (url.pathname !== '/__changelog.json') return null
+    try {
+      const raw = readFileSync(path.join(__dirname, '..', 'changelog.json'), 'utf8')
+      const data = JSON.parse(raw) as { versions: Array<{ version: string, date: string, zh: string[], en: string[] }> }
+      const english = getLocale() === 'en-US'
+      const body = JSON.stringify({
+        versions: data.versions.map(({ version, date, zh, en }) => ({ version, date, bullets: english ? en : zh })),
+      })
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } })
+    } catch {
+      // No generated file (a dev tree before the first build) is an empty list,
+      // not an error: the About page shows its own "no notes" line.
+      return new Response('{"versions":[]}', { status: 200, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } })
+    }
+  }
+  installDshAppProtocol(
+    () => (server.isRunning ? server : null),
+    async (request) => (await serveChangelog(request)) ?? shellActions(request),
+  )
 
   // Create the tray before any server/kernel work so it persists even when
   // the server fails to start (reinstall/retry loops). Otherwise the user
