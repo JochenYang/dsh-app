@@ -8,6 +8,16 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.19.7] - 2026-11-18
+
+### 中文
+- 标题栏拖拽区不再吞掉弹窗按钮：模型编辑、模型导入与更新日志弹窗标记为 no-drag，关闭按钮可以点击。
+- 跟随内核线 0.2.2-rc.4：上游只改了两个客户端包的内部实现（dsh-llm、dsh-client-ui-sidebar），无声明、座位、服务或 peer 变化，未采纳新面。
+
+### English
+- The title drag strip no longer swallows dialog clicks: the model editor, model import and changelog dialogs are marked no-drag, so their close buttons work.
+- Follow the 0.2.2-rc.4 kernel line: only internal changes in two client packages (dsh-llm, dsh-client-ui-sidebar); no declarations, seats, services or peers changed, and nothing new was adopted.
+
 ## [v0.19.6] - 2026-11-17
 
 ### 中文
