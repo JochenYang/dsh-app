@@ -25,7 +25,7 @@ export const ADVANCED_CSS = `
 /* The token block is shared with .dshAma-scope, the class every portaled
    dialog carries: a body portal leaves .dshAma-root, so without it the dialog
    would silently lose every variable below (unstyled selects, no borders). */
-.dshAma-root,.dshAma-scope{
+.dshAma-root,.dshAma-scope{-webkit-app-region:no-drag;
   --dshAma-fg:var(--dsw-alias-label-primary,#17181a);
   --dshAma-fg2:var(--dsw-alias-label-secondary,#5b6070);
   --dshAma-fg3:var(--dsw-alias-label-tertiary,#8a8f9d);

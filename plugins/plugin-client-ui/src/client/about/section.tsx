@@ -332,7 +332,7 @@ const ABOUT_CSS = `
 .dshAbout-button { padding: 5px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(15,23,42,.18)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: inherit; cursor: pointer; font-size: 12.5px; }
 .dshAbout-button:disabled { opacity: .5; cursor: default; }
 .dshAbout-buttonPrimary { border-color: transparent; background: var(--dsw-alias-brand-primary, #3b82f6); color: var(--dsw-alias-label-primary-foreground, #fff); }
-.dshAbout-changelogModal { width: min(640px, calc(100vw - 48px)); max-height: 100%; }
+.dshAbout-changelogModal { width: min(640px, calc(100vw - 48px)); max-height: 100%; -webkit-app-region: no-drag; }
 .dshAbout-changelogScroll { max-height: min(60vh, 520px); overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
 .dshAbout-changelogEntry { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(15,23,42,.08)); }
 .dshAbout-changelogEntry:last-child { border-bottom: none; padding-bottom: 0; }

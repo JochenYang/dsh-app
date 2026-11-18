@@ -75,7 +75,7 @@ export const CHANGELOG_DIALOG_SCRIPT = (payload: {
   layer.setAttribute('aria-label', p.title);
   layer.style.cssText =
     'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
-    'padding:24px;background:rgba(15,23,42,.48);' +
+    'padding:24px;background:rgba(15,23,42,.48);-webkit-app-region:no-drag;' +
     'font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;';
 
   const panel = document.createElement('div');
