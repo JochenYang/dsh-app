@@ -8,6 +8,14 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.19.8] - 2026-11-19
+
+### 中文
+- 跟随内核线 0.2.2-rc.5：上游改动集中在 dsh-web、dsh-api-remotes 与 dsh-client-ui-sidebar 的内部实现，无声明、座位、服务或 peer 变化，未采纳新面。
+
+### English
+- Follow the 0.2.2-rc.5 kernel line: changes stay inside dsh-web, dsh-api-remotes and dsh-client-ui-sidebar; no declarations, seats, services or peers changed, and nothing new was adopted.
+
 ## [v0.19.7] - 2026-11-18
 
 ### 中文
