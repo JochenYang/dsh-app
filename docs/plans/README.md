@@ -14,6 +14,7 @@
 | [kernel-0.2.2-rc.2-upgrade.md](kernel-0.2.2-rc.2-upgrade.md) | 0.2.2-rc.2 换线：办公服务改名、技能名单 7→4、新内核 peer |
 | [kernel-0.2.2-rc.3-upgrade.md](kernel-0.2.2-rc.3-upgrade.md) | 0.2.2-rc.3 跟随：侧边栏 HOC 座位、引擎私有依赖漏裁 |
 | [kernel-0.2.2-rc.4-upgrade.md](kernel-0.2.2-rc.4-upgrade.md) | 0.2.2-rc.4 补丁跟随：两个客户端包的内部改动，无适配 |
+| [kernel-0.2.2-rc.5-upgrade.md](kernel-0.2.2-rc.5-upgrade.md) | 0.2.2-rc.5 补丁跟随：dsh-web 等内部改动，无适配 |
 | [office-slash-entry.md](office-slash-entry.md) | Office 套件的 `/` 入口 |
 | [plugin-codegraph.md](plugin-codegraph.md) | plugin-codegraph：图谱、三个阶段与三个模型工具 |
 | [plugin-market-boundary.md](plugin-market-boundary.md) | 插件市场与上游 Discover 的边界与退役判据（决策记录） |
