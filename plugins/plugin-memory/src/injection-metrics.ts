@@ -37,10 +37,13 @@ export interface InjectionMean {
   totalChars: number
   cardCount: number
   indexLines: number
-  /** Cards left out, on average per assembly. */
+  /** Cards left out, on average per assembly (budget, width cap, or withheld
+   *  as credential-looking — the latter also counted by `shieldedCards`). */
   droppedCards: number
   /** Index lines the ceiling cut, on average per assembly. */
   indexOverflowLines: number
+  /** Cards withheld as credential-looking, on average per assembly. */
+  shieldedCards: number
 }
 
 /** What `/status` serves: the latest assembly + the ring's averages. */
@@ -49,7 +52,10 @@ export interface InjectionSummary {
   /** How many samples the mean covers (≤ {@link MAX_INJECTION_SAMPLES}). */
   samples: number
   mean: InjectionMean
-  /** How many of those samples had cards left out (budget or quota). */
+  /** How many of those samples had cards left out or cut (budget, the
+   *  single-card width cap), or a store that could not be read at all.
+   *  Credential-withheld cards are not in here — they are counted by
+   *  `shieldedCards`. */
   truncatedSamples: number
 }
 
@@ -111,6 +117,7 @@ export class InjectionMetricsRing {
         // reading of "how much is typically dropped".
         droppedCards: sum(sample => sample.droppedCards),
         indexOverflowLines: sum(sample => sample.indexOverflowLines),
+        shieldedCards: sum(sample => sample.shieldedCards),
       },
       truncatedSamples: this.samples.filter(sample => sample.truncated).length,
     }

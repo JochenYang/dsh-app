@@ -4,9 +4,10 @@
  * curator sweeps under cooldown and thresholds, while this pass is free enough
  * to run unconditionally.
  *
- *   1. merge exact-content duplicates across cards (possible after hand
- *      edits): the pinned or most-recently-updated card survives, the rest
- *      are removed;
+ *   1. merge exact duplicates across cards (possible after hand edits): the
+ *      pinned or most-recently-updated card survives, the rest are removed —
+ *      unless the store refuses a removal because its archive copy could not
+ *      be written, in which case that duplicate stays and the sweep goes on;
  *   2. log similarity suspects (≥ SIM_DUPLICATE pairs under DIFFERENT topic
  *      keys — the topic model's boundary-overlap failure mode) into
  *      distill-state.json for threshold tuning and the heavy sweep's prompt;
@@ -18,7 +19,7 @@
  * @module @dsh-app/plugin-memory/light-sweep
  */
 
-import { DOMAIN_CAP, SIM_RELATED, contentSimilarity, domainOf, normalizeForMatch, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
+import { DOMAIN_CAP, SIM_RELATED, contentSimilarity, domainOf, type MemoryRoot, type MemoryStore, type TopicCard } from './memory-store.ts'
 
 /** Pick the survivor of an exact-duplicate group: a pinned card beats an
  *  unpinned one; otherwise the most recently updated wins (ties broken by
@@ -29,6 +30,20 @@ function survivor(cards: readonly TopicCard[], pinned: ReadonlySet<string>): Top
     const pinB = pinned.has(b.name) ? 1 : 0
     return pinB - pinA || b.updated.localeCompare(a.updated) || a.name.localeCompare(b.name)
   })[0]!
+}
+
+/** The key two cards must SHARE to count as exact duplicates: the body as
+ *  written, with CRLF folded to LF and the ends trimmed.
+ *
+ *  It used to be `normalizeForMatch` — lowercase, every character that is not
+ *  a letter or a digit dropped — which is a key for MATCHING, not for
+ *  identity: `minimum >= 1` and `minimum <= 1` both normalized to `minimum1`,
+ *  so the sweep took two different rules for one card and removed one of
+ *  them. Here equality has to mean the same TEXT. Trimming and the CRLF fold
+ *  stay because neither is a difference an author made: `parseCard` already
+ *  trims the body, and a Windows hand edit's line endings are not content. */
+function exactDuplicateKey(body: string): string {
+  return body.replace(/\r\n/gu, '\n').trim()
 }
 
 /**
@@ -45,14 +60,14 @@ export async function lightSweep(
     const cards = store.list().filter(card => !card.malformed)
     const pinned = store.pinnedSet()
 
-    // 1. Exact-content duplicates under different keys.
+    // 1. Exact duplicates under different keys, by the ORIGINAL text.
     const byBody = new Map<string, TopicCard[]>()
     for (const card of cards) {
-      const needle = normalizeForMatch(card.body)
-      if (needle === '') continue
-      const group = byBody.get(needle) ?? []
+      const key = exactDuplicateKey(card.body)
+      if (key === '') continue
+      const group = byBody.get(key) ?? []
       group.push(card)
-      byBody.set(needle, group)
+      byBody.set(key, group)
     }
     let merged = 0
     for (const group of byBody.values()) {
@@ -60,18 +75,25 @@ export async function lightSweep(
       const keep = survivor(group, pinned)
       const dropped: string[] = []
       for (const card of group) {
-        if (card.name !== keep.name && await store.remove(card.name, 'light-sweep-dup')) {
-          merged += 1
-          dropped.push(card.name)
+        if (card.name === keep.name) continue
+        try {
+          if (await store.remove(card.name, 'light-sweep-dup')) {
+            merged += 1
+            dropped.push(card.name)
+          }
+        } catch (error) {
+          // The store REFUSED the deletion: the archive copy could not be
+          // written, and a merge with no undo is not performed. The duplicate
+          // stays. The sweep carries on — the steps below describe the store
+          // as it is now, and a skipped index rebuild would outlive this write.
+          log.warn(`memory light sweep: ${label} could not merge duplicate "${card.name}" into "${keep.name}" (card kept): ${String(error)}`)
         }
       }
-      if (group.length > 1) {
-        log.info(`memory light sweep: ${label} merged ${String(group.length)} exact-duplicate cards into "${keep.name}"`)
+      if (dropped.length > 0) {
+        log.info(`memory light sweep: ${label} merged ${String(dropped.length)} of ${String(group.length)} exact-duplicate cards into "${keep.name}"`)
         // The survivors' exact-duplicate merge is a silent deletion otherwise:
         // record it so the ledger explains where those keys went.
-        if (dropped.length > 0) {
-          root.recordLedger({ scope: label, pass: 'light-sweep', op: 'merge', keys: dropped, target: keep.name })
-        }
+        root.recordLedger({ scope: label, pass: 'light-sweep', op: 'merge', keys: dropped, target: keep.name })
       }
     }
 

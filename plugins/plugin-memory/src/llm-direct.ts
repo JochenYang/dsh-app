@@ -20,11 +20,18 @@
  *     tries every fenced body and every bracket start, rather than dropping
  *     the whole run on the first candidate that is not valid JSON.
  *
+ * A result also ACCOUNTS for itself, whatever its status: the tokens every
+ * attempt billed (a failed call is not a free one) and, on failure, a cause
+ * that has been made safe to persist ({@link safeErrorText}). The curator
+ * writes both into `llm-audit.json`; before that, 22 errors in 25 days were
+ * recorded as `0 / 0` and no reason.
+ *
  * @module @dsh-app/plugin-memory/llm-direct
  */
 
 import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { VENDOR_TOKEN_PATTERN } from './memory-store.ts'
 
 /** Model route for one direct call (resolved from the triggering session). */
 export interface DirectRoute {
@@ -74,11 +81,27 @@ export interface DirectCallResult {
   status: 'ok' | 'error' | 'aborted'
   /** Parsed JSON payload (status 'ok' only). */
   parsed?: unknown
+  /**
+   * What the call was billed, summed over every attempt: a rate-limit retry
+   * re-sends the whole prompt, so a retried attempt's usage is real spend too.
+   * A FAILED or ABORTED call keeps whatever usage arrived before it ended —
+   * an answer that is not JSON still cost up to 8000 output tokens, and
+   * booking it as 0 is how 25 days of audit rows came to say nothing.
+   */
   inputTokens: number
   outputTokens: number
   durationMs: number
-  /** Human-readable cause (non-ok statuses). */
+  /** Human-readable cause (non-ok statuses), already through
+   *  {@link safeErrorText}: redacted and capped, because the curator copies
+   *  it into `llm-audit.json` and the host log verbatim. */
   error?: string
+  /**
+   * The call ended on a rate limit the retry budget could not out-wait.
+   * Set apart because it describes the PROVIDER, not the request: the curator
+   * does not hold it against the store it was curating (see its failure
+   * back-off).
+   */
+  rateLimited?: true
 }
 
 /** Cap on a direct answer — JSON decisions, never prose. */
@@ -101,7 +124,63 @@ const DIRECT_BACKOFF_MS = 1_000
  * budget belongs to 429s — it settles the slot with a failure, which is all
  * the queue needs to move on.
  */
-const DIRECT_TIMEOUT_MS = 180_000
+export const DIRECT_TIMEOUT_MS = 180_000
+
+/** Longest `error` a {@link DirectCallResult} carries, in characters. The
+ *  curator copies it into `llm-audit.json` verbatim, so the bound is the
+ *  audit row's. */
+export const MAX_DIRECT_ERROR_CHARS = 200
+
+/**
+ * Make a failure cause safe to KEEP: redact credential-shaped fragments, then
+ * cap the length. The result is durable — it lands in `llm-audit.json` and the
+ * host log — and a provider's error text is the one string in this module a
+ * third party writes: an "invalid key" error echoes the key back, and a
+ * signed-URL failure prints the URL with its token. A failed call is now
+ * written down WITH its cause (22 of them in 25 days of audit were booked as
+ * `0 / 0 tokens` and nothing else), and that is only safe if the cause is
+ * cleaned first.
+ *
+ * Covers the shapes a provider error realistically carries — a query-string
+ * credential, a bearer token, the known key prefixes, URL userinfo, bare
+ * key/value pairs — and then any long opaque run (base64, base64url) or bare
+ * hex at key length, which is where a raw key hides with no name in sight.
+ * The vendor prefixes are the store's own list (`VENDOR_TOKEN_PATTERN`), the
+ * one the card filter refuses by: a `glpat-` key is 20 characters of run, too
+ * short for the opaque-run rule, and a second list here once lagged behind.
+ * Same family as the shell's log redaction (`src/main/redact.ts`), which this
+ * plugin cannot import. Idempotent: a redacted cause redacts to itself.
+ * Truncation comes LAST — cutting first could split a secret into a half that
+ * no longer matches any rule.
+ */
+export function safeErrorText(text: string): string {
+  return text
+    // Query-string credentials (?token=…, &api_key=…): the key name stays so
+    // the reader still knows WHAT was sent, and so the rest of the URL after
+    // `&` survives.
+    .replace(/([?&](?:api[_-]?key|access[_-]?token|token|sig|signature|key)=)[^&\s#]+/giu, '$1[redacted]')
+    // A bearer token is never a short word ("bearer auth" must stay readable).
+    .replace(/(\bbearer\s+)[A-Za-z0-9._~+/-]{16,}=*/giu, '$1[redacted]')
+    // Vendor key prefixes with no key name in sight (sk-…, glpat-…, AKIA…).
+    .replace(new RegExp(VENDOR_TOKEN_PATTERN.source, 'gu'), '[redacted]')
+    // URL userinfo — `scheme://user:password@host`.
+    .replace(/(\/\/)[^/\s@:]+:[^/\s@]+@/gu, '$1[redacted]@')
+    // Bare key=value / key: value pairs last (key name kept, value dropped).
+    // The lookahead keeps a value an earlier rule already replaced.
+    .replace(/((?:api[_-]?key|authorization|token|secret|passwd|password)\s*[:=]\s*)(?!\[redacted\])\S+/giu, '$1[redacted]')
+    // A JWT whole — its header and signature segments are long enough for the
+    // opaque-run rule below, but a short payload segment is not, and the
+    // three together are the credential.
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/gu, '[redacted]')
+    // A long opaque run that mixes case and digits: a base64 secret, a JWT
+    // segment. The mix keeps ordinary long identifiers (a snake_case word, a
+    // lower-case path) readable.
+    .replace(/(?=[A-Za-z0-9+/_=-]*[a-z])(?=[A-Za-z0-9+/_=-]*[A-Z])(?=[A-Za-z0-9+/_=-]*\d)[A-Za-z0-9+/_=-]{32,}/gu, '[redacted]')
+    // Bare hex at the two lengths a generated key is written at — the same
+    // lengths the store's own credential check refuses in a card body.
+    .replace(/\b(?:[0-9a-f]{32}|[0-9a-f]{64})\b/giu, '[redacted]')
+    .slice(0, MAX_DIRECT_ERROR_CHARS)
+}
 
 /** Sentinel the attempt deadline resolves with (see {@link streamJson}); it
  *  is also what keeps our own timeout out of the caller-abort wording. */
@@ -264,15 +343,26 @@ export async function streamJson(llm: LlmRuntimeLike, spec: DirectCallSpec): Pro
   }) => AsyncIterable<StreamChunk>).bind(llm)
   return enqueue(async () => {
     let lastError: string | undefined
+    /** The loop ended on a rate limit the retries could not out-wait. */
+    let rateLimited = false
+    // Billed so far by the attempts that already ENDED. A rate-limit retry
+    // re-sends the whole prompt, so each attempt's usage is added, not
+    // replaced. The CURRENT attempt's counters join them on the results built
+    // INSIDE the try (they return before the finally adds the attempt); past
+    // the finally the attempt is in spent* already and must not be added again.
+    let spentInput = 0
+    let spentOutput = 0
     for (let attempt = 0; ; attempt++) {
       let text = ''
       let inputTokens = 0
       let outputTokens = 0
+      const billed = (): Pick<DirectCallResult, 'inputTokens' | 'outputTokens'> =>
+        ({ inputTokens: spentInput + inputTokens, outputTokens: spentOutput + outputTokens })
       const abortedResult = (): DirectCallResult => ({
-        status: 'aborted', inputTokens, outputTokens, durationMs: Date.now() - startedAt, error: 'aborted',
+        status: 'aborted', ...billed(), durationMs: Date.now() - startedAt, error: 'aborted',
       })
       const timeoutResult = (): DirectCallResult => ({
-        status: 'error', inputTokens, outputTokens, durationMs: Date.now() - startedAt,
+        status: 'error', ...billed(), durationMs: Date.now() - startedAt,
         // Deliberately not the 'aborted' wording: an abort is the host asking
         // us to stop, a timeout is a stream WE gave up on. The log needs to
         // tell those apart.
@@ -327,8 +417,10 @@ export async function streamJson(llm: LlmRuntimeLike, spec: DirectCallSpec): Pro
               const failure = chunk.reason?.failure as { message?: unknown, code?: unknown } | undefined
               if (isRateLimited(failure)) throw Object.assign(new Error('rate limited'), { status: 429 })
               return {
-                status: 'error', inputTokens, outputTokens, durationMs: Date.now() - startedAt,
-                error: `llm error: ${String(failure?.message ?? failure?.code ?? kind)}`,
+                status: 'error', ...billed(), durationMs: Date.now() - startedAt,
+                // The provider writes this text; an "invalid key" error echoes
+                // the key. It is about to be audited and logged verbatim.
+                error: safeErrorText(`llm error: ${String(failure?.message ?? failure?.code ?? kind)}`),
               }
             }
           }
@@ -339,17 +431,25 @@ export async function streamJson(llm: LlmRuntimeLike, spec: DirectCallSpec): Pro
         // having asked us to stop.
         if (timedOut) return timeoutResult()
         if ((error as Error)?.name === 'AbortError' || spec.signal?.aborted === true) return abortedResult()
-        if (isRateLimited(error) && attempt < DIRECT_RETRIES) {
-          await sleep(DIRECT_BACKOFF_MS * 2 ** attempt)
-          continue
+        if (isRateLimited(error)) {
+          if (attempt < DIRECT_RETRIES) {
+            await sleep(DIRECT_BACKOFF_MS * 2 ** attempt)
+            continue
+          }
+          rateLimited = true
         }
-        lastError = error instanceof Error ? error.message : String(error)
+        lastError = safeErrorText(error instanceof Error ? error.message : String(error))
         break
       } finally {
         if (timer !== undefined) clearTimeout(timer)
         spec.signal?.removeEventListener('abort', relayCallerAbort)
         if (iterator !== undefined) release(iterator)
+        // This attempt is over, however it ended: what it billed is spent.
+        spentInput += inputTokens
+        spentOutput += outputTokens
       }
+      // Past the try/finally: the attempt is over and its usage is already IN
+      // spent*, so these paths must not add it again.
       if (text.trim() === '') {
         lastError = 'empty response'
         break
@@ -359,8 +459,12 @@ export async function streamJson(llm: LlmRuntimeLike, spec: DirectCallSpec): Pro
         lastError = 'unparseable JSON response'
         break
       }
-      return { status: 'ok', parsed: extracted.value, inputTokens, outputTokens, durationMs: Date.now() - startedAt }
+      return { status: 'ok', parsed: extracted.value, inputTokens: spentInput, outputTokens: spentOutput, durationMs: Date.now() - startedAt }
     }
-    return { status: 'error', inputTokens: 0, outputTokens: 0, durationMs: Date.now() - startedAt, error: lastError ?? 'unknown error' }
+    return {
+      status: 'error', inputTokens: spentInput, outputTokens: spentOutput, durationMs: Date.now() - startedAt,
+      error: lastError ?? 'unknown error',
+      ...(rateLimited ? { rateLimited: true } : {}),
+    }
   })
 }

@@ -54,19 +54,24 @@
 
 import { createHash } from 'node:crypto'
 import {
-  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
 } from 'node:fs'
 import { promises as fsp } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative } from 'node:path'
+import { homedir } from 'node:os'
 import { removeTree } from './remove-tree.ts'
-import type { MemoryCategory, MemoryLlmAuditRun, MemoryProjectSummary } from './types.ts'
+import type { MemoryArchiveFailure, MemoryCategory, MemoryLlmAuditRun, MemoryProjectSummary, MemoryToolStats } from './types.ts'
 import { ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, LEGACY_GLOBAL_SLUG, MEMORY_CATEGORIES } from './types.ts'
 import {
   DOMAIN_KEY_PATTERN,
   MAX_SUMMARY_CHARS,
+  SOURCE_ID_PATTERN,
   TOPIC_KEY_PATTERN,
+  ArchiveWriteError,
   cardFingerprint,
   domainOf,
+  hasLineBreak,
+  isMissingError,
   isValidDomain,
   isValidTopic,
   parseCard,
@@ -102,6 +107,7 @@ export { queryTokens } from './recall-aliases.ts'
 // may own its own copy. Re-exported here so the host half and the tests keep one
 // import site — the arrangement LEGACY_GLOBAL_SLUG and the archive bounds use.
 export {
+  ArchiveWriteError,
   DOMAIN_KEY_PATTERN,
   MAX_SUMMARY_CHARS,
   TOPIC_KEY_PATTERN,
@@ -121,18 +127,26 @@ export type { CardDomain, CardFileReader, CardProbe, CardState, TopicCard } from
 export { LEGACY_GLOBAL_SLUG }
 
 /** One card body gets at most this many characters: room for a consolidated
- *  fact (roughly two legacy lines) without bloating every session's re-read. */
-export const MAX_TOPIC_BODY_CHARS = 400
+ *  fact with its reason and boundary, without bloating every session's
+ *  re-read. Raised from 400 on 2026-11-22: over two months 47 of 124 save
+ *  attempts were refused for length (median overshoot 447) — every one was
+ *  retried and landed, but 64% of saved topics needed the extra round trip
+ *  (11 s median). The injection budget, not this cap, is what bounds what a
+ *  session re-reads (see `MAX_PROJECT_CHARS`). */
+export const MAX_TOPIC_BODY_CHARS = 500
 
 /** Similarity thresholds for the write-time gate (char-bigram Jaccard over
  *  normalized text). τ_dup hard-rejects/redirects (near-verbatim only, by
  *  design); [τ_rel, τ_dup) is reported as "related" so the MODEL arbitrates.
- *  Calibration evidence (2026-09-15 probe on realistic Chinese entries):
- *  reworded statements of the SAME fact score 0.35–0.45, so a τ_rel of 0.6
- *  would never fire — 0.3 catches the rewording band; disjoint topics about
- *  the same tool score ≤0.2 and stay below the floor. */
+ *  Calibration evidence — the labelled corpus (66 pairs, 22 per label) run
+ *  through this function on 2026-11-22: reworded statements of the SAME fact
+ *  score 19/22 at ≥0.2 while distinct topics max out at 0.060, so 0.2 catches
+ *  the rewording band with no false positive on that corpus. At the previous
+ *  0.3 no real store ever produced a pair above the floor (1886 pairs, max
+ *  0.274), i.e. the hint never fired. A store that gets noisy is re-tuned
+ *  from `toolStats.gate`, which counts what the gate actually returned. */
 export const SIM_DUPLICATE = 0.8
-export const SIM_RELATED = 0.3
+export const SIM_RELATED = 0.2
 
 /** How long a card may go unedited before `/status` counts it as STALE.
  *
@@ -245,8 +259,16 @@ export function textMatchesQuery(text: string, query: string, mode: 'full' | 'ph
   if (mode === 'phrase') return false
   const tokens = queryTokens(query)
   if (tokens.length === 0) return false
-  return tokens.every(token =>
-    ASCII_TOKEN.test(token) ? asciiTokenMatches(text, token) : normalized.includes(normalizeForMatch(token)))
+  return tokens.every(token => tokenMatchesText(text, normalized, token))
+}
+
+/** Rule 2 of the matcher for ONE token: an ASCII token on a word boundary,
+ *  anything else (a Chinese word) as a normalized substring. `normalized` is
+ *  `normalizeForMatch(text)`, handed in because every caller already holds
+ *  it. Extracted so {@link MemoryStore.search} can COUNT the tokens a card
+ *  carries without growing a second copy of the rule. */
+function tokenMatchesText(text: string, normalized: string, token: string): boolean {
+  return ASCII_TOKEN.test(token) ? asciiTokenMatches(text, token) : normalized.includes(normalizeForMatch(token))
 }
 
 /**
@@ -322,9 +344,10 @@ export function stripCommitIds(content: string): string {
  * `tokenizer=bert` out, which is the only thing `\b` was ever argued for.
  *
  * Two deliberate non-catches, recorded in `.devflow/suite-review-backlog/verify-W7.md`:
- * a credential word buried inside a longer name (`mypass=hunter2`) is not matched,
- * because `(?<![A-Za-z0-9])passw` cannot start after a letter; and `\b`-free
- * sentences with no separator ("token 上限导致失败") stay out.
+ * an ABBREVIATION buried in a longer name (`mypass=hunter2`) is not matched,
+ * because `(?<![A-Za-z0-9])passw` cannot start after a letter (a name that
+ * ends in one of the words IS matched — see the camelCase rule); and
+ * `\b`-free sentences with no separator ("token 上限导致失败") stay out.
  *
  * Excluding 40 hex is deliberate too: a git sha is the one hex string that lands in
  * memories constantly and is not a secret. The base64 run excludes `/` for the same
@@ -333,46 +356,131 @@ export function stripCommitIds(content: string): string {
  * No `g` flag — these run through RegExp.test, where `g` would make lastIndex
  * stateful.
  */
-const CREDENTIAL_PATTERNS: readonly RegExp[] = [
+/** One credential rule: a stable code (it becomes a JSON key in
+ *  `toolStats.save.refused` and a word in the refusal sentence) and the
+ *  pattern that raises it. The code is what lets a rate be read per SHAPE of
+ *  secret — "refused 12 times as named-secret" — without logging the text.
+ *
+ *  The closed vocabulary (kebab-case; a new code is added here first, since
+ *  it also becomes a counter key on disk):
+ *    named-secret  a key NAME with a separator, in any spelling
+ *    bearer        an `Authorization: Bearer …` header
+ *    zh-password   密码 / 口令 followed by 是 / 为 / a separator
+ *    token-prefix  a known vendor token prefix
+ *    private-key   a PEM private-key banner
+ *    jwt           a three-segment JWT
+ *    url-password  a URL that carries `user:password@`
+ *    db-url        a database connection string with a host
+ *    base64-run    a high-entropy base64 run
+ *    hex-key       a bare 32- or 64-character hex string */
+interface CredentialRule {
+  readonly code: string
+  readonly pattern: RegExp
+}
+
+/** Known vendor token prefixes, as ONE pattern. It is the credential filter's
+ *  `token-prefix` rule AND the redaction the LLM audit runs over an error text
+ *  (`safeErrorText`, llm-direct.ts): a prefix added here is refused in a card
+ *  and redacted in an audit row by the same edit — the audit's own list once
+ *  lagged behind this one, and a `glpat-` key was short enough to slip past
+ *  its generic opaque-run rule. Every arm requires a run of token length
+ *  after the prefix: the bare prefix is a setting name (`hf_home`), not a key.
+ *
+ *  Each arm keeps BOTH boundaries it had as a rule of its own — a merge is
+ *  not the place to decide a new one. Three left boundaries are deliberately
+ *  looser than a word boundary: `hf_` only refuses a letter or digit before
+ *  it (so `_hf_…` is in scope), and `xox…-` / `gh…_` / `github_pat_` have
+ *  none at all — the price being that an English identifier with `ghs_` inside
+ *  it can trip the rule, as it always could. The edge forms are pinned by a
+ *  test, on both sides. */
+export const VENDOR_TOKEN_PATTERN = /(?:\bsk-[A-Za-z0-9_-]{16,}\b|\bsk_(?:live|proj)_[A-Za-z0-9]{16,}\b|(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}|\bglpat-[A-Za-z0-9_-]{16,}\b|(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}\b|xox[bpas]-[A-Za-z0-9-]+|\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b|\bLTAI[A-Za-z0-9]{16,24}\b|\bAIza[0-9A-Za-z_-]{35}\b|\bnpm_[A-Za-z0-9]{36}\b|\bpypi-[A-Za-z0-9_-]{50,}\b)/u
+
+const CREDENTIAL_RULES: readonly CredentialRule[] = [
   // Name + separator. `(?<![A-Za-z0-9])` admits `_`/`-` prefixes so the
-  // SCREAMING_SNAKE and snake_case spellings stay in scope.
-  /(?<![A-Za-z0-9])api[_-]?key\s*[:=：]/iu,
-  /(?<![A-Za-z0-9])secret\s*[:=：]/iu,
-  /(?<![A-Za-z0-9])passw(or)?d\s*[:=：]/iu,
-  /(?<![A-Za-z0-9])pwd\s*[:=：]/iu,
-  /(?<![A-Za-z0-9])token\s*[:=：]/iu,
-  /(?<![A-Za-z0-9])authorization\s*[:=：]/iu,
-  /(?<![A-Za-z0-9])credential\s*[:=：]/iu,
-  /\bbearer\s+[A-Za-z0-9]/iu,
-  /密[码钥]\s*[是为:：=]/u,
-  /口令\s*[是为:：=]/u,
-  // Known token prefixes.
-  /\bsk-[A-Za-z0-9_-]{16,}\b/u,
-  /(gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}/u,
-  /xox[bpas]-[A-Za-z0-9-]+/u,
-  /\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/u,
-  /\bAIza[0-9A-Za-z_-]{35}\b/u,
-  /\bnpm_[A-Za-z0-9]{36}\b/u,
-  /\bpypi-[A-Za-z0-9_-]{50,}\b/u,
+  // SCREAMING_SNAKE and snake_case spellings stay in scope. An optional
+  // CLOSING QUOTE sits between the name and the separator: `"password": "x"`
+  // and `'token': 'y'` — JSON, YAML, a quoted `.env` line — are the shapes a
+  // pasted config carries, and the quote is what hid them from the rule.
+  { code: 'named-secret', pattern: /(?<![A-Za-z0-9])api[_-]?key['"]?\s*[:=：]/iu },
+  { code: 'named-secret', pattern: /(?<![A-Za-z0-9])secret['"]?\s*[:=：]/iu },
+  { code: 'named-secret', pattern: /(?<![A-Za-z0-9])passw(or)?d['"]?\s*[:=：]/iu },
+  { code: 'named-secret', pattern: /(?<![A-Za-z0-9])pwd['"]?\s*[:=：]/iu },
+  { code: 'named-secret', pattern: /(?<![A-Za-z0-9])token['"]?\s*[:=：]/iu },
+  { code: 'named-secret', pattern: /(?<![A-Za-z0-9])authorization['"]?\s*[:=：]/iu },
+  { code: 'named-secret', pattern: /(?<![A-Za-z0-9])credential['"]?\s*[:=：]/iu },
+  // A camelCase name that ENDS in one of those words (`authToken=`,
+  // `clientSecret:`): the lookbehind above is defeated by the camelCase
+  // prefix, which is a letter. The rule still starts at a word start and
+  // requires the separator right after the word, so `tokenizer=bert` (a
+  // suffix AFTER the word) stays out exactly as before. The VALUE must be a
+  // whole boolean literal: `hasToken = true` and `enableSecret: false` are
+  // code and config FLAGS named after the thing they gate, and a boolean is
+  // never the secret. "Whole" is stated from the far side, by what may FOLLOW
+  // the literal: anything but a character that continues a token. A literal
+  // that only STARTS the value (`authToken=true-x`, `=truex9`) is no flag and
+  // stays refused, while a line end, a full stop or a closing bracket after it
+  // keeps the exemption (an earlier list of allowed followers lost the line
+  // end, and a multi-line `hasToken = true` was refused as a secret). The
+  // lookahead sits directly after the separator and skips the whitespace
+  // itself — placed after a backtracking `\s*`, it was defeated by that
+  // whitespace matching nothing.
+  { code: 'named-secret', pattern: /(?<![A-Za-z0-9])[a-z][a-z0-9]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key)['"]?\s*[:=：](?![ \t]*['"]?(?:true|false|null|undefined|none)['"]?(?![A-Za-z0-9_-]))/iu },
+  { code: 'bearer', pattern: /\bbearer\s+[A-Za-z0-9]/iu },
+  { code: 'zh-password', pattern: /密[码钥]['"]?\s*[是为:：=]/u },
+  { code: 'zh-password', pattern: /口令['"]?\s*[是为:：=]/u },
+  // Known token prefixes — the shared list above.
+  { code: 'token-prefix', pattern: VENDOR_TOKEN_PATTERN },
   // A private-key banner, whatever the key type.
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
+  { code: 'private-key', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/u },
   // A JWT is three base64url segments and its first two both start with `eyJ`
   // (the base64 of `{"`), which is what makes this shape identifiable.
-  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\./u,
+  { code: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\./u },
   // A URL that carries a password.
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@/iu,
+  { code: 'url-password', pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@/iu },
   // A database connection string, with or without a password: the host is
   // usually an internal address the user would not knowingly paste.
-  /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|mssql):\/\/[^\s]+@/iu,
+  { code: 'db-url', pattern: /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|mssql):\/\/[^\s]+@/iu },
   // A base64 run long enough to be a key, with mixed case AND a digit — the
   // combination that separates a random secret from a word or a hash. `/` is out
   // of the character class on purpose: a long path is the other thing that looks
   // like one.
-  /\b(?=[A-Za-z0-9+]*[a-z])(?=[A-Za-z0-9+]*[A-Z])(?=[A-Za-z0-9+]*\d)[A-Za-z0-9+]{32,}={0,2}\b/u,
-  // Bare hex at the two lengths a generated key is written at.
-  /\b[0-9a-f]{32}\b/u,
-  /\b[0-9a-f]{64}\b/u,
+  { code: 'base64-run', pattern: /\b(?=[A-Za-z0-9+]*[a-z])(?=[A-Za-z0-9+]*[A-Z])(?=[A-Za-z0-9+]*\d)[A-Za-z0-9+]{32,}={0,2}\b/u },
+  // Bare hex at the two lengths a generated key is written at, in either case.
+  { code: 'hex-key', pattern: /\b[0-9a-f]{32}\b/iu },
+  { code: 'hex-key', pattern: /\b[0-9a-f]{64}\b/iu },
 ]
+
+/** A Subresource-Integrity style FILE checksum: `sha256-` followed by a base64
+ *  run. On its own it is not a credential — it is how a lockfile names a
+ *  file's hash — but the run has exactly the shape the `base64-run` rule
+ *  reads as a key (mixed case, a digit, 32+ characters), so without this the
+ *  filter refused every card that quoted an integrity line. The run length
+ *  is the base64 rule's own floor: anything shorter never looked like a key.
+ *
+ *  Only the `sha256-<base64>` form is exempt (the prefix in either case —
+ *  the integrity attribute is case-insensitive). A bare 64-hex digest is
+ *  still `hex-key`: a hex string of that length is as much a generated key
+ *  as a file hash, and the rule cannot tell them apart. */
+const CHECKSUM_RUN = /\bsha256-[A-Za-z0-9+/]{32,}={0,2}/giu
+
+/**
+ * The stable code of the first credential rule `text` matches, or undefined
+ * when it carries none. The codes are the vocabulary `toolStats.save.refused`
+ * counts by and the refusal sentence names, so a refusal can be read as
+ * "looked like a private key" without the text ever reaching a counter.
+ *
+ * File checksums ({@link CHECKSUM_RUN}) are blanked before the rules run. That
+ * is what makes the exemption "only when unaccompanied": the checksum itself
+ * never raises a code, and anything ELSE in the text still does — a real key
+ * on the same line is refused exactly as it would be alone.
+ */
+export function credentialCode(text: string): string | undefined {
+  const masked = text.replace(CHECKSUM_RUN, ' ')
+  for (const rule of CREDENTIAL_RULES) {
+    if (rule.pattern.test(masked)) return rule.code
+  }
+  return undefined
+}
 
 /**
  * Whether `text` looks like it carries a credential (key/token/password).
@@ -381,7 +489,120 @@ const CREDENTIAL_PATTERNS: readonly RegExp[] = [
  * future session.
  */
 export function containsCredential(text: string): boolean {
-  return CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text))
+  return credentialCode(text) !== undefined
+}
+
+/** Whether a card's text must not reach the model: its summary or body
+ *  matches a credential shape. ONE predicate for every read path — injection
+ *  (prompt.ts), recall (tools.ts) and the health audit's injection count — so
+ *  the three cannot disagree about which cards are invisible. */
+export function cardIsWithheld(card: Readonly<Pick<TopicCard, 'summary' | 'body'>>): boolean {
+  return containsCredential(`${card.summary} ${card.body}`)
+}
+
+/** The short id of `sessionId` when it has the shape a card's `source`
+ *  admits; undefined otherwise. ONE check for both writers that attach a
+ *  session to what they persist (the tools, the curator), so a session id the
+ *  host formats some other way is DROPPED by both rather than refused by one. */
+export function admittedSessionId(sessionId: string): string | undefined {
+  const short = shortSessionId(sessionId)
+  return SOURCE_ID_PATTERN.test(short) ? short : undefined
+}
+
+/** A path as a text prints it, between quotes: an fs error quotes the path it
+ *  failed on, and the closing quote is the only reliable end of a path that
+ *  contains spaces. A quoted string that merely starts with a slash (a route,
+ *  an option value) is treated as a path too — it cannot be told from one,
+ *  and what is lost is a piece of the diagnosis, never anything private. */
+const QUOTED_PATH = /(['"])(?=[A-Za-z]:[\\/]|\\\\|file:\/\/|~[A-Za-z0-9_.-]+\/|\/)([^'"\n]*)\1/gu
+
+/** One space-free run of an unquoted path that contains a separator, plus the
+ *  space before it when the NEXT run contains one too. That is what lets a
+ *  path with spaces continue (`…\John Smith\store`) and stops it where the
+ *  sentence resumes (`…\topics because it is locked`): a run with no
+ *  separator is prose, not a path. A path whose last segment is a spaced
+ *  name followed by prose (`C:\Users\John Smith was opened`) cannot be told
+ *  from that prose and is cut before the name. */
+const PATH_RUN = String.raw`[^\s'"<>;,\n()|]*[\\/][^\s'"<>;,\n()|]*(?:[ \t]+(?=[^\s'"<>;,\n()|]*[\\/]))?`
+
+/** What follows the anchor of a Windows-style path: a first run that may be
+ *  bare (`D:\My Documents\…` — the anchor already proved it is a path), then
+ *  separator-carrying runs, then a last segment. */
+const PATH_BODY = String.raw`[^\s'"<>;,\n()|]*(?:[ \t]+${PATH_RUN})*(?:[\\/][^\s'"<>;,\n()|/\\]*)?`
+
+/** An absolute path as a text may print it, unquoted: a drive-letter or UNC
+ *  path, a `file://` URL, a `~user/…` path (`~/…` is the user's own home and
+ *  stays readable) — each with the continuation above — or, on its own, a
+ *  POSIX path of at least two segments. `https://` is not a drive path: its
+ *  `p:/` is preceded by a letter. */
+const ABSOLUTE_PATH = new RegExp(
+  String.raw`(?:(?:(?<!\w)[A-Za-z]:[\\/]|\\\\|file:\/\/|~[A-Za-z0-9_.-]+\/)${PATH_BODY}|(?<![\w~./\\-])\/[^\s/'"<>\\()]+(?:\/[^\s'"<>\\()]+)+)`,
+  'gu',
+)
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+
+/** `text` with every spelling of the store root cut (what is left is relative
+ *  to it) and of the user's home replaced by `~`: both are known here, so a
+ *  path with spaces under either is handled exactly, which no pattern for
+ *  "a path" can do. */
+function stripKnownRoots(text: string, rootDir: string): string {
+  let out = text
+  const homes = new Set([rootDir, homedir()].filter(root => root !== ''))
+  // Longest first, so a root nested inside the other is cut in one piece.
+  for (const root of [...homes].sort((a, b) => b.length - a.length)) {
+    for (const spelling of new Set([root, root.replace(/\\/gu, '/').replace(/\/+$/u, ''), root.replace(/\//gu, '\\').replace(/\\+$/u, '')])) {
+      if (spelling === '') continue
+      // The store root goes together with the separator after it (what is
+      // left is relative to it); the home directory becomes `~` and keeps
+      // the path's own separators. Both must end at a separator or at the end
+      // of the text: `D:\data\mem` must not cut into its sibling `D:\data\memory`.
+      out = out.replace(
+        new RegExp(`${escapeRegExp(spelling)}(?=[\\\\/]|$)${root === rootDir ? '[\\\\/]?' : ''}`, 'gu'),
+        root === rootDir ? '' : '~',
+      )
+    }
+  }
+  return out
+}
+
+/** `path` relative to `rootDir` with `/` separators; nothing at all when it
+ *  lies outside `rootDir` — its basename could be a directory named after the
+ *  user. */
+function pathWithin(path: string, rootDir: string): string {
+  const rel = relative(rootDir, path)
+  return rel.startsWith('..') || isAbsolute(rel) ? '' : rel.replace(/\\/gu, '/')
+}
+
+/**
+ * An error text that may be PERSISTED and SHOWN: the errno code and syscall of
+ * a file-system failure, with its path made relative to `rootDir`; any other
+ * error keeps its message with the user's directories cut. Bounded to 200
+ * characters.
+ *
+ * The raw message of an fs error carries the full path — the user's home
+ * directory included — and these texts reach `distill-state.json`, `/status`
+ * and the settings page, where they stay until the next successful write. The
+ * code is the part a reader acts on (`EACCES`, `ENOSPC`); the directory is
+ * the user's own to look up. Known roots (the store, the home directory) are
+ * cut exactly, so a path with spaces under either needs no pattern at all.
+ * What a free-text message cannot promise: a POSIX path with spaces that lies
+ * under neither, or a spaced last segment followed by prose (see
+ * {@link PATH_RUN}), stays as it is.
+ */
+export function safeFsErrorText(error: unknown, rootDir: string): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const facts = (error ?? {}) as { code?: unknown, syscall?: unknown, path?: unknown }
+  const code = typeof facts?.code === 'string' && /^[A-Z0-9]{1,32}$/u.test(facts.code) ? facts.code : undefined
+  if (code !== undefined) {
+    const syscall = typeof facts.syscall === 'string' && /^[a-z]{1,32}$/u.test(facts.syscall) ? facts.syscall : ''
+    const path = typeof facts.path === 'string' && facts.path !== '' ? pathWithin(facts.path, rootDir) : ''
+    return [code, syscall, path].filter(part => part !== '').join(' ').slice(0, MAX_ERROR_TEXT_CHARS)
+  }
+  return stripKnownRoots(raw, rootDir)
+    .replace(QUOTED_PATH, '$1<path>$1')
+    .replace(ABSOLUTE_PATH, '<path>')
+    .slice(0, MAX_ERROR_TEXT_CHARS)
 }
 
 // ---------------------------------------------------------------------------
@@ -474,10 +695,15 @@ export const INDEX_HEADER = '# Memory index (auto-generated from topics/; edits 
  * The topic key an index line names, or undefined for a line that names none.
  *
  * The index is host-generated, so this reads back the shape `indexLine`
- * writes: `- [pin ]([category] )([domain] )<key> — <summary> (updated <date>)`.
- * Bracket segments are SKIPPED rather than counted, so the reader keeps
- * working across the domain prefix that was added later — one parser, two
- * formats, and a hand-edited line answers undefined instead of a wrong key.
+ * writes: `- [pin ]([category] )([domain] )<key> — <summary>`. Bracket
+ * segments are SKIPPED rather than counted, so the reader keeps working
+ * across the domain prefix that was added later — one parser, two formats,
+ * and a hand-edited line answers undefined instead of a wrong key.
+ *
+ * The tail after the dash is never looked at, which is also what keeps an
+ * index written before the date was dropped (every line ended in
+ * `(updated <date>)`) readable: it is in step as long as its KEYS are, and
+ * the next rebuild rewrites it in the current shape.
  *
  * Exported because index/card reconciliation (W2) is the only thing that reads
  * the index back, and it has to be testable on its own.
@@ -538,7 +764,7 @@ export interface IndexDrift {
 }
 
 /**
- * Index line for one card: `- [category] ([domain] )name — summary (updated date)`.
+ * Index line for one card: `- [category] ([domain] )name — summary`.
  *
  * The domain prefix is emitted ONLY when it carries information the key does
  * not — a card that DECLARES a domain differing from its key's first segment.
@@ -553,9 +779,15 @@ export interface IndexDrift {
  * unchanged: nothing declares a domain yet, so no line gains or loses a
  * character. The index FILE is still rewritten on the first rebuild, because
  * `reindex` now sorts by domain — the lines are the same, their ORDER is not.
- * Injection length is unchanged; only the sequence a reader sees moves, and (as
- * measured: `droppedCards 107` of 193 cards) the bodies a session gets are
- * chosen by category quota, not by index order.
+ * Injection length is unchanged; only the sequence a reader sees moves, and
+ * the bodies a session gets are chosen by freshness (pinned and hand-edited
+ * cards first), never by index order.
+ *
+ * The line carries no `(updated <date>)` tail. It did until 2026-11-22, at
+ * 21 characters a card; the date says nothing about whether a card is worth
+ * recalling, and it is already in the card file and in the heading of every
+ * injected body. An existing index keeps its tails until the store's next
+ * write: `indexLineKey` reads both shapes, so such an index is in step.
  */
 function indexLine(card: TopicCard, pinned: Set<string>): string {
   const pin = pinned.has(card.name) ? '📌 ' : ''
@@ -564,14 +796,19 @@ function indexLine(card: TopicCard, pinned: Set<string>): string {
   const prefix = declared.src === 'declared' && declared.key !== domainOf({ name: card.name }).key
     ? `[${declared.key}] `
     : ''
-  return `- ${pin}[${card.category}] ${prefix}${card.name} — ${summary} (updated ${card.updated})`
+  return `- ${pin}[${card.category}] ${prefix}${card.name} — ${summary}`
 }
 
 /** Validate an upsert payload; returns an error string or undefined. Exported
  *  so the tool and the curator share one rule set. The summary rides the
  *  index into every session's prompt, so it is credential-checked alongside
- *  the body — a secret is not safer at 40 characters. */
-export function validateCardInput(input: { name: string, category: string, summary: string, body: string, domain?: string }): string | undefined {
+ *  the body — a secret is not safer at 40 characters.
+ *
+ *  It is also what a RESTORE asks of an archived copy (P2): the same fences
+ *  for whatever lands in `topics/`, however it got there. `source` is checked
+ *  only when given — it is written at creation and ignored on update, so an
+ *  update path that passes one never reaches this with it. */
+export function validateCardInput(input: { name: string, category: string, summary: string, body: string, domain?: string, source?: string }): string | undefined {
   if (!isValidTopic(input.name)) return `invalid topic key "${input.name}"; must match ${TOPIC_KEY_PATTERN.source} (ASCII kebab-case)`
   if (!MEMORY_CATEGORIES.includes(input.category as MemoryCategory)) {
     return `unknown category "${input.category}"; must be one of: ${MEMORY_CATEGORIES.join(', ')}`
@@ -579,12 +816,44 @@ export function validateCardInput(input: { name: string, category: string, summa
   if (input.domain !== undefined && input.domain !== '' && !isValidDomain(input.domain)) {
     return `invalid domain "${input.domain}"; must match ${DOMAIN_KEY_PATTERN.source} (ASCII kebab-case, ≤16 chars)`
   }
+  // The key and the domain become a FILE NAME and a piece of every index
+  // line: a vendor key pasted as a topic would ride into every session's
+  // prompt through the name alone, where no read-side shield looks.
+  const keyedCredential = credentialCode(input.name) ?? (input.domain === undefined || input.domain === '' ? undefined : credentialCode(input.domain))
+  if (keyedCredential !== undefined) return `invalid topic key or domain: it has the shape of a credential (${keyedCredential})`
+  if (input.source !== undefined && !SOURCE_ID_PATTERN.test(input.source)) {
+    return `invalid source; must be a short session id (${SOURCE_ID_PATTERN.source})`
+  }
+  // One line, and not only for tidiness: the summary is a frontmatter field,
+  // and a line break in it would end that field — the reader keeps the first
+  // line as the hook and silently drops the rest. Every kind of line break
+  // counts, the Unicode separators included: they are not folded by a renderer
+  // either, and the index is line-oriented.
+  if (hasLineBreak(input.summary)) return 'summary must be a single line (no line breaks)'
   if (input.summary === '') return 'summary is required (≤40 chars, states what the card covers)'
   if (input.summary.length > MAX_SUMMARY_CHARS) return `summary too long (${String(input.summary.length)}/${String(MAX_SUMMARY_CHARS)} chars)`
   if (input.body === '') return 'empty content'
   if (input.body.length > MAX_TOPIC_BODY_CHARS) return `content too long (${String(input.body.length)}/${String(MAX_TOPIC_BODY_CHARS)} chars)`
   if (containsCredential(input.summary) || containsCredential(input.body)) return 'content looks like it carries a credential; refusing to persist'
   return undefined
+}
+
+/** Whether a parsed archive copy may go back into `topics/`: its SHAPE, and
+ *  nothing that is the write side's business (see `MemoryStore.restoreArchived`). */
+function restorableShape(card: TopicCard): boolean {
+  return !card.malformed && isValidTopic(card.name) && MEMORY_CATEGORIES.includes(card.category) && card.body.trim() !== ''
+}
+
+/** Raised by `MemoryStore.writeConfig` when `config.json` exists but could not
+ *  be read as a config. Nothing is written: a merge over the defaults would
+ *  replace the user's file with those defaults, so a hand-edited file with one
+ *  stray comma was overwritten — its pins gone with the typo — the first time
+ *  a pin was toggled. `cause` is the error the read failed with. */
+export class ConfigUnreadableError extends Error {
+  constructor(path: string, options?: ErrorOptions) {
+    super(`refusing to write ${path}: the file exists but could not be read as a config; fix or remove it first (a write would replace it with defaults)`, options)
+    this.name = 'ConfigUnreadableError'
+  }
 }
 
 /**
@@ -625,8 +894,13 @@ export class MemoryStore {
   private readonly configPath: string
   /** `<scope>/archive/` — deleted cards, kept for ARCHIVE_RETENTION_DAYS. */
   private readonly archiveDirPath: string
-  /** Last archive-write failure (settings page: is the undo actually there?). */
-  private lastArchiveFailure: string | undefined
+  /** Set by the last `config.json` read that found a file it could not make
+   *  sense of (see {@link readConfigJson}); read back through
+   *  {@link configUnreadable}, enforced by {@link writeConfig}. */
+  private configUnreadableFlag = false
+  /** What that read failed with — kept as the `cause` of the refusal
+   *  {@link writeConfig} raises, so the original error is never lost. */
+  private configReadError: unknown
   /** Owner of the shared state files, when this store belongs to a root.
    *  Set by {@link MemoryRoot}; a bare store (tests, ad-hoc probes) has none
    *  and simply records no ledger. */
@@ -720,8 +994,16 @@ export class MemoryStore {
    * newer, and `cardFingerprint` (the read-before-edit witness) covers the
    * summary independently of the date. Rejects on invalid input — callers
    * pre-validate with {@link validateCardInput} for friendly errors.
+   *
+   * `source` is provenance, written ONCE: a create records the session the
+   * card came from, an update keeps the recorded one whatever it is passed
+   * (the conversation that revised a fact is not where the fact came from),
+   * and it takes no part in the equality test below — so a save that differs
+   * only in `source` is `unchanged`, not a rewrite. The one caller that may
+   * override this is a MOVE: there the card being written IS the moved card,
+   * and its origin is the moved card's, not the destination's (`adoptSource`).
    */
-  async upsert(input: { name: string, category: MemoryCategory, summary?: string, body: string, domain?: string | null }): Promise<{ op: 'created' | 'updated' | 'unchanged', card: TopicCard }> {
+  async upsert(input: { name: string, category: MemoryCategory, summary?: string, body: string, domain?: string | null, source?: string, adoptSource?: boolean }): Promise<{ op: 'created' | 'updated' | 'unchanged', card: TopicCard }> {
     // Three-state for the same reason the move probes are: `get()` folds "the
     // read failed" into `undefined`, and reading an UNREADABLE card as "new"
     // makes this write replace the very file it could not read. Only a genuinely
@@ -738,15 +1020,23 @@ export class MemoryStore {
     const domain = input.domain === null
       ? undefined
       : input.domain !== undefined && input.domain !== '' ? input.domain : existing?.domain
-    const invalid = validateCardInput({ name: input.name, category: input.category, summary, body: input.body, domain })
+    // Provenance: what a create is given, what an update already has — unless
+    // the caller moved the card here (`adoptSource`): then what it is given,
+    // even when that is nothing.
+    const source = existing === undefined || input.adoptSource === true ? input.source : existing.source
+    const invalid = validateCardInput({ name: input.name, category: input.category, summary, body: input.body, domain, source })
     if (invalid !== undefined) throw new Error(invalid)
     const today = todayStamp()
     // `domain` is part of the equality test: leaving it out makes a
     // domain-only change answer `unchanged` and get dropped without a trace —
-    // the silent no-op the plan calls out by name.
+    // the silent no-op the plan calls out by name. `source` is NOT (see the
+    // method doc), with one exception: a moved card whose origin differs from
+    // the destination's IS a change — answering `unchanged` would return the
+    // destination's old card, origin and all, and never write the moved one.
     if (existing !== undefined && !existing.malformed
       && existing.body === input.body && existing.summary === summary && existing.category === input.category
-      && existing.domain === domain) {
+      && existing.domain === domain
+      && (input.adoptSource !== true || existing.source === source)) {
       return { op: 'unchanged', card: existing }
     }
     const card: TopicCard = {
@@ -754,7 +1044,10 @@ export class MemoryStore {
       category: input.category,
       summary,
       ...(domain === undefined ? {} : { domain }),
-      created: existing?.created ?? today,
+      ...(source === undefined ? {} : { source }),
+      // A healed hand edit starts its own history today; its `UNKNOWN_DATE`
+      // is the reader's placeholder, not a date the card ever had.
+      created: existing === undefined || existing.malformed ? today : existing.created,
       updated: existing === undefined || existing.body !== input.body ? today : existing.updated,
       body: input.body,
       malformed: false,
@@ -770,9 +1063,11 @@ export class MemoryStore {
    *
    *  The card is ARCHIVED first (see {@link archiveCard}): the removal is
    *  irreversible on disk, but the content stays recoverable for
-   *  {@link ARCHIVE_RETENTION_DAYS}. `reason` is not stored with the copy —
-   *  an archived file is byte-identical to what `topics/<key>.md` held, so it
-   *  can be copied straight back.
+   *  {@link ARCHIVE_RETENTION_DAYS}. `reason` is not stored with the copy. A
+   *  card this plugin wrote is copied byte for byte; a hand-edited file is
+   *  copied as the card this reader made of it — its text, not its bytes, so
+   *  a frontmatter key the reader ignores is not in the copy. Either way
+   *  {@link restoreArchived} takes it back.
    *
    *  A card that exists but cannot be READ is not deleted: it cannot be
    *  archived, so deleting it would be the one removal with no copy to undo from.
@@ -782,6 +1077,10 @@ export class MemoryStore {
    *  layer down: previously `existsSync` answered `false` for any failure, so a
    *  caller read "could not read it" as "nothing to do" and reported success on
    *  a delete that never happened.
+   *
+   *  A card whose archive copy cannot be WRITTEN is not deleted either — the
+   *  same invariant one step later: {@link archiveCard} throws, and nothing
+   *  after it runs, so the card, its pin and its index line all stay.
    */
   async remove(name: string, reason: ArchiveReason = 'unspecified'): Promise<boolean> {
     if (!isValidTopic(name)) return false
@@ -876,13 +1175,19 @@ export class MemoryStore {
       // key's first segment — the same silent change the pin handling exists to
       // prevent, one field over. `null` when the source declares none, so an
       // `overwrite` onto a target that DID declare one lands the moved card's
-      // state instead of inheriting the target's.
+      // state instead of inheriting the target's. `source` rides along for the
+      // same reason: the card is the same card, wherever it now lives, and it
+      // was still written by the session that created it — also when the move
+      // OVERWRITES a card of that key: an update would otherwise keep the
+      // destination's origin for a card that is no longer the destination's.
       await target.upsert({
         name: card.name,
         category: card.category,
         summary: card.summary,
         body: card.body,
         domain: card.domain ?? null,
+        ...(card.source === undefined ? {} : { source: card.source }),
+        adoptSource: true,
       })
       if (pinned) await target.addPin(name)
       await this.remove(name, 'unspecified')
@@ -928,8 +1233,11 @@ export class MemoryStore {
             // The snapshot's domain goes back too, and `null` is load-bearing:
             // the target declared nothing, so omitting the field would INHERIT
             // the domain the failed move just wrote and leave the rollback
-            // looking like a success with a bucket nobody chose.
+            // looking like a success with a bucket nobody chose. Its origin
+            // goes back the same way.
             domain: replaced.domain ?? null,
+            ...(replaced.source === undefined ? {} : { source: replaced.source }),
+            adoptSource: true,
           })
           // Put the pin back too: an unpinned destination card that stays
           // pinned would keep injecting a card the user never pinned there.
@@ -990,9 +1298,17 @@ export class MemoryStore {
 
   /**
    * Copy one card into `<scope>/archive/<YYYY-MM-DD>/<key>.md` before it is
-   * removed. Never throws: a failed archive must not block the removal the
-   * caller asked for, and a card that is gone is worse than one that is
-   * un-undoable.
+   * removed.
+   *
+   * THROWS when the copy does not land ({@link ArchiveWriteError}), and the
+   * removal that asked for it is refused: the copy is that removal's only
+   * undo, so "the card is gone and nothing can bring it back" is the one
+   * outcome worse than "the delete failed". Until 2026-11-22 the failure was
+   * only recorded and the deletion went ahead — which is how a read-only
+   * `archive/` turned every merge into a permanent loss. It is recorded in the
+   * root's `archiveFailures` FIFO (`/status`, survives a restart); the store
+   * used to keep a second, in-memory flag of its own, which a restart forgot
+   * and which any later successful copy of ANY card cleared.
    *
    * A same-day re-deletion of the same key does NOT overwrite the earlier
    * copy: it lands beside it as `<key>~<HHMMSS>.md`. Overwriting would keep
@@ -1011,17 +1327,16 @@ export class MemoryStore {
         target = join(dir, `${card.name}~${stamp}.md`)
       }
       atomicWrite(target, renderCard(card))
-      // Cleared on a LANDING write: the flag is what `/archive` reports, and a stale
-      // one would keep warning about an undo the user has again by now.
-      this.lastArchiveFailure = undefined
     } catch (error) {
-      // Diagnostics only — the caller's removal proceeds regardless, but the
-      // failure is remembered so the settings page can say the undo is not
-      // available rather than promising one that is not there.
-      console.warn(`memory archive: could not archive "${card.name}" (${reason}): ${String(error)}`)
-      this.lastArchiveFailure = String(error)
-      return
+      console.warn(`memory archive: could not archive "${card.name}" into ${this.archiveDirPath} (${reason}): ${error instanceof Error ? error.message : String(error)}`)
+      this.ledgerOwner?.recordArchiveFailure(this.ledgerScope, card.name, error)
+      throw new ArchiveWriteError(card.name, { cause: error })
     }
+    // Cleared when a copy of THIS card lands: that is the one refusal the list
+    // can no longer be describing. Clearing the whole scope hid a card whose
+    // archive file alone is unwritable (a directory of that name, a read-only
+    // file) the moment any OTHER card of the store was deleted.
+    this.ledgerOwner?.clearArchiveFailures(this.ledgerScope, card.name)
     // Pruning runs OUTSIDE the archive write's try: a prune failure is not an
     // archive failure, and reporting it as one sends a reader looking at the
     // wrong thing. It must also never undo a copy that already landed.
@@ -1030,11 +1345,6 @@ export class MemoryStore {
     } catch (error) {
       console.warn(`memory archive: prune failed (the archive itself is intact): ${String(error)}`)
     }
-  }
-
-  /** Last archive failure, for the settings page (undefined = healthy). */
-  lastArchiveError(): string | undefined {
-    return this.lastArchiveFailure
   }
 
   /**
@@ -1064,6 +1374,9 @@ export class MemoryStore {
       if (!entry.isDirectory()) continue
       const dayDir = join(this.archiveDirPath, entry.name)
       for (const file of readdirSync(dayDir)) {
+        // Only copies are pruned. Anything else in a day directory (a note the
+        // user dropped there) is not the archive's to remove.
+        if (!file.endsWith('.md')) continue
         const full = join(dayDir, file)
         try {
           files.push({ path: full, mtimeMs: statSync(full).mtimeMs })
@@ -1108,7 +1421,8 @@ export class MemoryStore {
     if (!existsSync(this.archiveDirPath)) return []
     const out: Array<{ day: string, file: string, topic: string, bytes: number }> = []
     for (const entry of readdirSync(this.archiveDirPath, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
+      // A linked day directory is not listed: it is not this store's archive.
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue
       const dayDir = join(this.archiveDirPath, entry.name)
       for (const name of readdirSync(dayDir)) {
         if (!name.endsWith('.md')) continue
@@ -1127,12 +1441,27 @@ export class MemoryStore {
   }
 
   /**
-   * Put one archived card back into `topics/` and CONSUME the archived copy.
+   * Put one archived copy back into `topics/` and CONSUME the copy.
    *
    * `file` is the archive file's stem from {@link archivedCards} (which may
-   * carry a same-day suffix); `topic` is the key it restores to. Refuses when
-   * the key is taken (restoring would overwrite a live card) or when the copy is
-   * not a valid card file.
+   * carry a same-day suffix); `topic` is the key it restores to, and it must
+   * be the key the stem names — a copy of card X is not restored as card Y.
+   *
+   * What the copy must pass is its SHAPE ({@link restorableShape}): it parses
+   * as a card, with a usable key, a known category and a body. NOT the
+   * write-side content rules. Every deletion archives first, so a hand-edited
+   * card longer than the cap, or one that merely looks like it carries a
+   * credential, can always be DELETED — and "deleted" promises an undo. A
+   * restore that re-ran the caps and the credential fence made that promise
+   * false for exactly those cards: the copy sat in `archive/`, offered no way
+   * back, and was pruned with the rest. Restoring does not widen what the
+   * model sees either — the read side withholds a credential-shaped card on
+   * every path — it only gives the user their own file back. A copy written
+   * under an older cap is no reason to refuse it either: it was in the store
+   * before the user deleted it.
+   *
+   * A refused copy is left where it is: `invalid` answers "this one cannot come
+   * back", not "it was consumed".
    *
    * The move is what makes the panel tell the truth: "已删除的记忆（N）" lists
    * this directory, so a restore that left the copy behind kept showing the card
@@ -1147,6 +1476,8 @@ export class MemoryStore {
     // The stem is a topic key optionally followed by `~HHMMSS`; anything else
     // (a path separator, a dot, an over-long name) is refused outright.
     if (!/^[a-z0-9][a-z0-9-]{0,47}(?:~\d{6})?$/u.test(file)) return 'invalid'
+    if (file.split('~')[0] !== topic) return 'invalid'
+    if (!this.archiveDayIsReal(day)) return 'missing'
     const source = join(this.archiveDirPath, day, `${file}.md`)
     if (!existsSync(source)) return 'missing'
     if (existsSync(join(this.topicsDirPath, `${topic}.md`))) return 'occupied'
@@ -1156,7 +1487,8 @@ export class MemoryStore {
     } catch {
       return 'missing'
     }
-    if (parseCard(topic, text).malformed) return 'invalid'
+    const copy = parseCard(topic, text)
+    if (!restorableShape(copy)) return 'invalid'
     mkdirSync(this.topicsDirPath, { recursive: true })
     atomicWrite(join(this.topicsDirPath, `${topic}.md`), text)
     await this.reindex()
@@ -1164,6 +1496,17 @@ export class MemoryStore {
     // can still restore (the file is re-read on the next click).
     await this.deleteArchived(day, file)
     return 'restored'
+  }
+
+  /** Whether `day` names a real directory of this archive — not a link. The
+   *  archive is plain files a hand can reach, and a day directory replaced by
+   *  a link would have restore read, and `deleteArchived` remove, through it. */
+  private archiveDayIsReal(day: string): boolean {
+    try {
+      return lstatSync(join(this.archiveDirPath, day)).isDirectory()
+    } catch {
+      return false
+    }
   }
 
   /** How many cards the archive holds (settings page). */
@@ -1183,6 +1526,7 @@ export class MemoryStore {
     // Same fence as restoreArchived: the stem is a topic key optionally
     // followed by `~HHMMSS`, so no separator or dot can reach the filesystem.
     if (!/^[a-z0-9][a-z0-9-]{0,47}(?:~\d{6})?$/u.test(file)) return false
+    if (!this.archiveDayIsReal(day)) return false
     const target = join(this.archiveDirPath, day, `${file}.md`)
     if (!existsSync(target)) return false
     await removeTree(target)
@@ -1223,8 +1567,12 @@ export class MemoryStore {
   }
 
   /** Cards similar to `content` (bigram Jaccard over summary+body), best
-   *  first, scores above the noise floor only. The write-time gate's input. */
-  findSimilar(content: string, floor = 0.3, limit = 5): Array<{ name: string, score: number }> {
+   *  first, scores at or above `floor` only. The write-time gate's input.
+   *  The default floor is {@link SIM_RELATED} — the bottom of the band the gate
+   *  reports as `related` — so a caller that asks "what is related" gets the
+   *  whole band. (The default used to be a hard-coded 0.3, above the top of
+   *  what real stores ever score; see the constant.) */
+  findSimilar(content: string, floor = SIM_RELATED, limit = 5): Array<{ name: string, score: number }> {
     const scored: Array<{ name: string, score: number }> = []
     for (const card of this.list()) {
       if (card.malformed) continue
@@ -1236,18 +1584,37 @@ export class MemoryStore {
   }
 
   /**
-   * Cards matching a query, EXACT HITS FIRST.
+   * Cards matching a query, MOST RELEVANT FIRST.
    *
-   * Two layers, in this order:
+   * Two layers find the cards, in this order:
    *   1. `textMatchesQuery` — phrase or token-AND (see that function);
    *   2. alias expansion — the query's words swapped for their other names (see
    *      recall-aliases.ts), which is the only layer that can find a card whose
    *      author used a different word for the same thing.
    *
-   * The ordering is part of the contract, not a nicety: expansion can only ADD
-   * cards, so a direct hit must never sit behind an indirect one — searching
-   * `ppt` should open with the card that says `ppt`, not with four cards that
-   * say `幻灯片`.
+   * Layer 2 can only ADD cards, so every layer-1 hit sits ahead of every
+   * layer-2 hit: searching `ppt` must open with the card that says `ppt`, not
+   * with four cards that say `幻灯片`.
+   *
+   * WITHIN a layer the order is:
+   *   a. how many query words the card carries AS WORDS, most first — an ASCII
+   *      token on its word boundary, a Chinese word as a substring, i.e. the
+   *      token rule's own test;
+   *   b. among equals, a card where the whole query also appears CONTIGUOUSLY
+   *      (the phrase rule) before one where the words are merely all present;
+   *   c. then `updated`, newest first; the store's list order breaks what is left.
+   *
+   * Words before the phrase, on purpose. The phrase rule is deliberately loose
+   * — the normalized query anywhere in the normalized text, so `app config`
+   * matches inside `myappconfig` — and a card that contains only that glued
+   * run (ONE of the two words is really in it) must not open the list over a
+   * card that carries both words. Among cards with the same number of words
+   * the phrase is exactly the finer signal, which is where it decides.
+   *
+   * The order never widens the MATCH: a card with fewer than all the words is
+   * a hit only through the phrase rule, as before. Dropping a word to find
+   * more is the caller's decision (`memory_recall`'s relaxed retry), taken
+   * once and reported with its own flag — not a second, silent query here.
    *
    * @param query - the user's words.
    * @param groups - the alias table in force. `[]` (the default) means NO
@@ -1256,23 +1623,42 @@ export class MemoryStore {
    *   call this method at all.
    */
   search(query: string, groups: readonly AliasGroup[] = []): TopicCard[] {
-    if (normalizeForMatch(query) === '') return this.list()
+    const needle = normalizeForMatch(query)
+    if (needle === '') return this.list()
     // An EMPTY table is the default, so a caller opts into synonyms explicitly.
     // The read path is the only one that may pass a table, and making that
     // visible at every call site is what keeps a future destructive caller from
     // inheriting widened semantics by accident.
     const plan = groups.length === 0 ? undefined : planAliases(query, groups)
-    const exact: TopicCard[] = []
-    const viaAlias: TopicCard[] = []
+    const tokens = queryTokens(query)
+    /** One hit with what ranks it (see the method doc). */
+    interface Ranked {
+      readonly card: TopicCard
+      readonly words: number
+      readonly phrase: boolean
+    }
+    const byRelevance = (a: Ranked, b: Ranked): number =>
+      b.words - a.words
+      || Number(b.phrase) - Number(a.phrase)
+      || b.card.updated.localeCompare(a.card.updated)
+    const exact: Ranked[] = []
+    const viaAlias: Ranked[] = []
     for (const card of this.list()) {
       const text = `${card.name} ${card.summary} ${card.body}`
-      if (textMatchesQuery(text, query)) {
-        exact.push(card)
+      const normalized = normalizeForMatch(text)
+      const words = tokens.filter(token => tokenMatchesText(text, normalized, token)).length
+      const phrase = normalized.includes(needle)
+      // `textMatchesQuery(text, query)` with its two rules kept apart so each
+      // can rank. The composition is the predicate's, and tests/corpus.test.ts
+      // asserts the two never disagree on a card.
+      if (phrase || (tokens.length > 0 && words === tokens.length)) {
+        exact.push({ card, words, phrase })
       } else if (plan !== undefined && matchesAliasPlan(text, plan)) {
-        viaAlias.push(card)
+        viaAlias.push({ card, words, phrase })
       }
     }
-    return viaAlias.length === 0 ? exact : [...exact, ...viaAlias]
+    const ranked = (hits: Ranked[]): TopicCard[] => hits.sort(byRelevance).map(hit => hit.card)
+    return viaAlias.length === 0 ? ranked(exact) : [...ranked(exact), ...ranked(viaAlias)]
   }
 
   /**
@@ -1284,8 +1670,21 @@ export class MemoryStore {
    *  irreversible, and a text sweep cannot even tell whether it matches. Both
    *  cases THROW with nothing deleted instead of reporting a confident
    *  `removed: []`.
+   *
+   *  A card whose archive copy cannot be WRITTEN refuses the whole sweep the
+   *  same way. Every copy is written BEFORE the first deletion, so the
+   *  refusal leaves every matching card, the index and the ledger exactly as
+   *  they were. Once every copy has landed, each removal stands on its own:
+   *  one the filesystem refuses (EBUSY, EPERM) comes back in `failed` and the
+   *  rest of the sweep proceeds — every removed card has its copy, the index
+   *  is rebuilt whatever happened, and the ledger names what went.
+   *
+   * @param match - a topic key, or the text of a sweep.
+   * @param session - the short id of the session whose call this is (plan P8):
+   *   it rides the ledger row, so "who emptied this topic" has an answer. The
+   *   settings page's delete passes none — there the user is the actor.
    */
-  async forget(match: string): Promise<{ removed: string[], remaining: number }> {
+  async forget(match: string, session?: string): Promise<{ removed: string[], failed: string[], remaining: number }> {
     // A key-shaped match is answered by the probe, not by get(): `get()` folds
     // "unreadable" into `undefined`, and the fall-through then matched by TEXT —
     // deleting whatever happened to mention that string while the card the
@@ -1323,25 +1722,63 @@ export class MemoryStore {
         // refuse the whole call rather than delete a subset and call it done.
         const unreadable = this.unreadableKeys(cards)
         if (unreadable.length > 0) {
-          throw new Error(`cannot read ${String(unreadable.length)} card(s) in ${this.dir} (${unreadable.join(', ')}); nothing was forgotten`)
+          // No directory in the sentence: it travels to the model as the
+          // call's failure text. The keys are what the caller can act on.
+          throw new Error(`cannot read ${String(unreadable.length)} card(s) (${unreadable.join(', ')}); nothing was forgotten`)
         }
         doomed = cards.filter(card => textMatchesQuery(`${card.summary} ${card.body}`, match, mode))
       }
     }
-    for (const card of doomed) {
-      await this.archiveCard(card, 'forget')
-      await removeTree(join(this.topicsDirPath, `${card.name}.md`))
-      await this.removePin(card.name)
+    // Two phases on purpose (see the method doc): every copy first, so an
+    // archive that fails part-way has deleted nothing; then the removals.
+    for (const card of doomed) await this.archiveCard(card, 'forget')
+    // One card at a time from here. Every copy has landed, so each removal is
+    // undoable on its own; one that fails (EBUSY — a scanner holding the file
+    // on Windows — or EPERM) ends THAT card, not the sweep: the cards before
+    // it are gone and ledgered, the cards after it are still wanted. The
+    // index is rebuilt whatever happened, so it never keeps a ghost line.
+    const removed: string[] = []
+    const failed: string[] = []
+    try {
+      for (const card of doomed) {
+        try {
+          await this.unlinkCardFile(card.name)
+        } catch (error) {
+          console.warn(`memory forget: could not remove "${card.name}" (its copy is in the archive): ${safeFsErrorText(error, this.dir)}`)
+          failed.push(card.name)
+          continue
+        }
+        removed.push(card.name)
+        try {
+          await this.removePin(card.name)
+        } catch (error) {
+          // The card is gone; a pin that outlives it points at nothing and is
+          // dropped by the next successful write.
+          console.warn(`memory forget: removed "${card.name}" but could not drop its pin: ${safeFsErrorText(error, this.dir)}`)
+        }
+      }
+    } finally {
+      if (removed.length > 0) await this.reindex()
     }
-    if (doomed.length > 0) await this.reindex()
-    const removed = doomed.map(card => card.name)
     // Written HERE rather than by each caller so every path that deletes —
     // the tool, the settings route, any future caller — is covered by
     // construction instead of by remembering to.
     if (removed.length > 0) {
-      this.ledgerOwner?.recordLedger({ scope: this.ledgerScope, pass: 'forget', op: 'delete', keys: removed })
+      this.ledgerOwner?.recordLedger({
+        scope: this.ledgerScope,
+        pass: 'forget',
+        op: 'delete',
+        keys: removed,
+        ...(session === undefined ? {} : { session }),
+      })
     }
-    return { removed, remaining: this.list().length }
+    return { removed, failed, remaining: this.list().length }
+  }
+
+  /** Remove one card file — the step of a sweep that the filesystem can
+   *  refuse. Its own method so a test can make exactly that step fail. */
+  private async unlinkCardFile(name: string): Promise<void> {
+    await removeTree(join(this.topicsDirPath, `${name}.md`))
   }
 
   /** Topic keys whose `topics/<key>.md` entry exists but was not readable: exactly
@@ -1702,7 +2139,9 @@ export class MemoryStore {
   // --- config (toggles + pins + storeVersion) ----------------------------------
 
   /** Master toggle; a missing or malformed config means ENABLED — the plugin
-   * must not silently vanish from a half-written config. */
+   *  must not silently vanish from a half-written config. (A malformed one is
+   *  not silent either: {@link configUnreadable} says so, and nothing is ever
+   *  written back over it.) */
   isEnabled(): boolean {
     return this.readConfigField('enabled', true)
   }
@@ -1725,26 +2164,99 @@ export class MemoryStore {
     this.writeConfig({ distill: value })
   }
 
+  /** Whether `config.json` exists but could not be read as a config (P4).
+   *
+   *  While true, every read answers the documented defaults (enabled, distill
+   *  on, no pins) and every write back is refused ({@link writeConfig}), so
+   *  the broken file is never replaced by those defaults. `/status` serves it
+   *  so the user learns WHY a pin or a toggle does not stick.
+   *
+   *  Reads the file, like the other accessors do (the file is hand-editable
+   *  by design): the answer describes the file now, not at construction. */
+  get configUnreadable(): boolean {
+    this.readConfigJson()
+    return this.configUnreadableFlag
+  }
+
   /** One boolean field out of config.json with a default. */
   private readConfigField(field: string, fallback: boolean): boolean {
     const value = this.readConfigJson()[field]
     return typeof value === 'boolean' ? value : fallback
   }
 
-  /** Merge-write fields into config.json (keeps the sibling fields). */
+  /** Merge-write fields into config.json (keeps the sibling fields).
+   *
+   *  REFUSES — throws {@link ConfigUnreadableError} — when the file exists but
+   *  could not be read as a config (P4). The merge is
+   *  `{ ...readConfigJson(), ...patch }`, and for an unreadable file
+   *  `readConfigJson()` answers the defaults, so the write would not keep the
+   *  sibling fields: it would replace the whole file with `{}` plus the patch.
+   *  So a hand-edited file with one stray comma was overwritten — its pins gone
+   *  with the typo — the first time a pin was toggled, and the user's
+   *  `enabled` the first time the switch was flipped.
+   *
+   *  Reads keep answering the defaults (the plugin must not vanish from a
+   *  half-written config); only the write back is refused. It refuses by
+   *  THROWING rather than by returning a status: every caller (`addPin`,
+   *  `setEnabled`, `clear`, the legacy migration) has one honest answer to a
+   *  write that did not happen, and a boolean would let `clear()` — which
+   *  resets the pins LAST — report a reset it did not finish.
+   *
+   *  The check rides the same read the merge uses, so a file that breaks
+   *  between an earlier status check and this call is still refused. */
   private writeConfig(patch: Record<string, unknown>): void {
+    const current = this.readConfigJson()
+    if (this.configUnreadableFlag) {
+      const error = new ConfigUnreadableError(this.configPath, { cause: this.configReadError })
+      console.warn(`memory config: ${error.message} (${String(this.configReadError)})`)
+      throw error
+    }
     mkdirSync(this.dir, { recursive: true })
-    atomicWrite(this.configPath, `${JSON.stringify({ ...this.readConfigJson(), ...patch }, null, 2)}\n`)
+    atomicWrite(this.configPath, `${JSON.stringify({ ...current, ...patch }, null, 2)}\n`)
   }
 
-  /** Raw config.json as a plain object (absent/unreadable → empty). */
+  /** Raw config.json as a plain object.
+   *
+   *  A MISSING file is the first-run state: it answers `{}` and leaves
+   *  {@link configUnreadableFlag} alone (cleared, in fact — the file is usable).
+   *  A file that EXISTS but cannot be made sense of — a syntax error, a JSON
+   *  value that is not an object, an fs error other than "no such file" —
+   *  answers `{}` as well, AND sets the flag that makes the next
+   *  {@link writeConfig} refuse. The flag describes the LAST read, so a file
+   *  repaired by hand is picked up without a restart. */
   private readConfigJson(): Record<string, unknown> {
+    let text: string
     try {
-      const parsed: unknown = JSON.parse(readFileSync(this.configPath, 'utf8'))
-      return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
-    } catch {
+      text = readFileSync(this.configPath, 'utf8')
+    } catch (error) {
+      this.noteConfigReadError(isMissingError(error) ? undefined : error)
       return {}
     }
+    let parsed: unknown
+    try {
+      // A UTF-8 BOM is what Notepad puts in front of a hand-edited file on
+      // Windows. It is not a broken config, and treating it as one would
+      // refuse every later toggle write over a file the user edited correctly.
+      parsed = JSON.parse(text.replace(/^\uFEFF/u, ''))
+    } catch (error) {
+      this.noteConfigReadError(error)
+      return {}
+    }
+    // `[]`, `42`, `"x"` and `null` are valid JSON and not a config: nothing
+    // can be read out of them, so they get the same treatment as a parse error.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      this.noteConfigReadError(new Error('config.json does not hold a JSON object'))
+      return {}
+    }
+    this.noteConfigReadError(undefined)
+    return parsed as Record<string, unknown>
+  }
+
+  /** Remember the outcome of one config read: `undefined` = the file is usable
+   *  or absent, anything else = it exists and could not be read. */
+  private noteConfigReadError(error: unknown): void {
+    this.configUnreadableFlag = error !== undefined
+    this.configReadError = error
   }
 }
 
@@ -1825,9 +2337,29 @@ export const INDEX_WARN_AT = 40
 export type ProjectSummary = Pick<MemoryProjectSummary,
   | 'slug' | 'cwd' | 'cards' | 'sizeBytes' | 'movable'
   | 'indexLines' | 'domains' | 'maxDomainCards' | 'rotCards' | 'staleCards'
-  | 'cardWarn' | 'indexWarn'>
-/** Summarize every project directory, busiest first. */
-export function listProjects(rootDir: string): ProjectSummary[] {
+  | 'cardWarn' | 'indexWarn' | 'error' | 'configUnreadable'>
+
+/**
+ * Summarize every project directory, busiest first.
+ *
+ * A store nobody can summarize — a plain file where `topics/` should be, a
+ * torn mount — is the one thing that differs by caller, so it is an option and
+ * not a second walk of the directory (the copy this function used to have in
+ * `routes.ts` was 120 lines kept in step by hand):
+ *   - default: the listing throws, as it always did. A caller about to ACT on
+ *     the list must not run past a store it cannot see.
+ *   - `keepUnreadable: true`: that store becomes a row that SAYS so — zeroed
+ *     metrics, `movable: false` (a broken store must not receive a moved
+ *     card), `error` holding the reason with the user's directories cut out —
+ *     and every other store is listed as usual. The callers that only REPORT
+ *     (`/status`, the mount-time migration, the curator's target selection)
+ *     use this, so one broken store takes down neither the page nor the plugin.
+ *
+ * `configUnreadable` is on a row only while that store's own `config.json`
+ * cannot be parsed: its pins then read as "none" and a pin write is refused
+ * (P4), which the page has to be able to say.
+ */
+export function listProjects(rootDir: string, options: { keepUnreadable?: boolean } = {}): ProjectSummary[] {
   const projectsDir = join(rootDir, 'projects')
   if (!existsSync(projectsDir)) return []
   const out: ProjectSummary[] = []
@@ -1844,7 +2376,32 @@ export function listProjects(rootDir: string): ProjectSummary[] {
     } catch {
       // missing/stale metadata → keep empty, the slug still identifies it
     }
-    const metrics = new MemoryStore(dir).metrics()
+    const store = new MemoryStore(dir)
+    let metrics: ReturnType<MemoryStore['metrics']>
+    try {
+      metrics = store.metrics()
+    } catch (error) {
+      if (options.keepUnreadable !== true) throw error
+      // The host log keeps the slug and the raw cause; the row carries the
+      // reduced text (the page and the user read that one).
+      console.warn(`memory: project "${entry.name}" could not be read: ${error instanceof Error ? error.message : String(error)}`)
+      out.push({
+        slug: entry.name,
+        cwd,
+        cards: 0,
+        sizeBytes: 0,
+        movable: false,
+        indexLines: 0,
+        domains: 0,
+        maxDomainCards: 0,
+        rotCards: 0,
+        staleCards: 0,
+        cardWarn: false,
+        indexWarn: false,
+        error: safeFsErrorText(error, rootDir),
+      })
+      continue
+    }
     // A target is only usable when its stamp walks back to this very slug; a
     // bare directory or a stale stamp would swallow cards into a store no
     // session can resolve.
@@ -1862,6 +2419,7 @@ export function listProjects(rootDir: string): ProjectSummary[] {
       staleCards: metrics.staleCards,
       cardWarn: metrics.cards >= CARD_WARN_AT,
       indexWarn: metrics.indexLines >= INDEX_WARN_AT,
+      ...(store.configUnreadable ? { configUnreadable: true } : {}),
     })
   }
   out.sort((a, b) => b.sizeBytes - a.sizeBytes || b.cards - a.cards)
@@ -1883,6 +2441,9 @@ export async function removeProject(rootDir: string, slug: string): Promise<void
     root.recordLedgerBatch([{ scope: slug, pass: 'forget', op: 'delete', keys: doomed }])
   }
   await removeTree(join(rootDir, 'projects', slug))
+  // A refused deletion names cards that are "still in the list"; with the
+  // directory gone they are not, and the banner would say so forever.
+  root.clearArchiveFailuresOfScope(slug)
 }
 
 /** How many similarity-suspect pairs distill-state.json retains (FIFO). The
@@ -1926,14 +2487,20 @@ export interface LedgerEntry {
   /** Merge/rewrite destination, when it differs from the single cited key. */
   target?: string
   /** Why an edit was REJECTED instead of applied (no write happened).
-   *  `over-limit` is a well-formed edit refused by policy (it would cite more
-   *  keys than one pass may touch), which the model gets no other signal for. */
-  rejected?: 'unseen' | 'stale' | 'over-limit'
+   *  `over-limit` is a well-formed edit refused by policy — it would cite more
+   *  keys than one pass may touch, or remove more cards than one pass may —
+   *  which the model gets no other signal for; `invalid` is a proposal wrong by
+   *  its own shape; `archive-failed` is a deletion refused because its archive
+   *  copy could not be written; `io-failed` is an edit the host tried to apply
+   *  and the filesystem refused (EBUSY, EPERM) — nothing changed. */
+  rejected?: 'unseen' | 'stale' | 'over-limit' | 'invalid' | 'archive-failed' | 'io-failed'
   /** Which domain the edit happened in (curate only, and only once the card's
    *  domain is known). Attribution: "three merges in `dsh`" is actionable,
    *  "three merges" is not. Absent on rows written before the field existed. */
   domain?: string
-  /** Short session id, when the event rode a session (curate only). */
+  /** Short session id when the event rode a session: every curate row, and a
+   *  forget row made by a tool call. A settings-page delete names no session —
+   *  there the user is the actor. */
   session?: string
 }
 
@@ -1956,7 +2523,8 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
   if (entry.pass !== 'curate' && entry.pass !== 'light-sweep' && entry.pass !== 'forget') return false
   if (entry.op !== 'merge' && entry.op !== 'delete' && entry.op !== 'rewrite' && entry.op !== 'rename') return false
   if (!Array.isArray(entry.keys) || !entry.keys.every(key => typeof key === 'string')) return false
-  if (entry.rejected !== undefined && entry.rejected !== 'unseen' && entry.rejected !== 'stale' && entry.rejected !== 'over-limit') return false
+  if (entry.rejected !== undefined && entry.rejected !== 'unseen' && entry.rejected !== 'stale' && entry.rejected !== 'over-limit'
+    && entry.rejected !== 'invalid' && entry.rejected !== 'archive-failed' && entry.rejected !== 'io-failed') return false
   if (entry.domain !== undefined && typeof entry.domain !== 'string') return false
   return true
 }
@@ -2035,6 +2603,91 @@ function isDomainOverEvent(value: unknown): value is DomainOverEvent {
   return true
 }
 
+/** How many archive-write failures distill-state.json retains (FIFO). */
+export const MAX_ARCHIVE_FAILURES = 20
+
+/** How long a persisted or served error text may be — the same bound the LLM
+ *  audit gives a failed call's cause (`MAX_DIRECT_ERROR_CHARS`). */
+const MAX_ERROR_TEXT_CHARS = 200
+
+/** Whether a parsed value is a usable archive-failure row (the file can be
+ *  hand-edited; a row the page cannot render is dropped, not repaired). */
+function isArchiveFailure(value: unknown): value is MemoryArchiveFailure {
+  if (typeof value !== 'object' || value === null) return false
+  const row = value as Record<string, unknown>
+  return typeof row.at === 'number' && Number.isFinite(row.at)
+    && typeof row.scope === 'string' && typeof row.topic === 'string' && typeof row.error === 'string'
+}
+
+/** A fresh counter set: every leaf zero, so a reader never tests for absence. */
+export function emptyToolStats(): MemoryToolStats {
+  return {
+    save: { created: 0, updated: 0, unchanged: 0, refused: {} },
+    recall: { topic: 0, query: 0, list: 0, empty: 0, fallback: 0, relaxed: 0, refused: 0, hits: { one: 0, few: 0, many: 0 } },
+    forget: { byTopic: 0, byText: 0, removed: 0 },
+    gate: { duplicate: 0, related: 0 },
+  }
+}
+
+/** The counter paths {@link MemoryRoot.bumpToolStat} accepts, besides
+ *  `save.refused.<code>`. A path that is not here is a programming error, so
+ *  it is refused loudly rather than written as an unbounded key. */
+const TOOL_STAT_PATHS = new Set([
+  'save.created', 'save.updated', 'save.unchanged',
+  'recall.topic', 'recall.query', 'recall.list', 'recall.empty', 'recall.fallback', 'recall.relaxed', 'recall.refused',
+  'recall.hits.one', 'recall.hits.few', 'recall.hits.many',
+  'forget.byTopic', 'forget.byText', 'forget.removed',
+  'gate.duplicate', 'gate.related',
+])
+
+/**
+ * The size bucket of an answer that returned cards — how many a call
+ * actually got, which is what tells a precise read from a broad one. `one`:
+ * exactly one card; `few`: two to five; `many`: six or more. Zero is not a
+ * bucket: a call that got nothing is `recall.empty`.
+ */
+export function hitBucket(matched: number): 'one' | 'few' | 'many' {
+  if (matched <= 1) return 'one'
+  return matched <= 5 ? 'few' : 'many'
+}
+
+/** A refusal code: lower-case kebab and short — it becomes a JSON key on disk. */
+const TOOL_STAT_CODE = /^[a-z0-9][a-z0-9-]{0,39}$/u
+
+type Stats = Record<string, Record<string, number>>
+type NestedStats = Record<string, Record<string, Record<string, number>>>
+
+/** Counters from a state file, every non-number dropped: the file is
+ *  hand-editable, and a counter that reads `"3"` must not become NaN
+ *  arithmetic on the next bump. */
+export function normalizeToolStats(value: unknown): MemoryToolStats {
+  const out = emptyToolStats()
+  if (typeof value !== 'object' || value === null) return out
+  const raw = value as Stats & { recall?: { hits?: Record<string, unknown> } }
+  for (const path of TOOL_STAT_PATHS) {
+    const parts = path.split('.')
+    if (parts.length === 3) {
+      const count = raw.recall?.hits?.[parts[2]!]
+      if (typeof count === 'number' && Number.isFinite(count) && count > 0) {
+        ;(out.recall.hits as Record<string, number>)[parts[2]!] = Math.floor(count)
+      }
+      continue
+    }
+    const [group, leaf] = parts as [string, string]
+    const count = raw[group!]?.[leaf!]
+    if (typeof count === 'number' && Number.isFinite(count) && count > 0) {
+      (out as unknown as Stats)[group!]![leaf!] = Math.floor(count)
+    }
+  }
+  const refused = raw.save?.refused as unknown
+  if (typeof refused === 'object' && refused !== null) {
+    for (const [code, count] of Object.entries(refused as Record<string, unknown>)) {
+      if (TOOL_STAT_CODE.test(code) && typeof count === 'number' && count > 0) out.save.refused[code] = Math.floor(count)
+    }
+  }
+  return out
+}
+
 /**
  * Persisted shape of distill-state.json. Keys an older file still carries —
  * `sessions` and `activity`, the retired extractor's per-session progress and
@@ -2085,6 +2738,17 @@ interface DistillState {
    * file, read as `[]` — an old state file must never make the store throw.
    */
   domainOver?: DomainOverEvent[]
+  /**
+   * Cumulative memory-tool counters (see {@link MemoryRoot.bumpToolStat}).
+   * Absent in a file written before counting existed; the reader answers
+   * `undefined` so `/status` can say "no data" rather than show zeroes.
+   */
+  toolStats?: MemoryToolStats
+  /**
+   * Recent refused deletions (bounded FIFO): the archive copy could not be
+   * written, so the card was kept. Absent in an older file, read as `[]`.
+   */
+  archiveFailures?: MemoryArchiveFailure[]
 }
 
 /**
@@ -2212,7 +2876,16 @@ export class MemoryRoot {
    */
   async migrateAll(log?: { info(msg: string): void }): Promise<void> {
     const stores: Array<[string, MemoryStore]> = [['global', this.global]]
-    for (const project of listProjects(this.dir)) {
+    // Tolerant listing (plan P10's rule, one level up): the strict walk threw
+    // on the first store nobody could summarize, and THIS runs during the
+    // plugin's mount — one broken project directory kept the whole plugin from
+    // activating, tools and injection included. A store that cannot be listed
+    // has nothing to migrate either way; it is skipped and named in the log.
+    for (const project of listProjects(this.dir, { keepUnreadable: true })) {
+      if (project.error !== undefined) {
+        log?.info(`memory migration: skipping "${project.slug}" (its store cannot be read: ${project.error})`)
+        continue
+      }
       // projectBySlug (not projectFor) so projects with a missing/stale
       // project.json still migrate — their cards work without the cwd stamp.
       const store = this.projectBySlug(project.slug)
@@ -2590,6 +3263,122 @@ export class MemoryRoot {
   }
 
   /**
+   * Count one memory-tool event and persist: `save.created`, `recall.empty`,
+   * `gate.related`, or `save.refused.<code>` for a refusal.
+   *
+   * Counters rather than ledger rows on purpose. The ledger is a FIFO of 200
+   * events and already carries the curator's work; a save or recall per few
+   * turns would evict the rows that explain where a card went. A rate ("how
+   * often is a save refused?") needs a denominator that does not expire.
+   *
+   * An unknown path is a programming error and throws BEFORE anything is
+   * written. An I/O failure only warns: a counter must not turn a finished
+   * tool call into an error for the model.
+   * @param path - the counter's dot path.
+   * @param by - how much to add (1 unless batching).
+   */
+  bumpToolStat(path: string, by = 1): void {
+    const [group, leaf, extra] = path.split('.')
+    const refusal = group === 'save' && leaf === 'refused' && extra !== undefined && TOOL_STAT_CODE.test(extra)
+    // A listed three-part path (`recall.hits.one`) addresses a fixed bucket;
+    // an UNLISTED one is as much a programming error as an unlisted two-part one.
+    const bucketPath = extra !== undefined && TOOL_STAT_PATHS.has(path)
+    if (!refusal && !bucketPath && (extra !== undefined || !TOOL_STAT_PATHS.has(path))) {
+      throw new Error(`bumpToolStat: unknown counter "${path}"`)
+    }
+    try {
+      const state = this.readDistillState()
+      const stats = state.toolStats ?? emptyToolStats()
+      if (refusal) {
+        stats.save.refused[extra!] = (stats.save.refused[extra!] ?? 0) + by
+      } else if (bucketPath) {
+        const buckets = (stats as unknown as NestedStats)[group!]![leaf!]!
+        buckets[extra!] = (buckets[extra!] ?? 0) + by
+      } else {
+        const bucket = (stats as unknown as Stats)[group!]!
+        bucket[leaf!] = (bucket[leaf!] ?? 0) + by
+      }
+      state.toolStats = stats
+      mkdirSync(this.dir, { recursive: true })
+      atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+    } catch (error) {
+      console.warn(`memory tools: could not count "${path}": ${String(error)}`)
+    }
+  }
+
+  /** The cumulative memory-tool counters (a zeroed copy when none exist yet). */
+  toolStats(): MemoryToolStats {
+    return this.readDistillState().toolStats ?? emptyToolStats()
+  }
+
+  /**
+   * Record a REFUSED deletion — the archive copy could not be written — and
+   * persist (bounded FIFO). `error` is reduced by {@link safeFsErrorText}
+   * before it is written: this row is served to the settings page and outlives
+   * the process. Never throws: this runs on the failure path of a delete that
+   * was already refused.
+   */
+  recordArchiveFailure(scope: string, topic: string, error: unknown): void {
+    try {
+      const state = this.readDistillState()
+      const rows = [...(state.archiveFailures ?? []), { at: Date.now(), scope, topic, error: safeFsErrorText(error, this.dir) }]
+      state.archiveFailures = rows.slice(-MAX_ARCHIVE_FAILURES)
+      mkdirSync(this.dir, { recursive: true })
+      atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+    } catch (writeError) {
+      console.warn(`memory archive: could not record the archive failure for "${topic}": ${String(writeError)}`)
+    }
+  }
+
+  /** Recent refused deletions, newest first. Each row's text is reduced again
+   *  on the way out: a row written before the reduction existed would
+   *  otherwise keep showing the user's directories until the FIFO forgot it. */
+  archiveFailures(): MemoryArchiveFailure[] {
+    return [...(this.readDistillState().archiveFailures ?? [])]
+      .reverse()
+      .map(row => ({ ...row, error: safeFsErrorText(row.error, this.dir) }))
+  }
+
+  /**
+   * Forget one card's refused deletions: an archive copy of THAT card has just
+   * landed, so its earlier refusals no longer describe a present danger (the
+   * card is deleted, or deletable once the caller finishes). Other cards' rows
+   * stay — theirs is still true. Never throws — it runs on the success path of
+   * a deletion.
+   */
+  clearArchiveFailures(scope: string, topic: string): void {
+    try {
+      const state = this.readDistillState()
+      const before = state.archiveFailures ?? []
+      const kept = before.filter(row => row.scope !== scope || row.topic !== topic)
+      if (kept.length === before.length) return
+      state.archiveFailures = kept
+      mkdirSync(this.dir, { recursive: true })
+      atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+    } catch (error) {
+      console.warn(`memory archive: could not clear the archive-failure list for "${scope}": ${String(error)}`)
+    }
+  }
+
+  /**
+   * Forget every refused deletion of a scope: the project directory is gone,
+   * so its cards are not "still in the memory list" however the rows read.
+   * Never throws — it runs after the removal, which must not be undone.
+   */
+  clearArchiveFailuresOfScope(scope: string): void {
+    try {
+      const state = this.readDistillState()
+      const before = state.archiveFailures ?? []
+      const kept = before.filter(row => row.scope !== scope)
+      if (kept.length === before.length) return
+      state.archiveFailures = kept
+      atomicWrite(this.distillStatePath, `${JSON.stringify(state, null, 2)}\n`)
+    } catch (error) {
+      console.warn(`memory archive: could not clear the archive-failure rows of "${scope}": ${String(error)}`)
+    }
+  }
+
+  /**
    * Reconcile every store's `index.md` against its cards, rebuilding the ones
    * that disagree (W2). Runs at mount and on `/status` — the two moments a
    * session can start reading a stale index without anything else noticing.
@@ -2700,6 +3489,8 @@ export class MemoryRoot {
         const ledger = (parsed as { ledger?: unknown }).ledger
         const indexDrift = (parsed as { indexDrift?: unknown }).indexDrift
         const domainOver = (parsed as { domainOver?: unknown }).domainOver
+        const toolStats = (parsed as { toolStats?: unknown }).toolStats
+        const archiveFailures = (parsed as { archiveFailures?: unknown }).archiveFailures
         return {
           version: 1,
           curated: typeof curated === 'object' && curated !== null
@@ -2715,6 +3506,8 @@ export class MemoryRoot {
           ledger: Array.isArray(ledger) ? ledger.filter(isLedgerEntry) : [],
           indexDrift: Array.isArray(indexDrift) ? indexDrift.filter(isIndexDriftEvent) : [],
           domainOver: Array.isArray(domainOver) ? domainOver.filter(isDomainOverEvent) : [],
+          toolStats: typeof toolStats === 'object' && toolStats !== null ? normalizeToolStats(toolStats) : undefined,
+          archiveFailures: Array.isArray(archiveFailures) ? archiveFailures.filter(isArchiveFailure) : [],
         }
       }
     } catch {

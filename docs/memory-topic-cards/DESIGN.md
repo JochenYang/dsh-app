@@ -17,6 +17,17 @@
 > describe the distiller proposal schema (§2.6) or the two-scope layout (§2.1,
 > §2.5, §5), the notes above are what the code does now.
 
+> **Changed 2026-11-22 — the ability round, recorded in
+> [`OPTIMIZATION.md`](OPTIMIZATION.md) §4.14.** The sections below were brought
+> back in step with the code where that round moved it: the body cap is 500
+> characters (§2.2, §2.3), there is no per-category quota any more and the
+> project body budget is 3800 (§2.5), a recall miss falls back on its own and a
+> forget sweep needs an explicit confirmation (§2.7), τ_rel is 0.2 and a
+> duplicate refusal carries the existing card (§3), the curator's gate numbers
+> and removal ceiling moved (§4.2), and a card that looks like a credential is
+> withheld on every read path. §0 stays as the record of what motivated the
+> design.
+
 ## 0. 背景：为什么现在是流水账
 
 当前每个作用域（global / 每 project）只有**一个 append-only 的 `memory.md`**，条目形态为
@@ -87,7 +98,7 @@ created: 2026-09-06
 updated: 2026-09-12
 ---
 
-正文，1–3 行，≤400 字符，用户语言。可用 [[other-topic]] 互链。
+正文，1–3 行，≤500 字符，用户语言。可用 [[other-topic]] 互链。
 ```
 
 字段约束（宿主校验，不合法即拒绝并给出原因）：
@@ -96,13 +107,15 @@ updated: 2026-09-12
   主题时由 save 工具描述要求自行翻译为英文键。
 - `category`：沿用现有五分类 `preference | convention | decision | lesson | fact`
   （`src/types.ts:10`），不扩。
-- `summary`：≤40 字符，创建时必填、更新时可选；它是索引行和写入路由的判据。
-- 正文：`MAX_TOPIC_BODY_CHARS = 400`（约两条旧条目；curator 现行 merge 上限
-  prompt 写 500 而代码强制 200（`src/curator.ts:141` vs `src/curator.ts:437`），本次
-  统一为 400，顺带修掉这处不一致）。
+- `summary`：≤40 字符，创建时必填、更新时可选；它是索引行和写入路由的判据。必须是单行——
+  CR/LF 之外的 Unicode 行分隔符同样被拒。
+- 正文：`MAX_TOPIC_BODY_CHARS = 500`（2026-11-22 由 400 上调：两个月里 47/124 次保存被 400 打回，
+  全部重试成功但多花一轮；见台账 §4.14）。curator 的输入预算由它推导（`CURATE_MAX_CHARS`），
+  两处不会再各写一个数。
 - 日期只存在于 frontmatter（`created` / `updated`），**正文不再出现日期前缀**——从物理
   上消除日志感。`stripEntryPrefix` / `repairDoublePrefix` 随之退役（仅迁移期使用），
-  `stripCommitIds` 保留。
+  `stripCommitIds` 保留。手改的日期若不是 `YYYY-MM-DD`，读作未知（`0000-00-00`，按最旧排序），
+  不再原样进入提示词。
 
 ### 2.3 写入语义：upsert
 
@@ -113,8 +126,9 @@ updated: 2026-09-12
 | `topic` | 是 | 主题键（kebab-case）。同键 = 同一事实的演进，覆盖更新 |
 | `category` | 是 | 不变 |
 | `summary` | 创建时必填 | ≤40 字符索引钩子；更新时可省略（沿用旧的） |
-| `content` | 是 | 正文，≤400 字符 |
+| `content` | 是 | 正文，≤500 字符 |
 | `scope` | 否 | 不变（project 默认 / global） |
+| `domain` | 否 | 可选的主题域（ASCII kebab-case，≤16 字符）；省略则按主题键首段推导 |
 
 行为：
 
@@ -144,11 +158,15 @@ L1 阶段保留"正文注入"，渲染源从时间线改为卡集：
 
 1. 注入索引全文（30 卡 ≈ 30 行，约几百字符，恒在）——写入方的全域地图，这是写入
    可见性的根本改善。
-2. 卡正文选择策略平移现有规则：pinned 优先 → 每 category 配额内按 `updated` 新→旧
-   （替代"文件尾部=最新"这一随时间线消亡的启发式，`src/prompt.ts:86-93`）→ 预算
-   global 1200 / project 2800 字符不变。
+2. 卡正文选择策略（2026-11-22 起，台账 §4.14）：pinned → 手改卡 → 每类最新一张（保底）→
+   其余按 `updated` 新→旧；不再有分类配额。预算只约束正文：project ≤ `MAX_PROJECT_CHARS`
+   = 3800（guidelines 与索引在预算之外，另计）。三条规则防一张卡决定其余卡的命运：单卡
+   渲染宽度不超过预算一半（超长手改卡被截断并标记）；普通卡放不下时跳过而不是停止；
+   pin 与手改卡放不下时为身后的同类预留位置。正文与摘要命中凭据形状的卡不注入，索引行
+   写 `(withheld)`。
 3. 手改的 malformed 卡（缺 frontmatter）按现"非标准行"待遇：原文注入、跳过校验
    （`src/prompt.ts:110-113` 的 handNotes 语义平移）。
+4. 索引行不再带 `(updated …)`：日期在卡文件和每条注入正文的标题里都有，索引行每张省 21 字符。
 
 ### 2.6 distiller 提案 schema
 
@@ -163,23 +181,30 @@ L1 阶段保留"正文注入"，渲染源从时间线改为卡集：
 
 ### 2.7 recall / forget
 
-- `memory_recall(scope, query?, topic?)`：新增 `topic` 精确读单卡（L4 的按需展开原语，
-  本期即提供）；`query` 匹配范围扩为键 + summary + 正文；无参返回索引 + 全部卡
-  （50k 字符上限不变，`src/tools.ts:32`）。
-- `memory_forget`：语义改为**删除**，`match` 先按 topic 键精确命中，退化为内容子串
-  （现规则）；返回删除的卡键列表。纠错不再走 forget（见 §2.3）。
+- `memory_recall(scope, query?, topic?)`：`topic` 精确读单卡（L4 的按需展开原语）；
+  `query` 匹配键 + summary + 正文，并展开已配置的别名组；无参返回索引 + 全部卡
+  （50k 字符上限不变）。两处自动恢复（2026-11-22）：`topic` 没有这张卡时，把该词当关键词
+  检索一次，响应带 `fallback: true` 与候选键（≤5）；`query` 无结果且多于一个词时，去掉最后
+  一个词再检索一次，响应带 `relaxed: true`；两者都空才返回空。文本命中凭据形状的卡在每条
+  读路径上一律以 `withheld: true` 返回，不给正文与摘要。
+- `memory_forget`：语义改为**删除**。`match` 是主题键时按键删；是自由文本时必须带
+  `sweep: "text"` 才执行扫除，否则拒绝且不删（`code: "sweep-not-confirmed"`）；形状像键
+  但没有这张卡的单词（`pnpm`）同样按文本处理。返回删除的卡键列表。纠错不再走 forget
+  （见 §2.3）。删除前先写归档副本，副本写不出则整次拒绝、卡片留在原处。
 
 ## 3. L2 写入时合并（防冗余闸一）
 
 纯宿主侧规则检测，不新增 LLM 调用：
 
 - **相似度**：对 `normalizeForMatch` 后的文本取字符 bigram 的 Jaccard 系数。
-  （阈值 τ 为 L3 推断，需实测标定：起始 τ_dup=0.8、τ_rel=0.6，候选对记入
-  distill-state 供调参，见 §9。）
+  阈值：`SIM_DUPLICATE` = 0.8，`SIM_RELATED` = 0.2（设计初值 0.6；2026-11-09 的 66 对语料
+  上落到 0.3，2026-11-22 按 19/22 命中、0 误报与真实库 8 对候选落到 0.2，见台账 §4.12、
+  §4.14；命中与提示次数由 `toolStats.gate` 计数，供再标定）。
 - **save 路由**：
   1. topic 键精确命中 → upsert；
   2. 新键但内容与某卡 ≥τ_dup → 拒绝并返回 `{saved:false, reason:'duplicate-of', topic}`，
-     引导模型改为 upsert 该键；
+     并带上既有卡本身（`existingCard`；文本命中凭据形状时以 `withheld` 返回），引导模型先对照、
+     再决定更新该主题还是放弃；
   3. [τ_rel, τ_dup) 区间 → 放行创建，响应带 `related: [keys]`，提示模型考虑合并或
      正文加 `[[link]]`。
 - **distill 更新门控**（防震荡）：提案命中既有键时，相似度 ≥τ_dup 跳过（复读），
@@ -193,7 +218,9 @@ L1 阶段保留"正文注入"，渲染源从时间线改为卡集：
 ### 4.1 轻量 sweep（新增，无 LLM，每次写入后必跑）
 
 - 重建受影响作用域的索引（闸三）。
-- 检测跨卡精确重复（手改卡可能引入）→ 直接合并，保留 `updated` 较新者。
+- 检测跨卡精确重复（手改卡可能引入）→ 直接合并，保留 `updated` 较新者。"精确"按原文比较
+  （去首尾空白、CRLF 归一），不按 `normalizeForMatch`——那条归一会让只差 `>=` 与 `<=` 的两张卡
+  被当成重复（台账 §4.14）。
 - 计算并记录 ≥τ_dup 的高重叠卡对到 distill-state（供重量 sweep 优先处理 + §9 调参）。
 - 校验 summary 非空、卡 frontmatter 完整；问题卡记入状态页。
 - 零模型成本，无冷却、无门槛——纠正"写快清慢"的频率失配。
@@ -203,8 +230,13 @@ L1 阶段保留"正文注入"，渲染源从时间线改为卡集：
 - **编辑协议从"逐字引用行"改为"引用 topic 键"**：`{op:'merge', topics:[k1,k2], target:{topic,summary,category,content}}`、`{op:'delete', topics:[k]}`、
   `{op:'rewrite', topic:k, content}`。宿主按键解析，现 `applyEdits` 的"引用行必须逐字
   存在"脆弱性（`src/curator.ts:406-417`）整体消失。
-- 门控保留：10 分钟冷却、hash 变化检测、≥8 卡才处理——但计量从"行数"改为"卡数"，
-  作用域预算改为 ≤30 卡 / ≤6000 字符（`src/curator.ts:77-80` 平移）。
+- 门控：hash 变化检测、≥4 卡才处理（`CURATE_MIN_ENTRIES`）、冷却 3 分钟（原 10 分钟，
+  台账 §4.11）——计量从"行数"改为"卡数"；作用域预算 ≤30 卡 / ≤24k 字符
+  （`CURATE_MAX_CHARS` 由正文上限 500 与每卡 300 字符开销推导）。`rename` 当作单键 `merge`
+  处理。
+- **单趟移除上限**（2026-11-22）：一趟里离开库的卡 ≤ `max(3, ⌈卡数 × 25%⌉)`，一趟内累加。
+  删除、以及 merge 带走的源卡（目标除外）都计入；rename 不计（一进一出）。超限的编辑整条
+  拒绝并入台账（`over-limit`）。连续 2 次失败的调用之后退避到库变化为止。
 - 新增 **restructure 模式**：对刚迁移的作用域（`restructured` 标记未置位）跑一次
   "把 legacy-* 卡归并成正常主题卡"的专门 prompt，完成后置标记。
 - 输入为索引 + 卡正文（40k 截断规则平移）；pinned 卡不可编辑的纪律平移到键粒度。

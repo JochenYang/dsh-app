@@ -184,50 +184,47 @@ const cssText = `
   line-height: 18px;
   font-variant-numeric: tabular-nums;
 }
-/* Confirmation modal: body-portal mask + centered card. */
-.dshm_mask {
-  position: fixed;
-  inset: 0;
-  z-index: 2147483646;
+/* Two ledger lines under one label (what went in, what was left out). */
+.dshm_metricStack {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, .35);
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
-.dshm_dialogCard {
-  position: relative;
-  width: 340px;
-  max-width: calc(100vw - 48px);
-  background: var(--dsw-alias-bg-layer-1, #ffffff);
-  border: 1px solid var(--dsw-alias-border-l1, rgba(15, 23, 42, 0.06));
-  border-radius: 12px;
-  padding: 20px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, .28);
+/* One project's measured state, under its row: counts, in the hint voice. */
+.dshm_projectMetrics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin-left: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
 }
-.dshm_dialogTitle {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--dsw-alias-label-primary, #0f172a);
-  margin-bottom: 6px;
+/* A store sitting in a warning band: said in the warning colour, and only
+   then — a row of "fine" on every project would hide the one that is not. */
+.dshm_metricWarn {
+  color: var(--dsw-alias-state-warn-primary);
 }
-.dshm_dialogMessage {
-  font-size: 13px;
-  color: var(--dsw-alias-label-secondary, #475569);
-  line-height: 1.6;
-  /* Single-entry confirms quote the row on its own lines; a long unbroken run
-     (URL, hash) must still wrap, and a paragraph-long row must not push the
-     buttons off screen. */
+/* The refusal-reason line under the save row. */
+.dshm_toolReasons {
+  margin-left: 12px;
+  overflow-wrap: anywhere;
+}
+/* The confirmation's message. The frame is the host's own Modal primitive;
+   only this content is ours. The sentences quote their target on its own
+   lines, which a plain paragraph would collapse, and a long unbroken run
+   (URL, hash) must still wrap. */
+.dshm_confirmMessage {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  line-height: 22px;
   white-space: pre-line;
-  word-break: break-word;
-  max-height: 40vh;
-  overflow-y: auto;
-}
-.dshm_dialogActions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  margin-top: 16px;
+  overflow-wrap: anywhere;
 }
 .dshm_projects {
   display: flex;

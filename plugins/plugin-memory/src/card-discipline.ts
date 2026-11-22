@@ -4,15 +4,21 @@
  * A card body (and its index summary) is injected into every future session,
  * so text about the act of remembering — "I saved a note that…", "according
  * to memory card X" — would be re-injected forever and later read as if it
- * were the fact itself. Three surfaces ask a model to WRITE card text: the
- * always-on guidelines ({@link ./prompt.ts}), the `memory_save` tool
- * description, and the curator's prompt. They share this constant so the rule
- * cannot drift between them, and so a surface that forgets it is visible.
+ * were the fact itself. Two surfaces ask a model to WRITE card text: the
+ * `memory_save` tool description and the curator's prompt. They share this
+ * constant so the rule cannot drift between them, and so a surface that
+ * forgets it is visible.
+ *
+ * The always-on guidelines (`./prompt.ts`) used to carry it too, and no
+ * longer do: the rule only matters while a save is being shaped, and that is
+ * exactly when the model is reading the `memory_save` description. The 1027
+ * characters it cost every assembly of every session were given to card
+ * bodies instead (`MAX_PROJECT_CHARS`).
  *
  * Why not a word blacklist: this plugin's OWN memory is about the memory
- * system — topic keys, the index, the 400-char cap are exactly the facts a
- * card about this codebase must state. The rule therefore bans narrating the
- * SAVING, not the vocabulary, and says so explicitly.
+ * system — topic keys, the index, the body cap (`MAX_TOPIC_BODY_CHARS`) are
+ * exactly the facts a card about this codebase must state. The rule therefore
+ * bans narrating the SAVING, not the vocabulary, and says so explicitly.
  *
  * @module @dsh-app/plugin-memory/card-discipline
  */
@@ -37,8 +43,9 @@ export const CARD_TEXT_DISCIPLINE = [
   'state such facts directly. The ban is on narrating the SAVING, not on these words.',
 ].join('\n')
 
-/** Surfaces that must carry {@link CARD_TEXT_DISCIPLINE}, for the tests to walk. */
-export const CARD_TEXT_SURFACES = ['guidelines', 'memory_save', 'curator'] as const
+/** Surfaces that must carry {@link CARD_TEXT_DISCIPLINE}, for the tests to walk.
+ *  `guidelines` is deliberately absent: see the module header. */
+export const CARD_TEXT_SURFACES = ['memory_save', 'curator'] as const
 
 /** One card-text surface, as named in {@link CARD_TEXT_SURFACES}. */
 export type CardTextSurface = (typeof CARD_TEXT_SURFACES)[number]

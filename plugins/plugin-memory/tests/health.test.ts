@@ -155,14 +155,19 @@ function scrapeRoot(): MemoryRoot {
 
 // --- B2: the injection counters ------------------------------------------------
 
-test('B2 droppedCards: a 26-card store injects 8 bodies and drops 18', async () => {
+test('B2 droppedCards: a 26-card store injects 11 bodies and drops 15', async () => {
+  // Re-recorded 2026-11-22 for the selection rework, deliberately richer:
+  // the per-category quota is gone (V1), a card costs one heading line
+  // instead of a `###` block (V2) and the body budget is 3800 (V5) — eleven
+  // 300-char bodies ride where eight used to. The counter still measures
+  // the same loss: cards the prompt did NOT carry.
   const root = new MemoryRoot(scratchDir('dshm-health-drop-root-'))
   const projectStore = root.projectFor('D:\\proj\\drop')
   await seedStore(projectStore, 26, 300)
   const metrics = assembleMemoryText(root, 'D:\\proj\\drop').metrics
   assert.ok(metrics !== undefined)
-  assert.equal(metrics.cardCount, 8, 'the 2800-char budget carries eight 300-char bodies')
-  assert.equal(metrics.droppedCards, 18, 'the loss the plan is stated in')
+  assert.equal(metrics.cardCount, 11, 'the 3800-char budget carries eleven 300-char bodies')
+  assert.equal(metrics.droppedCards, 15, 'the loss the plan is stated in')
   assert.equal(metrics.truncated, true)
   assert.ok(metrics.bodyChars <= MAX_PROJECT_CHARS)
 })
@@ -297,13 +302,28 @@ test('S2 metrics: rot and staleness are counted per store, and a fresh card is n
   assert.equal(store.metrics().staleCards, 1)
 })
 
-test('S2 injection is untouched: the whole injected text still costs exactly what it did', async () => {
+test('S2 injection cost: a golden fixture — any change here is a deliberate one', async () => {
   // A GOLDEN fixture, not a self-comparison: the S-batch added rot/stale
   // measurement that must land in `/status` and NOWHERE in the prompt, so the
   // only evidence that counts is fixed character counts over a store that HAS a
   // rot card. Recorded 2026-11-09 (the date is a fixed 10 characters, so the
   // numbers do not drift with the clock); a change here means injection got
   // more expensive — which is the failure this guards.
+  //
+  // Re-recorded 2026-11-22 for V3, deliberately cheaper: an index line no
+  // longer ends in `(updated YYYY-MM-DD)`, 21 characters a card (indexChars
+  // 178 → 136).
+  //
+  // Re-recorded the same day for the injection rework, cheaper again:
+  // guidelines 3174 → 2337 (V5 — the card-text discipline now rides only in
+  // the `memory_save` description), bodyChars 149 → 131 (V2 — one heading
+  // line per card instead of a `###` block), so totalChars 3565 → 2950.
+  //
+  // Re-recorded the same day for the trust framing moving above the index
+  // ("The index and the cards below are notes…" is three characters longer
+  // than "The cards below are background notes…"): totalChars 2950 → 2953.
+  // What is guarded is that nothing moves WITHOUT a re-record: a new sentence
+  // in the guidelines, a wider card heading, an extra index token.
   const CWD = 'D:\\proj\\injection'
   const root = new MemoryRoot(scratchDir('dshm-health-golden-'))
   const store = root.projectFor(CWD)
@@ -311,15 +331,18 @@ test('S2 injection is untouched: the whole injected text still costs exactly wha
   await store.upsert({ name: 'plain-note', category: 'fact', summary: '普通说明', body: '这条没有任何具体引用。' })
   const assembly = assembleMemoryText(root, CWD)
   assert.deepEqual(assembly.metrics, {
-    guidelinesChars: 3174,
-    indexChars: 178,
-    bodyChars: 149,
-    totalChars: 3607,
+    guidelinesChars: 2337,
+    indexChars: 136,
+    bodyChars: 131,
+    totalChars: 2953,
     cardCount: 2,
     indexLines: 2,
     droppedCards: 0,
     indexOverflowLines: 0,
     truncated: false,
+    // The read-side credential filter's counter (P7): nothing is withheld
+    // yet, so it is honestly zero rather than absent.
+    shieldedCards: 0,
   })
   // The rot card is IN the prompt as text, and nothing beside it annotates the
   // rot: the pinned counts above are what enforce that (any added character —
@@ -549,4 +572,57 @@ test('storeHealth: one row explains where the numbers came from', async () => {
   assert.ok(row.maxPairwiseSim < 1, 'and less than identical')
   assert.equal(row.indexGhosts, 0)
   assert.equal(totalHealth([row]).stores, 1)
+})
+
+test('storeHealth: a card the injection withholds is not counted as an injected body', async () => {
+  const root = new MemoryRoot(scratchDir('dshm-health-shield-'))
+  const cwd = 'D:\\proj\\shield'
+  const store = root.projectFor(cwd)
+  await saveSized(store, 'clean-card', 30, 'preference')
+  // Written straight to disk, the way a hand edit would: the write path
+  // would have refused it.
+  const secret = `sk-${'q7Zm4Xp2Lb9Rt6Kw'}`
+  writeFileSync(join(store.dir, 'topics', 'leaky-card.md'), [
+    '---', 'name: leaky-card', 'category: lesson', 'summary: deploy note', 'created: 2026-11-04', 'updated: 2026-11-04', '---', '',
+    `DEPLOYNOTE the key is ${secret}`, '',
+  ].join('\n'), 'utf8')
+  await store.reindex()
+  const row = storeHealth(store, 'shield')
+  assert.equal(row.cards, 2)
+  // The audit used to run the selection over every card, so it counted a body
+  // that no session ever gets — the one instrument a before/after relies on.
+  assert.equal(row.bodiesInjected, 1)
+  assert.equal(row.droppedCards, 1)
+  const metrics = assembleMemoryText(root, cwd).metrics
+  assert.equal(metrics?.cardCount, row.bodiesInjected, 'the audit and the injection agree')
+})
+
+test('auditRoot skips a store nobody can read and keeps every healthy row', async () => {
+  const root = new MemoryRoot(scratchDir('dshm-health-broken-'))
+  const healthyCwd = 'D:\\proj\\health-healthy'
+  await saveSized(root.projectFor(healthyCwd), 'live-a', 30)
+  await saveSized(root.projectFor(healthyCwd), 'live-b', 30)
+  const brokenCwd = 'D:\\proj\\health-broken'
+  const brokenDir = join(root.dir, 'projects', projectSlug(brokenCwd))
+  mkdirSync(brokenDir, { recursive: true })
+  writeFileSync(join(brokenDir, 'project.json'), `${JSON.stringify({ cwd: brokenCwd })}\n`, 'utf8')
+  writeFileSync(join(brokenDir, 'topics'), 'not a directory', 'utf8')
+  // The strict walk threw here, and this audit is the one instrument a
+  // before/after comparison has: one broken directory cost every healthy
+  // store its numbers.
+  const realErr = process.stderr.write
+  const realWarn = console.warn
+  const said: string[] = []
+  process.stderr.write = (chunk: string | Uint8Array): boolean => { said.push(String(chunk)); return true }
+  console.warn = () => {}
+  try {
+    const audit = auditRoot(root.dir)
+    assert.deepEqual(audit.rows.map(row => row.scope), [projectSlug(healthyCwd)])
+    assert.equal(audit.total.stores, 1)
+    assert.equal(audit.total.cards, 2)
+    assert.ok(said.some(line => line.includes(projectSlug(brokenCwd))), 'the skipped store is named on stderr')
+  } finally {
+    process.stderr.write = realErr
+    console.warn = realWarn
+  }
 })

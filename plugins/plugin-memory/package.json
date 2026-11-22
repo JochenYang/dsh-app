@@ -1,7 +1,7 @@
 {
   "name": "@dsh-app/plugin-memory",
   "description": "DSH APP cross-session memory: dual-face plugin (host half exposes memory_save/memory_recall/memory_forget LLM tools the model calls on its own, system-prompt injection of the current project's persisted memory files, and a background curator that consolidates cards which already exist; client half is a settings section with toggles, stats, and clear).",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "icon": "./icon.svg",
   "type": "module",
   "main": "lib/index.js",
@@ -25,6 +25,7 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-slots"

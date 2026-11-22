@@ -164,11 +164,13 @@ test('GET /status answers the envelope the settings page reads', async () => {
   const body = await response.json() as { ok: boolean, value: Record<string, unknown> }
   assert.equal(body.ok, true)
   // The payload is the page's world and nothing more: the two toggles, the
-  // project list and the aggregate warning counts. Card bodies stay out (the
-  // entries route serves them on demand), and the retired global scope has no
-  // row of its own. A NEW field updates this list; a field that disappears is a
-  // breaking change for the page and must be argued for here.
-  assert.deepEqual(Object.keys(body.value).sort(), ['distill', 'enabled', 'projects', 'warnings'])
+  // project list, the aggregate warning counts, the archive-failure list and
+  // the config flag. Card bodies stay out (the entries route serves them on
+  // demand), and the retired global scope has no row of its own. `toolStats`
+  // is absent here because nothing has been counted yet (it appears with the
+  // first counted call). A NEW field updates this list; a field that
+  // disappears is a breaking change for the page and must be argued for here.
+  assert.deepEqual(Object.keys(body.value).sort(), ['archiveFailures', 'configUnreadable', 'distill', 'enabled', 'projects', 'warnings'])
   void dispose()
 })
 

@@ -1,15 +1,18 @@
 /**
  * Settings-page API on the shared Connection `/api` channel, under
  * `/api/plugins/dsh-app/plugin-memory`:
- *   GET  /status        — toggle states + the project list
+ *   GET  /status        — toggle states + the project list + the tool counters
+ *                         + the archive-failure list
  *   GET  /entries?slug= — one project store's cards WITH bodies + pin state
  *   GET  /llm-audit     — recent background-LLM cost rows (newest 20)
  *   POST /config        — set toggles (body {enabled?, distill?} booleans)
  *   POST /pin           — pin/unpin one card (body {topic, pinned, scope, slug})
  *   POST /move          — relocate one card into another project
  *                         (body {topic, targetSlug, overwrite?, scope, slug})
- *   POST /forget        — delete cards by topic key or content substring
- *                         (body {match, scope, slug})
+ *   POST /forget        — delete ONE card by its topic key (body {match, scope,
+ *                         slug}); `match` must be a key that names a card — the
+ *                         content sweep is the tool's, behind its own
+ *                         confirmation
  *   POST /clear         — {scope:'project', slug} removes that project directory
  *
  * Every scoped call NAMES its store, and only a project can be named: the
@@ -31,13 +34,22 @@
  * the tools, injection, and curator share, so a toggle flip here is honored by
  * the next prompt assembly / maintenance sweep with no restart.
  *
+ * Fault isolation (plan P10): `/status`, `/archive` and `/archive-clear` read
+ * EVERY store, and one unreadable store must not take the whole page (or the
+ * whole action) down. The listing they share (`listProjects` with
+ * `keepUnreadable`) turns a store that cannot be read into one row that says
+ * so while the rest are listed as usual; an archive listing is additionally
+ * read inside its own try/catch.
+ *
  * @module @dsh-app/plugin-memory/routes
  */
 
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
-import { CARD_CAP, CARD_WARN_AT, INDEX_WARN_AT, isValidSlug, isValidTopic, listProjects, removeProject, type MemoryRoot, type ProjectSummary, type MemoryStore, type TopicCard } from './memory-store.ts'
+import { CARD_CAP, CARD_WARN_AT, INDEX_WARN_AT, ConfigUnreadableError, MemoryStore, cardIsWithheld, isValidSlug, isValidTopic, listProjects, removeProject, safeFsErrorText, type MemoryRoot, type ProjectSummary, type TopicCard } from './memory-store.ts'
 import { INDEX_LINE_CEILING } from './prompt.ts'
-import { LEGACY_GLOBAL_SLUG, ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryInjectionSummary, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryMoveResponse, type MemoryStatus, type MemoryWarningCounts } from './types.ts'
+import { LEGACY_GLOBAL_SLUG, ROUTE_PREFIX, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryInjectionSummary, type MemoryLedgerResponse, type MemoryLlmAuditResponse, type MemoryMoveResponse, type MemoryStatus, type MemoryToolStats, type MemoryWarningCounts } from './types.ts'
 
 /** Route namespace on the shared `/api` channel (single source in types.ts,
  * shared with the browser half). Re-exported so existing importers keep
@@ -94,7 +106,9 @@ function fail(status: number, code: string, host: HostText): Response {
 }
 
 /** Wire row for one card, body included: only /entries serves rows, and the
- *  expanded row needs the text. */
+ *  expanded row needs the text. `source` (the creating session's short id)
+ *  rides along when the card has one: it is on the wire for a surface that
+ *  shows where a card came from — the page does not render it yet. */
 function cardRow(card: TopicCard, pinned: ReadonlySet<string>): MemoryCardRow {
   return {
     topic: card.name,
@@ -103,6 +117,10 @@ function cardRow(card: TopicCard, pinned: ReadonlySet<string>): MemoryCardRow {
     updated: card.updated,
     pinned: pinned.has(card.name),
     body: card.body,
+    ...(card.source === undefined ? {} : { source: card.source }),
+    // The page shows the user what no session is shown: that this card is
+    // withheld from every prompt, and left alone by the curator.
+    ...(cardIsWithheld(card) ? { withheld: true } : {}),
   }
 }
 
@@ -180,6 +198,60 @@ function warningCounts(projects: readonly ProjectSummary[]): MemoryWarningCounts
   }
 }
 
+/** `error.message` when there is one, the value itself otherwise. For the host
+ *  log only — what is SERVED goes through `safeFsErrorText`. */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Every project's `/status` row (plan P10): the listing every reader of the
+ * whole root shares, in its tolerant mode — a store nobody can summarize is a
+ * row that SAYS so (zeroed metrics, `movable: false`, `error`), and the other
+ * stores are listed as usual. Callers about to ACT on a list keep the strict
+ * walk, where such a store throws.
+ */
+function projectRows(root: MemoryRoot): ProjectSummary[] {
+  return listProjects(root.dir, { keepUnreadable: true })
+}
+
+/**
+ * Whether any tool call has ever been counted. `toolStats()` answers a zeroed
+ * set for a state file written before counting existed, and four zeroes would
+ * read as "no tool was ever called" — for that file the honest answer is "not
+ * measured", which `/status` says by leaving the field out.
+ */
+function hasToolCounts(stats: MemoryToolStats): boolean {
+  return stats.save.created + stats.save.updated + stats.save.unchanged > 0
+    || Object.values(stats.save.refused).some(total => total > 0)
+    || stats.recall.topic + stats.recall.query + stats.recall.list + stats.recall.empty + stats.recall.fallback
+      + stats.recall.relaxed + stats.recall.refused > 0
+    || stats.recall.hits.one + stats.recall.hits.few + stats.recall.hits.many > 0
+    || stats.forget.byTopic + stats.forget.byText + stats.forget.removed > 0
+    || stats.gate.duplicate + stats.gate.related > 0
+}
+
+/**
+ * Whether `config.json` could not be parsed (plan P4). The store remembers
+ * the failed read and refuses to write over the broken file, so the page can
+ * say so instead of showing defaults that look like the user's real toggles.
+ */
+function configUnreadable(root: MemoryRoot): boolean {
+  return root.global.configUnreadable === true
+}
+
+/**
+ * The answer to a settings write the store refused because `config.json`
+ * could not be parsed: nothing was written, and the broken file — with the
+ * pins and toggles it still holds — was not replaced by defaults.
+ */
+function configUnreadableFailure(): Response {
+  return fail(500, 'io', {
+    code: 'route.configUnreadable',
+    text: 'config.json could not be parsed, so nothing was written; fix or remove the file, then retry',
+  })
+}
+
 /**
  * Register the settings-page routes on the Connection exact-Fetch registry.
  *
@@ -210,7 +282,12 @@ export function registerMemoryRoutes(
         // must describe the index the sessions will actually get.
         await root.reconcileIndexes()
         const injection = hooks.injectionMetrics?.()
-        const projects = listProjects(root.dir)
+        // The tolerant listing (P10): an unreadable store is a row that says
+        // so, not a failed page.
+        const projects = projectRows(root)
+        const failed = projects.filter(row => row.error !== undefined).length
+        if (failed > 0) console.warn(`memory /status: ${String(failed)} project store(s) could not be read and are listed as error rows`)
+        const stats = root.toolStats()
         const status: MemoryStatus = {
           enabled: root.global.isEnabled(),
           distill: root.global.isDistillEnabled(),
@@ -220,6 +297,14 @@ export function registerMemoryRoutes(
           // undefined value would still show up in Object.keys and read like
           // "measured, empty".
           ...(injection === undefined ? {} : { injection }),
+          // Same rule for the tool counters: absent until a call has been
+          // counted, so a state file older than counting reads as "no data".
+          ...(hasToolCounts(stats) ? { toolStats: stats } : {}),
+          // The persisted refusal list (newest first), NOT the store's in-memory
+          // last error: a kernel restart used to forget every failure, and the
+          // page then promised an undo that was never written.
+          archiveFailures: root.archiveFailures(),
+          configUnreadable: configUnreadable(root),
         }
         return ok(status)
       },
@@ -246,8 +331,15 @@ export function registerMemoryRoutes(
         if (distill !== undefined && typeof distill !== 'boolean') {
           return fail(400, 'bad-request', { code: 'route.distillNotBoolean', text: 'distill must be a boolean' })
         }
-        if (typeof enabled === 'boolean') root.global.setEnabled(enabled)
-        if (typeof distill === 'boolean') root.global.setDistillEnabled(distill)
+        // A broken config.json makes every toggle write a refusal (P4): the
+        // page must hear WHY, not an unanswered rejection.
+        try {
+          if (typeof enabled === 'boolean') root.global.setEnabled(enabled)
+          if (typeof distill === 'boolean') root.global.setDistillEnabled(distill)
+        } catch (error) {
+          if (!(error instanceof ConfigUnreadableError)) throw error
+          return configUnreadableFailure()
+        }
         return ok({
           enabled: root.global.isEnabled(),
           distill: root.global.isDistillEnabled(),
@@ -335,7 +427,14 @@ export function registerMemoryRoutes(
         if (pinned && store.get(topic) === undefined) {
           return fail(400, 'bad-request', { code: 'route.topicUnknown', text: 'unknown topic' })
         }
-        const changed = pinned ? await store.addPin(topic) : await store.removePin(topic)
+        // Same refusal as /config when config.json cannot be parsed (P4).
+        let changed: boolean
+        try {
+          changed = pinned ? await store.addPin(topic) : await store.removePin(topic)
+        } catch (error) {
+          if (!(error instanceof ConfigUnreadableError)) throw error
+          return configUnreadableFailure()
+        }
         return ok({ pinned, changed })
       },
     }),
@@ -355,22 +454,45 @@ export function registerMemoryRoutes(
         if (typeof match !== 'string' || match.trim() === '') {
           return fail(400, 'bad-request', { code: 'route.matchRequired', text: 'match must be a non-empty string' })
         }
+        // P3: the page deletes by KEY only. `match` used to be handed to the
+        // store as-is, and the store sweeps by content for anything that is
+        // not a present key — so a hand-typed `match: "e"` deleted every card
+        // with an "e" in it. The content sweep is the tool's, behind its own
+        // confirmation; here the key is shape-checked first (the existing
+        // `route.topicInvalid` copy already says what a key must look like).
+        if (!isValidTopic(match)) {
+          return fail(400, 'bad-request', {
+            code: 'route.topicInvalid',
+            text: 'match must be a valid topic key (ASCII kebab-case); deleting by content is not offered here',
+          })
+        }
         const store = resolveStore(root, body)
         if (store instanceof Response) return store
-        // The settings-page delete sends the card's topic key (exact match);
-        // the store's substring fallback only fires for hand-typed calls.
+        // ...and must NAME a card. A well-formed key that names none would
+        // still fall through to the store's exact-phrase sweep, so it is
+        // refused before the store is asked. A FILESYSTEM fact, not `get()`:
+        // `get()` folds "cannot read it" into `undefined`, and a card that is
+        // there but unreadable must still reach the store, which refuses with
+        // the reason (the catch below) instead of being called unknown.
+        if (!existsSync(join(store.dir, 'topics', `${match}.md`))) {
+          return fail(400, 'bad-request', { code: 'route.topicUnknown', text: 'unknown topic' })
+        }
+        // The settings-page delete sends the card's topic key (exact match).
         // The store REFUSES (throws) when a card exists but cannot be read —
-        // it cannot be archived, and a text sweep cannot tell whether it
-        // matches — so answer with the reason rather than a bare failure or a
-        // confident "0 forgotten".
+        // it cannot be archived — so answer with the reason rather than a bare
+        // failure or a confident "0 forgotten".
         let result: Awaited<ReturnType<MemoryStore['forget']>>
         try {
           result = await store.forget(match)
         } catch (error) {
+          // The reason reaches the page as a detail: it goes through the same
+          // reduction as a persisted one (`safeFsErrorText`) — errno and a
+          // store-relative path, not the user's directories.
+          const detail = safeFsErrorText(error, root.dir)
           return fail(500, 'io', {
             code: 'route.forgetFailed',
-            params: { detail: error instanceof Error ? error.message : 'could not delete the card' },
-            text: error instanceof Error ? error.message : 'could not delete the card',
+            params: { detail },
+            text: detail,
           })
         }
         return ok({ forgotten: result.removed.length, removed: result.removed })
@@ -434,11 +556,13 @@ export function registerMemoryRoutes(
         } catch (error) {
           // A hand-edited card can fail the card validation the target applies;
           // the store compensates by undoing the target copy, so nothing moved
-          // and the caller can retry the same request.
+          // and the caller can retry the same request. The detail is reduced
+          // like every error the page is shown (`safeFsErrorText`).
+          const detail = safeFsErrorText(error, root.dir)
           return fail(500, 'io', {
             code: 'route.moveFailed',
-            params: { detail: error instanceof Error ? error.message : 'could not move the card' },
-            text: error instanceof Error ? error.message : 'could not move the card',
+            params: { detail },
+            text: detail,
           })
         }
         if (outcome === 'partial') {
@@ -550,13 +674,19 @@ export function registerMemoryRoutes(
         const scope = params.get('scope')
         const slug = params.get('slug')
         const targets: Array<{ slug: string, store: MemoryStore }> = []
+        let unreadable = 0
         if (scope === null || scope === '' || scope === 'all') {
           // The retired global scope is deliberately NOT among these: its
           // archive was moved into `projects/legacy-global/` at boot, so it is
           // listed (and restored) as that project like any other.
-          for (const project of listProjects(root.dir)) {
-            const store = root.projectBySlug(project.slug)
-            if (store !== undefined) targets.push({ slug: project.slug, store })
+          // The rows come from the tolerant listing (P10): one project nobody
+          // can summarize is a row with `error`, not a failed listing. Its
+          // archive is still asked for — a store whose CARDS cannot be read is
+          // exactly the one whose undo copies matter — inside the per-store
+          // try/catch below.
+          for (const row of projectRows(root)) {
+            const store = root.projectBySlug(row.slug)
+            if (store !== undefined) targets.push({ slug: row.slug, store })
           }
         } else {
           if (slug === null || slug === '') {
@@ -568,23 +698,34 @@ export function registerMemoryRoutes(
         }
         const cards: MemoryArchiveRow[] = []
         for (const target of targets) {
-          for (const row of target.store.archivedCards()) {
-            cards.push({ ...row, scope: 'project', slug: target.slug })
+          // One store per try/catch (P10): an archive directory nobody can
+          // read skips that store's copies; the other stores still list.
+          try {
+            for (const row of target.store.archivedCards()) {
+              cards.push({ ...row, scope: 'project', slug: target.slug })
+            }
+          } catch (error) {
+            unreadable += 1
+            console.warn(`memory /archive: could not read the archive of "${target.slug}": ${errorText(error)}`)
           }
         }
+        if (unreadable > 0) console.warn(`memory /archive: ${String(unreadable)} archive(s) could not be read`)
         // Newest day first, then project, then topic — one stable order across
         // what used to be several separate lists.
         cards.sort((a, b) => b.day.localeCompare(a.day) || a.slug.localeCompare(b.slug) || a.topic.localeCompare(b.topic))
         const payload: MemoryArchiveResponse = {
           cards,
           total: cards.length,
-          // The undo surface must say when a delete could NOT be archived. Without
-          // this an empty list reads as "nothing was deleted", while the card is
-          // gone — and `lastArchiveError` had no caller at all.
+          // The undo surface must say when a delete could NOT be archived. The
+          // source is the PERSISTED failure list, newest first, restricted to
+          // the stores this answer lists — not the store's in-memory last
+          // error, which a restart silently cleared while the card stayed
+          // deleted. The newest failure of any listed store is the one named.
           ...(() => {
-            const failed = targets.find(target => target.store.lastArchiveError() !== undefined)
-            if (failed === undefined) return {}
-            return { archiveError: failed.store.lastArchiveError(), archiveErrorSlug: failed.slug }
+            const listed = new Set(targets.map(target => target.slug))
+            const failure = root.archiveFailures().find(row => listed.has(row.scope))
+            if (failure === undefined) return {}
+            return { archiveError: failure.error, archiveErrorSlug: failure.scope }
           })(),
         }
         return ok(payload)
@@ -624,7 +765,7 @@ export function registerMemoryRoutes(
           ? 'a card with that topic already exists'
           : outcome === 'missing'
             ? 'no archived card for that day and topic'
-            : 'malformed day or topic'
+            : 'the archived copy is not a valid card (malformed, over the size cap, or credential-like), so it was not restored'
         return fail(outcome === 'invalid' ? 400 : 409, outcome, { code, params: { topic }, text })
       },
     }),
@@ -679,15 +820,46 @@ export function registerMemoryRoutes(
           })
         }
         let cleared = 0
+        // Stores whose undo copies were LEFT ALONE because the store itself
+        // cannot be read (see the loop): named in the answer, never silent.
+        const untouched: string[] = []
         if (scope === 'all') {
-          for (const project of listProjects(root.dir)) {
+          // The same fault isolation as the listing routes (P10). The strict
+          // walk threw on the first unreadable store, so one broken directory
+          // made "empty deleted memory" fail for every project. Such a store
+          // keeps its copies — when its cards cannot be read, those copies are
+          // the only way back to them — and the readable stores are cleared.
+          for (const project of projectRows(root)) {
+            if (project.error !== undefined) {
+              untouched.push(project.slug)
+              continue
+            }
             const store = root.projectBySlug(project.slug)
-            if (store !== undefined) cleared += await store.clearArchive()
+            if (store === undefined) continue
+            // The store LISTS but its archive cannot be READ (`archive/` is a
+            // file, a day directory is not listable): the same isolation, one
+            // level down. Without this the loop stopped at that store — after
+            // the stores before it were already cleared, none the wiser.
+            try {
+              cleared += await store.clearArchive()
+            } catch (error) {
+              untouched.push(project.slug)
+              console.warn(`memory /archive-clear: could not clear the archive of "${project.slug}": ${errorText(error)}`)
+            }
           }
         } else {
           const store = resolveStore(root, body)
           if (store instanceof Response) return store
           cleared = await store.clearArchive()
+        }
+        if (untouched.length > 0) {
+          // A failure answer on purpose: the page must not say "emptied" about
+          // a clearing that skipped anything. What WAS cleared is in `cleared`.
+          return fail(500, 'io', {
+            code: 'route.archiveClearPartial',
+            params: { cleared, count: untouched.length, slugs: untouched.join(', ') },
+            text: `cleared ${String(cleared)} archive entries; the archive of ${String(untouched.length)} project(s) could not be read and was left alone: ${untouched.join(', ')}`,
+          })
         }
         return ok({ cleared })
       },

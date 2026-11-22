@@ -22,6 +22,15 @@
  * The section also shows the P0-2 injection ledger: last assembly + the mean of
  * the ring, in characters. The body budget bounds only the bodies, so the fixed
  * costs (guidelines + index) have to be visible for the budget to mean anything.
+ * Beside it sit the measurements the plan added — what an assembly left out
+ * (dropped cards, cut index lines, shielded cards), each project's rot / stale /
+ * domain counts and warning bands, the cumulative tool counters, and the
+ * deletes that were refused because their undo copy could not be written. All
+ * of them are COUNTS the host already computed: the page renders a number or
+ * nothing, and never re-reads a card for them. A field the host half does not
+ * send yet is left out rather than shown as a zero.
+ *
+ * Destructive actions go through the host's own `Modal` (see confirm-dialog).
  *
  * Every string comes from the `dsh-app.memory` namespace through the `t`
  * standard seat: the section registers with `locale: NS`, so the renderer
@@ -40,7 +49,7 @@ import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS } from './locales.ts'
 import type { MemoryKey } from './locales.ts'
-import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, LEGACY_GLOBAL_SLUG, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryInjectionSample, type MemoryMoveResponse, type MemoryProjectSummary, type MemoryStatus } from '../types.ts'
+import { ROUTE_PREFIX, ARCHIVE_MAX_FILES, ARCHIVE_RETENTION_DAYS, LEGACY_GLOBAL_SLUG, type HostText, type MemoryArchiveResponse, type MemoryArchiveRow, type MemoryCardRow, type MemoryCurateResult, type MemoryEntriesResponse, type MemoryInjectionSample, type MemoryMoveResponse, type MemoryProjectSummary, type MemoryStatus, type MemoryToolStats } from '../types.ts'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type MemorySectionProps = PropsLocale<typeof NS>
@@ -97,6 +106,7 @@ function routeErrorCopy(t: TranslateNS<typeof NS>, host: HostText | undefined, f
     'route.projectUnknown': t('memory.host.projectUnknown'),
     'route.topicInvalid': t('memory.host.topicInvalid'),
     'route.pinnedNotBoolean': t('memory.host.pinnedNotBoolean'),
+    'route.configUnreadable': t('memory.host.configUnreadable'),
     'route.topicUnknown': t('memory.host.topicUnknown'),
     'route.matchRequired': t('memory.host.matchRequired'),
     'route.enabledNotBoolean': t('memory.host.enabledNotBoolean'),
@@ -108,13 +118,19 @@ function routeErrorCopy(t: TranslateNS<typeof NS>, host: HostText | undefined, f
     'route.restoreMissing': t('memory.host.restoreMissing'),
     'route.restoreInvalid': t('memory.host.restoreInvalid'),
     'route.restoreArgsRequired': t('memory.host.restoreArgsRequired'),
-    'route.archiveFailed': t('memory.host.archiveFailed'),
+    'route.archiveDeleteArgsRequired': t('memory.host.archiveDeleteArgsRequired'),
+    'route.archiveDeleteMissing': t('memory.host.archiveDeleteMissing'),
     'route.moveTargetLegacy': t('memory.host.moveTargetLegacy'),
     'route.moveSameProject': t('memory.host.moveSameProject'),
     'route.moveOccupied': t('memory.host.moveOccupied'),
     'route.moveFailed': t('memory.host.moveFailed', { detail: String(params.detail ?? '') }),
     'route.forgetFailed': t('memory.host.forgetFailed', { detail: String(params.detail ?? '') }),
     'route.movePartial': t('memory.host.movePartial'),
+    'route.archiveClearPartial': t('memory.host.archiveClearPartial', {
+      cleared: String(params.cleared ?? ''),
+      count: String(params.count ?? ''),
+      slugs: String(params.slugs ?? ''),
+    }),
     'route.overwriteNotBoolean': t('memory.host.overwriteNotBoolean'),
   }, fallback)
 }
@@ -201,6 +217,13 @@ function projectTitle(project: Pick<MemoryProjectSummary, 'slug' | 'cwd'>): stri
   return parts[parts.length - 1] ?? project.slug
 }
 
+/** Display name for a scope as the host names it ('global', a project slug,
+ *  the legacy holding pen): the project's title, or the slug itself when no
+ *  listed project answers to it. */
+function scopeTitle(scope: string, projects: readonly MemoryProjectSummary[] | undefined): string {
+  return projectTitle(projects?.find(project => project.slug === scope) ?? { slug: scope, cwd: '' })
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...init })
   const body = (await response.json()) as { ok: boolean, value?: T, error?: { message?: string, host?: HostText } }
@@ -212,6 +235,13 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 /** Archived entries shown before the "show all" control. */
 const ARCHIVE_PREVIEW = 5
+
+/** Refused deletes listed under the archive panel (the host keeps a bounded
+ *  FIFO, newest last; the page shows the newest of them). */
+const ARCHIVE_FAILURE_PREVIEW = 5
+
+/** Refusal reason codes listed before the rest fold into one "more" count. */
+const REFUSAL_PREVIEW = 8
 
 /** How long a confirmation stays on screen before it clears itself. */
 const NOTICE_DISMISS_MS = 6_000
@@ -272,7 +302,15 @@ function confirmMessage(state: ConfirmState | null, t: TranslateNS<typeof NS>): 
   if (state.kind === 'archive-one') return t('memory.confirm.archiveOneMessage', { topic: state.topic, day: state.day })
   if (state.kind === 'archive-all') return t('memory.confirm.archiveAllMessage', { count: String(state.count) })
   if (state.kind === 'move-overwrite') return t('memory.confirm.moveOverwriteMessage', { to: state.targetTitle, topic: state.topic })
-  return t('memory.confirm.forgetMessage', { where: t('memory.scope.project.inline'), summary: state.summary, topic: state.topic })
+  return t('memory.confirm.forgetMessage', {
+    where: t('memory.scope.project.inline'),
+    summary: state.summary,
+    topic: state.topic,
+    // A card delete archives a copy first (and a delete whose copy cannot be
+    // written is refused), so the sentence names the restore, not a loss.
+    days: ARCHIVE_RETENTION_DAYS,
+    max: ARCHIVE_MAX_FILES,
+  })
 }
 
 /** Expansion-set key for one card row. */
@@ -293,6 +331,180 @@ function injectionText(
     body: String(sample.bodyChars),
     total: String(sample.totalChars),
   })
+}
+
+/** Whether a wire value is a usable count. The payloads arrive as an unchecked
+ *  cast, and a missing field must render as nothing, never as "undefined". */
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+/** The part of the ledger that says what an assembly LEFT OUT. Undefined when
+ *  the host sent no such field, so the line is then not drawn. */
+function injectionLossText(
+  sample: Pick<MemoryInjectionSample, 'droppedCards' | 'indexOverflowLines' | 'shieldedCards'>,
+  t: TranslateNS<typeof NS>,
+): string | undefined {
+  if (!isCount(sample.droppedCards) || !isCount(sample.indexOverflowLines) || !isCount(sample.shieldedCards)) {
+    return undefined
+  }
+  return t('memory.injection.loss', {
+    dropped: String(sample.droppedCards),
+    overflow: String(sample.indexOverflowLines),
+    shielded: String(sample.shieldedCards),
+  })
+}
+
+/** Local date-time of an epoch-ms stamp, to the minute ('' when unusable). */
+function formatStamp(epochMs: unknown): string {
+  if (!isCount(epochMs)) return ''
+  const date = new Date(epochMs)
+  if (!Number.isFinite(date.getTime())) return ''
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${String(date.getFullYear())}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/**
+ * One project's measured state, under its row: domain spread, how many cards
+ * name decay-prone state, how long cards have gone unedited, and the two
+ * warning bands. Counts only — never a card's text — and each metric the host
+ * did not send is left out rather than shown as a zero.
+ */
+function ProjectMetrics(props: { project: MemoryProjectSummary; t: TranslateNS<typeof NS> }): ReactNode {
+  const { project, t } = props
+  const parts: string[] = []
+  if (isCount(project.domains) && isCount(project.maxDomainCards)) {
+    parts.push(t('memory.projects.metric.domains', { domains: project.domains, max: project.maxDomainCards }))
+  }
+  if (isCount(project.rotCards)) parts.push(t('memory.projects.metric.rot', { rot: project.rotCards }))
+  if (isCount(project.staleCards)) parts.push(t('memory.projects.metric.stale', { stale: project.staleCards }))
+  const warnings: string[] = []
+  // The bands are flags, not counts: a store that is nowhere near a ceiling
+  // says nothing, so the marker stays a signal rather than a row of "fine".
+  if (project.cardWarn === true) warnings.push(t('memory.projects.cardWarn'))
+  if (project.indexWarn === true) warnings.push(t('memory.projects.indexWarn'))
+  // A store whose own config.json cannot be parsed reads as "nothing pinned"
+  // and refuses a pin write. Said here, because the button beside it looks
+  // like it works.
+  if (project.configUnreadable === true) warnings.push(t('memory.projects.configUnreadable'))
+  if (parts.length === 0 && warnings.length === 0) return null
+  return (
+    <div className="dshm_projectMetrics">
+      {warnings.map(warning => <span key={warning} className="dshm_metricWarn">{warning}</span>)}
+      {parts.length === 0 ? null : <span>{parts.join(' · ')}</span>}
+    </div>
+  )
+}
+
+/**
+ * The refusal reasons of `memory_save` as one line: the total the save row
+ * shows, and `code ×count` items, largest count first (code order breaks a
+ * tie, so the line does not reshuffle between renders of one payload).
+ * @param refused - the host's reason-code histogram.
+ * @param t - the page's translate seat.
+ * @returns the total and the line (undefined when there is no reason to list).
+ */
+function refusalReasons(
+  refused: Readonly<Record<string, number>>,
+  t: TranslateNS<typeof NS>,
+): { total: number, text: string | undefined } {
+  const entries = Object.entries(refused).filter((entry): entry is [string, number] => isCount(entry[1]))
+  const total = entries.reduce((sum, [, count]) => sum + count, 0)
+  if (entries.length === 0) return { total, text: undefined }
+  entries.sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  const shown = entries.slice(0, REFUSAL_PREVIEW).map(([code, count]) => `${code} ×${String(count)}`)
+  const hidden = entries.length - shown.length
+  const more = hidden > 0 ? ` · ${t('memory.tools.more', { count: hidden })}` : ''
+  return { total, text: `${shown.join(' · ')}${more}` }
+}
+
+/**
+ * The cumulative tool counters, one row per group. The host names no card in
+ * them, so the page shows them as they are; a group the host did not send is
+ * not rendered. Refusal reasons are the host's stable codes, shown verbatim.
+ */
+function ToolStats(props: { stats: MemoryToolStats; t: TranslateNS<typeof NS> }): ReactNode {
+  const { stats, t } = props
+  const { save, recall, forget, gate } = stats
+  const reasons = save === undefined ? undefined : refusalReasons(save.refused, t)
+  // No group at all is no block: a title over an empty list reads as a page
+  // that failed to load.
+  if (save === undefined && recall === undefined && forget === undefined && gate === undefined) return null
+  return (
+    <div className="dshm_projects">
+      <div className="dshm_projectsTitle">{t('memory.tools.title')}</div>
+      <div className="dshm_hint">{t('memory.tools.hint')}</div>
+      {save === undefined
+        ? null
+        : (
+          <>
+            <div className="dshm_activityRow">
+              <span className="dshm_activityTime">{t('memory.tools.save')}</span>
+              <span className="dshm_metricLine">{t('memory.tools.save.row', {
+                created: String(save.created),
+                updated: String(save.updated),
+                unchanged: String(save.unchanged),
+                refused: String(reasons?.total ?? 0),
+              })}</span>
+            </div>
+            {reasons === undefined || reasons.total === 0 || reasons.text === undefined
+              ? null
+              : <div className="dshm_hint dshm_toolReasons">{t('memory.tools.save.reasons', { reasons: reasons.text })}</div>}
+          </>
+        )}
+      {recall === undefined
+        ? null
+        : (
+          <>
+            <div className="dshm_activityRow">
+              <span className="dshm_activityTime">{t('memory.tools.recall')}</span>
+              <span className="dshm_metricLine">{t('memory.tools.recall.row', {
+                topic: String(recall.topic),
+                query: String(recall.query),
+                list: String(recall.list),
+                empty: String(recall.empty),
+                fallback: String(recall.fallback),
+                relaxed: String(recall.relaxed),
+                refused: String(recall.refused ?? 0),
+              })}</span>
+            </div>
+            {/* Counts only a topic-key or keyword answer; a state file written
+                before the buckets existed reads as three zeroes, which is
+                "not measured" and is not worth a line. */}
+            {recall.hits === undefined || (recall.hits.one ?? 0) + (recall.hits.few ?? 0) + (recall.hits.many ?? 0) === 0
+              ? null
+              : <div className="dshm_hint dshm_toolReasons">{t('memory.tools.recall.hits', {
+                one: String(recall.hits.one ?? 0),
+                few: String(recall.hits.few ?? 0),
+                many: String(recall.hits.many ?? 0),
+              })}</div>}
+          </>
+        )}
+      {forget === undefined
+        ? null
+        : (
+          <div className="dshm_activityRow">
+            <span className="dshm_activityTime">{t('memory.tools.forget')}</span>
+            <span className="dshm_metricLine">{t('memory.tools.forget.row', {
+              byTopic: String(forget.byTopic),
+              byText: String(forget.byText),
+              removed: String(forget.removed),
+            })}</span>
+          </div>
+        )}
+      {gate === undefined
+        ? null
+        : (
+          <div className="dshm_activityRow">
+            <span className="dshm_activityTime">{t('memory.tools.gate')}</span>
+            <span className="dshm_metricLine">{t('memory.tools.gate.row', {
+              duplicate: String(gate.duplicate),
+              related: String(gate.related),
+            })}</span>
+          </div>
+        )}
+    </div>
+  )
 }
 
 /** Relocate one card into another project (the legacy-global drain). */
@@ -335,6 +547,9 @@ function CardRow(props: {
         >
         <span className="dshm_entryText">{card.pinned ? '📌 ' : ''}{summaryLine(card.summary)}</span>
         <span className="dshm_entryMeta">{t('memory.card.meta', { category: categoryLabel(card.category, t), topic: card.topic, updated: card.updated })}</span>
+        {card.withheld === true
+          ? <span className="dshm_entryMeta dshm_metricWarn">{t('memory.card.withheld')}</span>
+          : null}
         {expanded
           ? <span className="dshm_entryBody">{body ?? t('memory.card.bodyLoading')}</span>
           : null}
@@ -393,8 +608,10 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   const [projectRows, setProjectRows] = useState<{ slug: string, cards: MemoryCardRow[] } | null>(null)
   const [expandedCards, setExpandedCards] = useState<ReadonlySet<string>>(new Set())
   const [archive, setArchive] = useState<MemoryArchiveRow[] | null>(null)
-  /** Why the last archive write failed, when it did. An empty list otherwise reads
-   *  as "nothing was deleted" while the card really is gone (see `lastArchiveError`). */
+  /** Why the newest refused deletion of a listed store was refused, when one
+   *  was: the host answers the latest persisted refusal of the stores this list
+   *  covers. A refusal means the card is STILL in the memory list — its undo
+   *  copy could not be written, so the delete was cancelled. */
   const [archiveError, setArchiveError] = useState<string | undefined>(undefined)
   const [archiveExpanded, setArchiveExpanded] = useState(false)
   // The project whose maintenance pass is in flight, if any: the pass can run
@@ -689,11 +906,20 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
         setNotice({ source: 'key', key: 'memory.notice.archiveDropped', params: { topic: target.topic } })
         await loadArchive()
       } else if (target.kind === 'archive-all') {
-        await fetchJson(`${ROUTE_PREFIX}/archive-clear`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scope: 'all' }),
-        })
+        try {
+          await fetchJson(`${ROUTE_PREFIX}/archive-clear`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: 'all' }),
+          })
+        } catch (failure) {
+          // The host may have cleared the readable stores and refused the rest
+          // (`route.archiveClearPartial`, a 500). What it did clear is gone
+          // from disk, so the panel must not keep offering to restore it.
+          await loadArchive()
+          await load()
+          throw failure
+        }
         setNotice({ source: 'key', key: 'memory.notice.archiveCleared', params: { count: target.count } })
         await loadArchive()
       } else if (target.kind === 'move-overwrite') {
@@ -727,6 +953,15 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   const moveTargets = status === null
     ? []
     : status.projects.filter(project => project.slug !== LEGACY_GLOBAL_SLUG && project.movable !== false)
+  // The ledger's "what was left out" lines, computed once per render: each is
+  // undefined when the host sent no such field, and the line is then not drawn.
+  const latestLoss = status?.injection === undefined ? undefined : injectionLossText(status.injection.latest, t)
+  const meanLoss = status?.injection === undefined ? undefined : injectionLossText(status.injection.mean, t)
+  // The refused deletes, newest first. The host already answers them newest
+  // first (`MemoryRoot.archiveFailures` reverses its FIFO), so the most
+  // recent few are the head — slicing the tail and reversing would show the
+  // OLDEST refusals as if they were the latest.
+  const archiveFailures = (status?.archiveFailures ?? []).slice(0, ARCHIVE_FAILURE_PREVIEW)
 
   return (
     <div className="dshm_section">
@@ -736,6 +971,11 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
       </p>
 
       {error !== undefined ? <div className="dshm_banner" role="alert">{noticeText(error, t)}</div> : null}
+      {/* A config the host cannot parse is read as defaults and never written
+          back over: the switches below would LOOK writable and not persist. */}
+      {status?.configUnreadable === true
+        ? <div className="dshm_banner" role="alert">{t('memory.config.unreadable')}</div>
+        : null}
       {notice !== undefined ? <div className="dshm_noticeOk">{noticeText(notice, t)}</div> : null}
       {/* A destructive confirmation is a body-portal modal, not a banner at the
           top of the section: the button that armed it sits far down the list,
@@ -797,13 +1037,25 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
           <div className="dshm_projects">
             <div className="dshm_projectsTitle">{t('memory.injection.title')}</div>
             <div className="dshm_hint">{t('memory.injection.hint')}</div>
+            {/* Which store the last assembly read: every number below is about
+                THAT project, and a mean over several projects says nothing
+                about any one of them. */}
+            {typeof status.injection.latest.project !== 'string' || status.injection.latest.project === ''
+              ? null
+              : <div className="dshm_hint">{t('memory.injection.project', { title: scopeTitle(status.injection.latest.project, status.projects) })}</div>}
             <div className="dshm_activityRow">
-              <span className="dshm_metricLine">{t('memory.injection.latest')} · {injectionText(status.injection.latest, t)}</span>
+              <div className="dshm_metricStack">
+                <span className="dshm_metricLine">{t('memory.injection.latest')} · {injectionText(status.injection.latest, t)}</span>
+                {latestLoss === undefined ? null : <span className="dshm_metricLine">{latestLoss}</span>}
+              </div>
             </div>
             <div className="dshm_activityRow">
-              <span className="dshm_metricLine">
-                {t('memory.injection.mean', { samples: String(status.injection.samples) })} · {injectionText(status.injection.mean, t)}
-              </span>
+              <div className="dshm_metricStack">
+                <span className="dshm_metricLine">
+                  {t('memory.injection.mean', { samples: String(status.injection.samples) })} · {injectionText(status.injection.mean, t)}
+                </span>
+                {meanLoss === undefined ? null : <span className="dshm_metricLine">{meanLoss}</span>}
+              </div>
             </div>
             <div className="dshm_hint">
               {t('memory.injection.cards', {
@@ -813,6 +1065,11 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
             </div>
           </div>
         )}
+
+      {/* The tool counters: how often each memory tool ran, and how its calls
+          ended. The rate questions ("how often is a save refused?") need a
+          denominator the event ledger cannot keep, which is what these are. */}
+      {status?.toolStats === undefined ? null : <ToolStats stats={status.toolStats} t={t} />}
 
       {/* The change ledger (D) has no panel here on purpose: a panel that
           cannot be acted on competed with 已删除的记忆 below, which is the one
@@ -827,6 +1084,32 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
             {archiveError === undefined
               ? null
               : <div className="dshm_hint">{t('memory.archive.failed', { detail: archiveError })}</div>}
+            {/* Deletes the host REFUSED because their undo copy could not be
+                written: the card is still in its memory list, so this is the
+                one archive panel that lists cards that are not archived. */}
+            {archiveFailures.length === 0
+              ? null
+              : (
+                <>
+                  <div className="dshm_bannerWarn">
+                    {t('memory.archive.failures', {
+                      count: status?.archiveFailures?.length ?? archiveFailures.length,
+                      shown: archiveFailures.length,
+                    })}
+                  </div>
+                  {archiveFailures.map(failure => (
+                    <div key={`${String(failure.at)}-${failure.scope}-${failure.topic}`} className="dshm_activityRow">
+                      <span className="dshm_activityTime">
+                        {t('memory.archive.failureRow', {
+                          time: formatStamp(failure.at),
+                          scope: scopeTitle(failure.scope, status?.projects),
+                          topic: failure.topic,
+                        })}
+                      </span>
+                    </div>
+                  ))}
+                </>
+              )}
             {archive.length === 0
               ? <div className="dshm_hint">{t('memory.archive.empty')}</div>
               : null}
@@ -835,7 +1118,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
                 <span className="dshm_activityTime">{t('memory.archive.row', {
                   topic: entry.topic,
                   day: entry.day,
-                  scope: projectTitle(status?.projects.find(p => p.slug === entry.slug) ?? { slug: entry.slug, cwd: '' }),
+                  scope: scopeTitle(entry.slug, status?.projects),
                 })}</span>
                 <button
                   type="button"
@@ -903,66 +1186,82 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
             {legacyCards > 0
               ? <div className="dshm_bannerWarn">{t('memory.legacy.banner', { count: String(legacyCards) })}</div>
               : null}
-            {status.projects.map(project => (
-              <div key={project.slug} className="dshm_projectBlock">
-                <div className="dshm_projectRow">
-                  <Tooltip label={project.cwd === '' ? project.slug : project.cwd} side="top" maxWidth={640}>
-                    <span className="dshm_projectName">{projectTitle(project)}</span>
-                  </Tooltip>
-                  <span className="dshm_projectMeta">{t('memory.projects.meta', { cards: String(project.cards), size: fmtBytes(project.sizeBytes) })}</span>
-                  <button
-                    type="button"
-                    className="dshm_button"
-                    aria-expanded={openSlug === project.slug}
-                    disabled={busy}
-                    onClick={() => { void onToggleProject(project) }}
-                  >{openSlug === project.slug ? t('memory.action.collapse') : t('memory.action.items')}</button>
-                  <button
-                    type="button"
-                    className="dshm_button"
-                    disabled={busy}
-                    onClick={() => { void onCurate(project) }}
-                  >{curatingSlug === project.slug ? t('memory.action.curating') : t('memory.action.curate')}</button>
-                  <button
-                    type="button"
-                    className="dshm_button dshm_buttonDanger"
-                    disabled={busy}
-                    onClick={() => { setConfirming({ kind: 'clear', slug: project.slug, title: projectTitle(project), cards: project.cards }) }}
-                  >{t('memory.action.delete')}</button>
+            {status.projects.map(project => project.error !== undefined
+              // A store nobody could read (plan P10): the row says so instead
+              // of showing "0 entries · 0 B" over a directory that may hold
+              // cards. No action is offered — entries, curate and delete would
+              // all fail on that directory, and a dead control teaches nothing.
+              ? (
+                <div key={project.slug} className="dshm_projectBlock">
+                  <div className="dshm_projectRow">
+                    <Tooltip label={project.cwd === '' ? project.slug : project.cwd} side="top" maxWidth={640}>
+                      <span className="dshm_projectName">{projectTitle(project)}</span>
+                    </Tooltip>
+                  </div>
+                  <div className="dshm_bannerWarn">{t('memory.projects.unreadable', { reason: project.error })}</div>
                 </div>
-                {openSlug === project.slug
-                  ? (
-                    projectRows === null || projectRows.slug !== project.slug
-                      ? <div className="dshm_hint">{t('memory.projects.loading')}</div>
-                      : projectRows.cards.length === 0
-                        ? <div className="dshm_hint">{t('memory.projects.empty')}</div>
-                        : projectRows.cards.map(card => (
-                          <CardRow
-                            key={card.topic}
-                            card={card}
-                            body={card.body}
-                            expanded={expandedCards.has(rowKey(project.slug, card.topic))}
-                            busy={busy}
-                            t={t}
-                            onToggle={() => { onToggleCard(project.slug, card.topic) }}
-                            onPin={() => { void onPin(project.slug, card.topic, !card.pinned) }}
-                            onForget={() => { setConfirming({ kind: 'forget', slug: project.slug, topic: card.topic, summary: card.summary, pinned: card.pinned }) }}
-                            moveTargets={project.slug === LEGACY_GLOBAL_SLUG ? moveTargets : undefined}
-                            onMove={target => {
-                              const title = moveTargets.find(entry => entry.slug === target)
-                              void onMove(
-                                project.slug,
-                                card.topic,
-                                target,
-                                title === undefined ? target : projectTitle(title),
-                              )
-                            }}
-                          />
-                        ))
-                  )
-                  : null}
-              </div>
-            ))}
+              )
+              : (
+                <div key={project.slug} className="dshm_projectBlock">
+                  <div className="dshm_projectRow">
+                    <Tooltip label={project.cwd === '' ? project.slug : project.cwd} side="top" maxWidth={640}>
+                      <span className="dshm_projectName">{projectTitle(project)}</span>
+                    </Tooltip>
+                    <span className="dshm_projectMeta">{t('memory.projects.meta', { cards: String(project.cards), size: fmtBytes(project.sizeBytes) })}</span>
+                    <button
+                      type="button"
+                      className="dshm_button"
+                      aria-expanded={openSlug === project.slug}
+                      disabled={busy}
+                      onClick={() => { void onToggleProject(project) }}
+                    >{openSlug === project.slug ? t('memory.action.collapse') : t('memory.action.items')}</button>
+                    <button
+                      type="button"
+                      className="dshm_button"
+                      disabled={busy}
+                      onClick={() => { void onCurate(project) }}
+                    >{curatingSlug === project.slug ? t('memory.action.curating') : t('memory.action.curate')}</button>
+                    <button
+                      type="button"
+                      className="dshm_button dshm_buttonDanger"
+                      disabled={busy}
+                      onClick={() => { setConfirming({ kind: 'clear', slug: project.slug, title: projectTitle(project), cards: project.cards }) }}
+                    >{t('memory.action.delete')}</button>
+                  </div>
+                  <ProjectMetrics project={project} t={t} />
+                  {openSlug === project.slug
+                    ? (
+                      projectRows === null || projectRows.slug !== project.slug
+                        ? <div className="dshm_hint">{t('memory.projects.loading')}</div>
+                        : projectRows.cards.length === 0
+                          ? <div className="dshm_hint">{t('memory.projects.empty')}</div>
+                          : projectRows.cards.map(card => (
+                            <CardRow
+                              key={card.topic}
+                              card={card}
+                              body={card.body}
+                              expanded={expandedCards.has(rowKey(project.slug, card.topic))}
+                              busy={busy}
+                              t={t}
+                              onToggle={() => { onToggleCard(project.slug, card.topic) }}
+                              onPin={() => { void onPin(project.slug, card.topic, !card.pinned) }}
+                              onForget={() => { setConfirming({ kind: 'forget', slug: project.slug, topic: card.topic, summary: card.summary, pinned: card.pinned }) }}
+                              moveTargets={project.slug === LEGACY_GLOBAL_SLUG ? moveTargets : undefined}
+                              onMove={target => {
+                                const title = moveTargets.find(entry => entry.slug === target)
+                                void onMove(
+                                  project.slug,
+                                  card.topic,
+                                  target,
+                                  title === undefined ? target : projectTitle(title),
+                                )
+                              }}
+                            />
+                          ))
+                    )
+                    : null}
+                </div>
+              ))}
           </div>
         )
         : null}

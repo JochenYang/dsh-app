@@ -421,19 +421,20 @@ test('migrateLegacyGlobalScope: a destination already holding the topic is not o
 
 // --- injection selection ----------------------------------------------------------
 
-test('selectCards: per-category quota keeps the most recently updated cards', async () => {
+test('selectCards: no category quota — a budget that fits carries every card, newest first', async () => {
   const store = tmpStore()
   for (let i = 1; i <= 5; i += 1) {
     await store.upsert({ name: `lesson-${String(i)}`, category: 'lesson', summary: `s${String(i)}`, body: `第 ${String(i)} 条` })
-    // Force distinct updated stamps so the quota order is deterministic.
+    // Force distinct updated stamps so the order is deterministic.
     const card = store.get(`lesson-${String(i)}`)!
     writeFileSync(join(store.dir, 'topics', `lesson-${String(i)}.md`), renderCard({ ...card, updated: `2026-09-0${String(i)}` }), 'utf8')
   }
   const sel = selectCards(store.list(), 10_000, new Set())
-  assert.equal(sel.selected.length, 2, 'lesson quota is 2')
-  assert.ok(sel.selected.some(card => card.name === 'lesson-5'), 'newest kept')
-  assert.ok(sel.selected.some(card => card.name === 'lesson-4'))
-  assert.equal(sel.truncated, true)
+  // V1: the per-category cap (2 for lessons) used to leave 3 of these 5 on the
+  // floor with the budget wide open. Lessons are 63% of a real library; the
+  // cap, not the budget, dropped a card in 8 of 25 real stores.
+  assert.deepEqual(sel.selected.map(card => card.name), ['lesson-5', 'lesson-4', 'lesson-3', 'lesson-2', 'lesson-1'], 'all five, newest first')
+  assert.equal(sel.truncated, false, 'nothing was left out, so the ledger says so')
 })
 
 test('selectCards: pinned cards always win, an oversized pin is clipped not dropped', async () => {
@@ -445,11 +446,19 @@ test('selectCards: pinned cards always win, an oversized pin is clipped not drop
   assert.equal(sel.truncated, true)
 })
 
-test('renderCardBlock: malformed cards render verbatim, normal cards get a heading', () => {
+test('renderCardBlock: one line per card — key, class, date, then the body (hand-edited files too)', () => {
   const normal = parseCard('k', renderCard({ name: 'k', category: 'fact', summary: 's', created: '2026-01-01', updated: '2026-01-02', body: '正文', malformed: false }))
-  assert.ok(renderCardBlock(normal).startsWith('### k [fact]'))
+  // V2: the two-line `### key [category] (updated date)` heading cost ~62
+  // characters per card; this one costs ~35 and the class and date stay.
+  assert.equal(renderCardBlock(normal), '- k [fact] (2026-01-02): 正文')
+  // A hand-edited file used to arrive as bare text with nothing to cite. It
+  // gets the same key line now; its body still follows verbatim.
   const malformed = parseCard('hand', '手改内容')
-  assert.equal(renderCardBlock(malformed), '手改内容')
+  assert.equal(malformed.malformed, true)
+  assert.match(renderCardBlock(malformed), /^- hand \[fact\] \(\d{4}-\d{2}-\d{2}\): 手改内容$/u)
+  // The block is line-oriented (one card per line, under an index that is one
+  // card per line): a newline inside a body must not read as a second entry.
+  assert.equal(renderCardBlock({ ...normal, body: '第一行\n第二行' }), '- k [fact] (2026-01-02): 第一行 第二行')
 })
 
 test('renderMemoryText: the project index and cards inject; the retired root scope never does', async () => {
@@ -897,14 +906,20 @@ test('archive prune: the retention boundary is the configured window, not looser
   assert.equal(existsSync(justExpired), false)
 })
 
-test('archive: an unarchivable target still lets the deletion through, and says so', async () => {
+test('archive: an unarchivable target refuses the deletion, and says so', async () => {
   const store = tmpStore()
   await save(store, 'blocked-card', '内容')
   // Make the archive path unusable: a FILE where the directory must go.
   writeFileSync(join(store.dir, 'archive'), 'not a directory')
-  assert.equal(await store.remove('blocked-card', 'forget'), true, 'the removal the caller asked for still happens')
-  assert.equal(store.get('blocked-card'), undefined)
-  assert.equal(store.lastArchiveError() !== undefined, true, 'the failure is recorded, not swallowed silently')
+  // The archive IS the undo, so a card that cannot be copied into it is
+  // never deleted — the same invariant the three-state read enforces for a
+  // card that cannot be read. (Until 2026-11-22 the deletion went through
+  // and the failure was only remembered; the undo it promised did not exist.)
+  await assert.rejects(store.remove('blocked-card', 'forget'), /cannot archive the card "blocked-card"/u)
+  assert.equal(store.get('blocked-card')?.body, '内容', 'the card is still there')
+  // The failure is recorded in the ROOT's persisted list (a bare store has no
+  // ledger): `P1 remove: an archive copy that cannot be written…` in
+  // store-safety.test.ts pins that row.
 })
 
 // --- ledger (why is this card gone) -------------------------------------------
@@ -1050,12 +1065,13 @@ test('card-text discipline forbids narrating the saving, not the vocabulary', ()
   assert.match(CARD_TEXT_DISCIPLINE, /narrating the SAVING, not on these words/, 'and says which is banned')
 })
 
-test('every card-text surface carries the discipline', () => {
+test('every card-text surface carries the discipline, and the guidelines no longer do', () => {
   const root = tmpRoot()
+  const guidelines = renderMemoryText(root, undefined)
   const surfaces: Record<CardTextSurface, string> = {
-    // The always-on guidelines ride every assembly in every session.
-    guidelines: renderMemoryText(root, undefined),
     curator: buildCuratePrompt('store text').system,
+    // The rule only matters while a save is being shaped, and that is when
+    // the model reads this description — so it is one of the two surfaces.
     memory_save: SAVE_TOOL_DESCRIPTION,
   }
   // Walked from the shared roster: a NEW surface added to the plugin without
@@ -1066,6 +1082,12 @@ test('every card-text surface carries the discipline', () => {
       `the ${name} surface must carry the shared card-text discipline verbatim`,
     )
   }
+  // V5: the always-on guidelines are NOT a surface any more. They rode along
+  // with every assembly of every session and spent 1027 characters on a rule
+  // that nothing reads outside a save; that room went to card bodies.
+  assert.deepEqual([...CARD_TEXT_SURFACES], ['memory_save', 'curator'])
+  assert.equal(guidelines.includes(CARD_TEXT_DISCIPLINE), false, 'the guidelines must not carry the whole discipline')
+  assert.equal(guidelines.includes(CARD_TEXT_DISCIPLINE.split('\n')[0]!), false, 'nor its opening line')
 })
 
 // --- injection growth policy & the read side of a card -----------------------
@@ -1078,9 +1100,12 @@ test('renderMemoryText: a capped index announces the cut and the consolidation t
     await save(store, key, `第 ${String(index)} 张卡的正文`, 'fact', `卡 ${String(index)}`)
   }
   const text = renderMemoryText(root, 'D:/codes/Demo')
-  // Index lines, not every "- " line: the guidelines above also carry bullets.
+  // Index lines, not every "- " line: the guidelines above carry bullets, and
+  // since V2 every injected card body is a "- key [class] (date): body" line
+  // too. An index line is `- [class] key — summary`: the bracket comes first
+  // and the key is followed by an em dash.
   const indexLines = text.split('\n')
-    .filter(line => /^- (📌 )?\[(preference|convention|decision|lesson|fact)\] /u.test(line))
+    .filter(line => /^- (📌 )?\[(preference|convention|decision|lesson|fact)\] [a-z0-9-]+ — /u.test(line))
   assert.equal(indexLines.length, 50, 'the index is cut at its ceiling, not injected whole')
   // A cut with no growth policy leaks every topic past it: the note has to name
   // the ceiling, the recall path AND what the model can do about the overflow.
@@ -1107,6 +1132,12 @@ test('renderMemoryText: the guidelines carry the read side — a card is a snaps
   assert.match(text, /outweighs any card/)
   assert.match(text, /trust the observation/)
   assert.match(text, /memory_forget when the fact is retracted/)
+  // R3: reading the cards that happen to fit is not using the library. Over
+  // two months of real sessions there were 18 recalls and 0 keyword searches,
+  // so the read side has to ask for the recall, every turn.
+  assert.match(text, /Each turn, SCAN the index/)
+  assert.match(text, /call memory_recall\s+for them BEFORE answering/)
+  assert.match(text, /just some card bodies are\s+injected/)
 })
 
 test('card-text discipline: guidance cards carry the reason and the boundary', () => {
@@ -1163,11 +1194,12 @@ test('containsCredential recognises credential shapes, not only key names', () =
 /** The five categories in the order memory-store sorts them. */
 const CATEGORIES: MemoryCategory[] = ['preference', 'convention', 'decision', 'lesson', 'fact']
 
-test('selectCards: rotation spends the budget across every category, not the first two', async () => {
+test('selectCards: every category keeps one card — a floor, not a quota', async () => {
   const store = tmpStore()
   // 60 full-length cards, 12 per category: the shape that produced
   // bodiesInjectedByCategory = {preference: 3, convention: 3} and zero bodies for
-  // the other three. Blocks, not rotation, was why.
+  // the other three when the buckets were walked one after another. The floor
+  // (the freshest card of each class goes first) is what replaced the quota.
   for (const category of CATEGORIES) {
     for (let i = 0; i < 12; i += 1) {
       await save(store, `${category}-${String(i).padStart(2, '0')}`, 'x'.repeat(370), category, 'y'.repeat(40))
@@ -1182,10 +1214,10 @@ test('selectCards: rotation spends the budget across every category, not the fir
   assert.equal(sel.truncated, true, 'something is still left out, and the ledger still says so')
 })
 
-test('selectCards: rotation never lets a pin fall behind the round-robin', async () => {
+test('selectCards: a pin is never crowded out by the cards after it', async () => {
   const store = tmpStore()
-  // Full buckets ahead of the pinned card in the SAME category: rotation shifts
-  // ordinary cards earlier, so this pins that a pin is still chosen and whole.
+  // Full buckets ahead of the pinned card in the SAME category: the pin is
+  // chosen before any of them and stays whole.
   for (const category of CATEGORIES) {
     for (let i = 0; i < 4; i += 1) {
       await save(store, `${category}-${String(i).padStart(2, '0')}`, 'x'.repeat(300), category, 'y'.repeat(40))
@@ -1203,13 +1235,18 @@ test('assembleMemoryText: the ledger measures what the body budget does NOT boun
   const root = tmpRoot()
   const store = root.projectFor('D:/codes/Demo')
   for (let i = 0; i < 60; i += 1) {
-    await save(store, `card-${String(i).padStart(2, '0')}`, 'x'.repeat(370), CATEGORIES[i % CATEGORIES.length]!, 'y'.repeat(40))
+    // A 48-character key (the legal maximum): see the index assertion below.
+    await save(store, `card-${String(i).padStart(2, '0')}-${'k'.repeat(40)}`, 'x'.repeat(370), CATEGORIES[i % CATEGORIES.length]!, 'y'.repeat(40))
   }
   const assembly = assembleMemoryText(root, 'D:/codes/Demo')
   const metrics = assembly.metrics
   assert.ok(metrics !== undefined, 'a project-scoped assembly carries a ledger')
   assert.equal(metrics.totalChars, assembly.text.length, 'total is exactly what the prompt received')
   assert.equal(metrics.indexLines, 50, 'the index is capped at its ceiling, and the ledger says how many lines rode')
+  // Long keys on purpose: fifty lines of (key + summary) are what makes the
+  // index alone outweigh the body budget, which is the fact this assertion
+  // exists to pin — with short keys the capped index fits inside it and the
+  // check would pass for the wrong reason.
   assert.ok(metrics.indexChars > MAX_PROJECT_CHARS, '索引单独就超过正文预算 — 这正是它必须进账的原因')
   assert.ok(metrics.bodyChars <= MAX_PROJECT_CHARS, 'the bodies stay inside the budget they are the only subject of')
   assert.equal(metrics.truncated, true)
@@ -1227,7 +1264,10 @@ test('InjectionMetricsRing: bounded, latest wins, the mean covers the ring', () 
   const ring = new InjectionMetricsRing()
   assert.equal(ring.summary(), undefined, 'a fresh mount answers "no data", not four zeroes')
   for (let i = 0; i < MAX_INJECTION_SAMPLES + 5; i += 1) {
-    ring.record({ guidelinesChars: 10, indexChars: 20, bodyChars: 30, totalChars: 60, cardCount: 1, indexLines: 1, truncated: i % 2 === 0 }, 'demo-aaaaaaaa', 1_000 + i)
+    ring.record({
+      guidelinesChars: 10, indexChars: 20, bodyChars: 30, totalChars: 60, cardCount: 1, indexLines: 1,
+      droppedCards: 0, indexOverflowLines: 0, truncated: i % 2 === 0, shieldedCards: 0,
+    }, 'demo-aaaaaaaa', 1_000 + i)
   }
   assert.equal(ring.size(), MAX_INJECTION_SAMPLES, 'the ring is bounded — the prompt path may not grow forever')
   const summary = ring.summary()!

@@ -11,10 +11,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { MAX_TOPIC_BODY_CHARS, MemoryRoot, MemoryStore, cardFingerprint, contentHash, projectSlug, type LedgerEntry } from '../src/memory-store.ts'
+import { MAX_TOPIC_BODY_CHARS, MemoryRoot, MemoryStore, cardFingerprint, contentHash, projectSlug } from '../src/memory-store.ts'
 import { scratchRoot, scratchStore, scratchDir } from './scratch.ts'
 import { CARD_TEXT_DISCIPLINE } from '../src/card-discipline.ts'
-import { CURATE_BUDGET, MemoryCurator, buildCuratePrompt, serializeStore } from '../src/curator.ts'
+import { CURATE_BUDGET, MemoryCurator, buildCuratePrompt, serializeStore, type CurateApplyResult } from '../src/curator.ts'
 import { apply as applyHost } from '../src/index.ts'
 
 const tmpRoot = (): MemoryRoot => scratchRoot('dshm-bg-')
@@ -36,26 +36,11 @@ const curatorApply = async (
   store: MemoryStore,
   structured: unknown,
   seen?: ReadonlyMap<string, string>,
-): Promise<{
-  merged: number
-  deleted: number
-  rewritten: number
-  skippedUnseen: number
-  skippedStale: number
-  events: Array<Omit<LedgerEntry, 'at' | 'scope' | 'pass' | 'session'>>
-}> => {
+): Promise<CurateApplyResult> => {
   const curator = new MemoryCurator(null as never, new MemoryRoot(store.dir), console as never)
   const full = seen ?? new Map(store.list().map(card => [card.name, contentHash(cardFingerprint(card))]))
-  type Result = {
-    merged: number
-    deleted: number
-    rewritten: number
-    skippedUnseen: number
-    skippedStale: number
-    events: Array<Omit<LedgerEntry, 'at' | 'scope' | 'pass' | 'session'>>
-  }
   return (curator as unknown as {
-    applyEdits(s: MemoryStore, u: unknown, seen: ReadonlyMap<string, string>): Promise<Result>
+    applyEdits(s: MemoryStore, u: unknown, seen: ReadonlyMap<string, string>): Promise<CurateApplyResult>
   }).applyEdits(store, structured, full)
 }
 
@@ -186,10 +171,14 @@ test('curator applyEdits: a merge duplicating a surviving card is rejected', asy
 test('curator applyEdits: at most twenty edits per pass', async () => {
   const store = tmpStore()
   for (let i = 0; i < 21; i += 1) await seed(store, `card-${String(i).padStart(2, '0')}`, `第${String(i)}条互不相同的内容`)
-  const edits = Array.from({ length: 21 }, (_, i) => ({ op: 'delete', topics: [`card-${String(i).padStart(2, '0')}`] }))
+  // REWRITES, not deletes: one pass may also delete only a quarter of a store
+  // (maxDeletesPerPass — 6 of these 21 cards), and 21 single-key deletes would
+  // stop at that ceiling long before the edit cap. This test is about the cap.
+  const edits = Array.from({ length: 21 }, (_, i) => ({ op: 'rewrite', topic: `card-${String(i).padStart(2, '0')}`, content: `重写后的第${String(i)}条内容` }))
   const result = await curatorApply(store, { edits })
-  assert.equal(result.deleted, 20)
-  assert.equal(store.list().length, 1)
+  assert.equal(result.rewritten, 20)
+  assert.equal(store.list().length, 21, 'a rewrite removes nothing; the twenty-first edit was never looked at')
+  assert.equal(store.get('card-20')?.body, '第20条互不相同的内容', 'the edit past the cap did not land')
 })
 
 // --- buildCuratePrompt ---------------------------------------------------------
@@ -222,8 +211,11 @@ test('buildCuratePrompt: the rename op is documented in the rules and the contra
   const { system } = buildCuratePrompt('input')
   assert.match(system, /rename: ONE card whose topic KEY is wrong/, 'the rule states when to use it')
   assert.match(system, /the ONLY way a lone card can/, 'and why no other op covers it')
-  assert.match(system, /"op": "rename"/, 'the output contract shows the shape')
-  assert.match(system, /a merge with exactly ONE cited key and a NEW target topic/, 'and ties it to the shape already shown')
+  // The contract shows a rename AS a one-key merge — the shape the host
+  // applies. It used to show `"op": "rename"`, which the host then skipped.
+  assert.match(system, /\{"op": "merge", "topics": \["<old-key>"\], "target"/, 'the output contract shows the shape')
+  assert.doesNotMatch(system, /"op": "rename"/, 'and never an op the host would drop')
+  assert.match(system, /A rename is a merge with exactly ONE cited key and a NEW target topic/, 'and ties it to the shape already shown')
 })
 
 test('buildCuratePrompt: pinned keys are named as never edited', () => {
@@ -318,9 +310,12 @@ test('curate budget: 30 full cards fit the char target (no permanent over-budget
   for (let i = 0; i < 30; i += 1) await seed(store, `full-${String(i)}`, 'x'.repeat(MAX_TOPIC_BODY_CHARS))
   // The serialized store (index + headings + bodies) must stay under the
   // char target when the card count is exactly at target — otherwise every
-  // healthy full store would be permanently "over budget".
-  const text = store.indexText() + store.list().map(card => `### ${card.name} [lesson] (updated ${card.updated})\n${card.body}`).join('\n\n')
-  assert.ok(text.length <= CURATE_BUDGET.chars, `30 full cards = ${String(text.length)} chars must fit the ${String(CURATE_BUDGET.chars)}-char target`)
+  // healthy full store would be permanently "over budget". Measured through
+  // the REAL serializer: the hand-rolled formula this used to add up left
+  // out the `; domain X, refs N` heading suffix the pass actually sends.
+  const pass = serializeStore(store)
+  assert.equal(pass.truncated, false, 'a store AT the card target is carried in ONE pass — the input cap never stops it')
+  assert.ok(pass.text.length <= CURATE_BUDGET.chars, `30 full cards = ${String(pass.text.length)} chars must fit the ${String(CURATE_BUDGET.chars)}-char target`)
 })
 
 // --- read-before-edit (input cap) ---------------------------------------------
@@ -575,7 +570,8 @@ test('serializeStore: a rotated start still reports every card when the whole li
 
 test('serializeStore: the anchor names the first card the cap dropped, and it is never in seen', async () => {
   const store = tmpStore()
-  // Full-size bodies (the card cap is 400 chars): 120 cards ≈ 48k of body text,
+  // Full-size bodies (the card cap is MAX_TOPIC_BODY_CHARS): 120 cards ≈ 60k
+  // of body text,
   // comfortably past the 40k input cap while staying a legal store.
   for (let i = 0; i < 120; i += 1) await seed(store, `big-${String(i).padStart(3, '0')}`, 'x'.repeat(MAX_TOPIC_BODY_CHARS))
   const out = serializeStore(store)
@@ -716,7 +712,9 @@ test('ledger: an edit over the cited-keys ceiling is recorded as over-limit', as
 test('ledger: a pass writes the ledger ONCE, not once per event', async () => {
   const store = tmpStore()
   const keys: string[] = []
-  for (let i = 0; i < 12; i += 1) {
+  // 24 cards: the per-pass delete ceiling is a quarter of the store (6 here),
+  // and six deletes are what this test needs to land.
+  for (let i = 0; i < 24; i += 1) {
     const key = `batch-${String(i).padStart(2, '0')}`
     await seed(store, key, `内容 ${String(i)}`)
     keys.push(key)
@@ -851,16 +849,17 @@ test('curator progress: a pass whose WRITE failed does not record the store as d
   ])
   const curator = new MemoryCurator(ctx as never, root, console as never)
   type Curate = (target: { label: string, store: MemoryStore }, route: { provider: string, model: string }, id: never) => Promise<void>
-  await assert.rejects(
-    (curator as unknown as { curate: Curate })
-      .curate({ label: 'global', store: root.global }, { provider: 'p', model: 'm' }, 'session-write-fail' as never),
-    /file locked/,
-    'the write failure surfaces',
-  )
+  // The pass no longer throws: an edit the filesystem refused is ledgered as
+  // `io-failed` (the rows of the edits before it are kept — they used to be
+  // lost with the throw) and the pass ends without recording the store.
+  await (curator as unknown as { curate: Curate })
+    .curate({ label: 'global', store: root.global }, { provider: 'p', model: 'm' }, 'session-write-fail' as never)
   // Recording here would mark the store reviewed although this pass never got
   // past its first edit — the cards it never reached would never be looked at
   // again. The fingerprint must stay absent so the sweep retries.
   assert.equal(root.curatedHashOf('global'), undefined, 'a half-applied pass records nothing')
+  const refused = root.ledgerEntries().find(row => row.rejected === 'io-failed')
+  assert.deepEqual(refused?.keys, ['fail-write-0'], 'and the ledger says which edit the filesystem refused')
 })
 
 // --- the manual trigger: the settings page's "curate now" button -------------
@@ -1015,7 +1014,11 @@ test('curator applyEdits: a one-key merge onto ITSELF is still rejected', async 
     edits: [{ op: 'merge', topics: ['solo-card'], target: { topic: 'solo-card', summary: 's', category: 'fact', content: '内容' } }],
   })
   assert.equal(out.merged, 0, 'rejected: this is what rewrite is for')
-  assert.equal(out.events.length, 0, 'and it is not recorded as a rename')
+  // Refused, and recorded AS refused — never as an applied rename. (Before the
+  // refusal counting it was a bare `continue`: applied nowhere, counted
+  // nowhere.)
+  assert.equal(out.skippedInvalid, 1)
+  assert.ok(out.events.every(event => event.rejected !== undefined), 'and nothing is recorded as applied')
 })
 
 test('curator applyEdits: a rename cannot land on an existing uncited key', async () => {

@@ -43,6 +43,18 @@ export interface MemoryCardRow {
   /** Full body (the rows /entries serves, which the page expands in place). */
   body?: string
   pinned: boolean
+  /**
+   * Short id of the session whose `memory_save` created the card. Absent on
+   * cards written before the field existed (and on hand-written files).
+   */
+  source?: string
+  /**
+   * The card's text looks like it carries a credential: no session is shown
+   * it, and the background curator leaves it alone. Present only while that
+   * is so — the page then says so beside the card, because whether it stays
+   * is the user's decision and nothing else on the page would tell them.
+   */
+  withheld?: boolean
 }
 
 /** One project's memory summary in the settings page. */
@@ -77,6 +89,19 @@ export interface MemoryProjectSummary {
   cardWarn: boolean
   /** Index lines are in the warning band (80% of the injection ceiling). */
   indexWarn: boolean
+  /**
+   * Why this store could not be read (a broken directory, an unreadable
+   * file). Present only on a degraded row: its metrics read as zero and it
+   * is not a move target, so one broken store cannot take the whole page
+   * down. The page shows the reason on the row instead of the zeroed numbers.
+   */
+  error?: string
+  /**
+   * This store's own `config.json` cannot be parsed. Its pins then read as
+   * "none" and a pin write is refused, so the page must not offer the pin
+   * button as if it worked. Present only while that is so.
+   */
+  configUnreadable?: boolean
 }
 
 /** One background-LLM audit row (cost observability). Rows written before the
@@ -216,9 +241,17 @@ export interface MemoryLedgerRow {
    * written before the field existed (and on non-curate rows).
    */
   domain?: string
-  /** Present when the edit was REFUSED instead of applied. */
-  rejected?: 'unseen' | 'stale' | 'over-limit'
-  /** Short session id (curate only). */
+  /**
+   * Present when the edit was REFUSED instead of applied. `invalid` is a
+   * proposal wrong by its own shape (a key that does not exist, a pinned
+   * card, an over-long or credential-bearing body, a card whose text was
+   * withheld from the model); `archive-failed` is a deletion the host refused
+   * because its archive copy could not be written; `io-failed` is an edit the
+   * host tried to apply and the filesystem refused — nothing changed.
+   */
+  rejected?: 'unseen' | 'stale' | 'over-limit' | 'invalid' | 'archive-failed' | 'io-failed'
+  /** Short session id: every curate row, and a forget row made by a tool
+   *  call (a settings-page delete names none). */
   session?: string
 }
 
@@ -262,6 +295,20 @@ export interface MemoryStatus {
    * the signal that the growth happened.
    */
   warnings: MemoryWarningCounts
+  /**
+   * Cumulative counts of the memory tools' calls. Absent until the first call
+   * is counted (or on a state file written before counting existed).
+   */
+  toolStats?: MemoryToolStats
+  /**
+   * Recent refused deletions (bounded FIFO, NEWEST FIRST). A card whose
+   * archive could not be written is NOT deleted any more, so each row is a
+   * deletion that was refused, not one that went ahead without an undo.
+   */
+  archiveFailures?: MemoryArchiveFailure[]
+  /** True when `config.json` could not be parsed: pins and toggles read as
+   *  defaults, and nothing is written back over the broken file. */
+  configUnreadable?: boolean
 }
 
 /** Aggregate warning counts across every project store. */
@@ -274,6 +321,77 @@ export interface MemoryWarningCounts {
   indexWarning: number
   /** Stores above the injection ceiling (lines are being cut). */
   indexOverflow: number
+}
+
+/**
+ * Cumulative call counts of `memory_save` / `memory_recall` / `memory_forget`
+ * and of the write-time similarity gate.
+ *
+ * The ledger is a FIFO of recent events, so it cannot answer a rate ("how
+ * often is a save refused?", "how often does recall come back empty?"): those
+ * need a denominator that does not expire. Counters do not name cards, so
+ * they carry no content.
+ */
+export interface MemoryToolStats {
+  save: {
+    created: number
+    updated: number
+    unchanged: number
+    /** Refusals by stable reason code (`content-too-long`, `named-secret`,
+     *  `token-prefix`, `invalid-input`, …): the rule's own code for a
+     *  credential, the tool's for everything else. */
+    refused: Record<string, number>
+  }
+  recall: {
+    /** Fetched one card by its exact topic key. */
+    topic: number
+    /** Filtered by keyword query. */
+    query: number
+    /** Listed the whole project. */
+    list: number
+    /** Calls (of any mode) that reached the store and came back with no card. */
+    empty: number
+    /** Topic misses that fell back to a keyword search. */
+    fallback: number
+    /** Keyword searches that had to drop a term before hitting anything. */
+    relaxed: number
+    /**
+     * Calls refused before the store was asked (memory disabled, no workspace,
+     * the retired scope). Counted apart from `empty`: a refusal is not a
+     * recall that found nothing, and booking it there made the miss rate read
+     * higher than it was.
+     */
+    refused: number
+    /**
+     * How many cards the answers that came from a topic key or a keyword
+     * search carried: exactly one, two to five, six or more. A recall that is
+     * precise reads `one`; a broad `many` is the shape a narrower topic key
+     * would have avoided. A whole-store listing is not a hit and is not
+     * bucketed.
+     */
+    hits: { one: number, few: number, many: number }
+  }
+  forget: {
+    byTopic: number
+    byText: number
+    removed: number
+  }
+  /** Write-time gate: hard rejections and `related` hints handed back. */
+  gate: {
+    duplicate: number
+    related: number
+  }
+}
+
+/** One refused deletion: the archive copy could not be written. */
+export interface MemoryArchiveFailure {
+  /** Epoch ms. */
+  at: number
+  /** 'global' or a project slug. */
+  scope: string
+  topic: string
+  /** What the archive write failed with (diagnostic, not a secret). */
+  error: string
 }
 
 /** One assembly's character ledger, as /status serves it. The host-side shape
@@ -296,12 +414,15 @@ export interface MemoryInjectionSample {
   cardCount: number
   /** Index lines injected. */
   indexLines: number
-  /** Cards whose body was NOT injected (budget or per-category quota). */
+  /** Cards whose body was NOT injected (left to the budget or the width cap,
+   *  or withheld as credential-looking). */
   droppedCards: number
   /** Index lines left out by the ceiling (0 when the index fits). */
   indexOverflowLines: number
   /** Whether any card was left out. */
   truncated: boolean
+  /** Cards whose text was NOT injected because it looked like a credential. */
+  shieldedCards: number
 }
 
 /** The /status injection block: latest assembly + the ring's averages. */
@@ -318,6 +439,7 @@ export interface MemoryInjectionSummary {
     indexLines: number
     droppedCards: number
     indexOverflowLines: number
+    shieldedCards: number
   }
   /** How many samples had cards left out. */
   truncatedSamples: number

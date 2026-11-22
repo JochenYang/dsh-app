@@ -22,6 +22,7 @@ import {
   CARD_WARN_AT,
   INDEX_WARN_AT,
   MemoryRoot,
+  cardIsWithheld,
   cardsFingerprint,
   contentHash,
   contentSimilarity,
@@ -87,7 +88,12 @@ export function storeHealth(store: MemoryStore, scope: string): StoreHealthRow {
   const cards: TopicCard[] = store.list()
   const metrics = store.metrics(cards)
   const pinned = store.pinnedSet()
-  const injected = selectCards(cards, MAX_PROJECT_CHARS, pinned).selected.length
+  // The same cards the injection may choose from: a withheld card (credential
+  // shape) never reaches `selectCards` there, so it must not here either — or
+  // `bodiesInjected` would count a body no session ever gets. It stays inside
+  // `droppedCards`, which is what the page's loss line reports too.
+  const injectable = cards.filter(card => !cardIsWithheld(card))
+  const injected = selectCards(injectable, MAX_PROJECT_CHARS, pinned).selected.length
   const drift = store.indexDrift()
   return {
     scope,
@@ -199,7 +205,10 @@ function sum(rows: readonly StoreHealthRow[], pick: (row: StoreHealthRow) => num
 
 /**
  * Audit one memory root. A missing root answers zero rows — an empty directory
- * is a legitimate state (a fresh kernel), not an error.
+ * is a legitimate state (a fresh kernel), not an error. A store that cannot be
+ * read is skipped and named on stderr (plan P10's rule, in the audit's own
+ * instance): this audit is the one instrument a before/after comparison has,
+ * so one broken directory must not cost the healthy stores their numbers.
  *
  * @param rootDir - the memory root (`$DSH_HOME/storages/dsh-app-plugin-memory`).
  */
@@ -211,7 +220,11 @@ export function auditRoot(rootDir: string): RootHealth {
   // never hides cards.
   const global = storeHealth(root.global, 'global')
   if (global.cards > 0) rows.push(global)
-  for (const project of listProjects(rootDir)) {
+  for (const project of listProjects(rootDir, { keepUnreadable: true })) {
+    if (project.error !== undefined) {
+      process.stderr.write(`memory-health: skipped "${project.slug}" (cannot be read: ${project.error})\n`)
+      continue
+    }
     const store = root.projectBySlug(project.slug)
     if (store === undefined) continue
     rows.push(storeHealth(store, project.slug))

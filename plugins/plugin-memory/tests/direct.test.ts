@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { scratchRoot } from './scratch.ts'
-import { extractJson, resolveLlm, streamJson } from '../src/llm-direct.ts'
+import { MAX_DIRECT_ERROR_CHARS, extractJson, resolveLlm, safeErrorText, streamJson } from '../src/llm-direct.ts'
 import { repairDoublePrefix, stripEntryPrefix } from '../src/memory-store.ts'
 import { buildCuratePrompt } from '../src/curator.ts'
 
@@ -277,4 +277,120 @@ test('streamJson keeps a caller abort distinct from our timeout', async () => {
   const result = await streamJson(aborting as never, { ...SPEC, signal: controller.signal, timeoutMs: 5_000 })
   assert.equal(result.status, 'aborted')
   assert.equal(result.error, 'aborted')
+})
+
+// --- K1: a failed call keeps what it cost and says why --------------------------
+//
+// The audit that motivated these: 25 days of llm-audit.json held 22 errors and
+// 3 aborts, every one of them with 0 / 0 tokens and no cause. An answer that
+// is not JSON is the most expensive failure the curator has (up to 8000 output
+// tokens), and it was booked as free.
+
+test('streamJson keeps the tokens of a call that ended in unparseable JSON', async () => {
+  const result = await streamJson(stubLlm([
+    { type: 'text-delta', index: 0, text: 'Sure! Here is my plan:' },
+    { type: 'usage', usage: { inputTokens: 4321, outputTokens: 2765 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]), SPEC)
+  assert.equal(result.status, 'error')
+  assert.match(result.error ?? '', /unparseable/)
+  assert.equal(result.inputTokens, 4321)
+  assert.equal(result.outputTokens, 2765)
+})
+
+test('streamJson keeps the tokens a timed-out attempt had already been billed', async () => {
+  const billedThenHung = {
+    async *stream(): AsyncIterable<Record<string, unknown>> {
+      yield { type: 'usage', usage: { inputTokens: 8_000, outputTokens: 120 } }
+      await new Promise<never>(() => { /* never settles */ })
+    },
+  }
+  const result = await streamJson(billedThenHung as never, { ...SPEC, timeoutMs: 120 })
+  assert.equal(result.status, 'error')
+  assert.match(result.error ?? '', /timeout/)
+  assert.equal(result.inputTokens, 8_000)
+  assert.equal(result.outputTokens, 120)
+})
+
+test('streamJson sums what rate-limited attempts spent and flags the exhaustion', { timeout: 30_000 }, async (t) => {
+  // The real backoff is 1 s + 2 s; a mocked clock makes the retries instant.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let attempts = 0
+  const limited = {
+    async *stream(): AsyncIterable<Record<string, unknown>> {
+      attempts += 1
+      yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 0 } }
+      yield { type: 'finish', reason: { kind: 'error', failure: { message: 'too many requests', status: 429 } } }
+    },
+  }
+  const run = streamJson(limited as never, { ...SPEC, timeoutMs: 10 ** 9 })
+  let done = false
+  void run.then(() => { done = true }, () => { done = true })
+  for (let i = 0; i < 60 && !done; i += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    t.mock.timers.tick(3_000)
+  }
+  const result = await run
+  assert.equal(attempts, 3, 'the initial attempt plus two retries')
+  assert.equal(result.status, 'error')
+  assert.equal(result.error, 'rate limited')
+  assert.equal(result.rateLimited, true, 'the caller can tell this failure from the store’s own')
+  assert.equal(result.inputTokens, 300, 'every attempt re-sent the whole prompt — that is three prompts billed')
+})
+
+test('streamJson redacts a credential the provider echoes in its error', async () => {
+  const echoed = 'Ab3'.repeat(16)
+  const result = await streamJson(stubLlm([
+    { type: 'finish', reason: { kind: 'error', failure: { message: `401 incorrect api key sk-abcdefghijklmnopqrstuvwx (${echoed})` } } },
+  ]), SPEC)
+  assert.equal(result.status, 'error')
+  assert.match(result.error ?? '', /401 incorrect api key/, 'the cause is still readable')
+  assert.ok(!result.error!.includes('sk-abcdefghijklmnopqrstuvwx'))
+  assert.ok(!result.error!.includes(echoed))
+})
+
+test('safeErrorText keeps an ordinary cause intact', () => {
+  for (const cause of [
+    'timeout: stream did not finish within 180000ms',
+    'unparseable JSON response',
+    'llm error: model "deepseek-chat" not found (HTTP 404, request id: 4b0f1c2e-8d7a-4b3e-9f10-11a2b3c4d5e6)',
+  ]) {
+    assert.equal(safeErrorText(cause), cause)
+  }
+})
+
+test('safeErrorText redacts the credential shapes a provider error carries', () => {
+  const opaque = 'Ab3'.repeat(16)
+  const cases: Array<[string, RegExp]> = [
+    // A query-string credential: the key name and the rest of the URL stay.
+    [`retry https://api.example.com/v1?key=${opaque}&mode=x`, /^retry https:\/\/api\.example\.com\/v1\?key=\[redacted\]&mode=x$/],
+    [`retry https://api.example.com/v1?access_token=${opaque}`, /\?access_token=\[redacted\]$/],
+    [`rejected (bearer ${opaque})`, /^rejected \(bearer \[redacted\]\)$/],
+    [`401 incorrect api key sk-abcdefghijklmnopqrstuvwx`, /^401 incorrect api key \[redacted\]$/],
+    [`proxy https://alice:${opaque}@proxy.example/y`, /^proxy https:\/\/\[redacted\]@proxy\.example\/y$/],
+    [`x-api-key: ${opaque}`, /^x-api-key: \[redacted\]$/],
+    [`password=${opaque}`, /^password=\[redacted\]$/],
+    // A raw key with no name in sight: a base64 run, a JWT, bare hex.
+    [`rejected ${opaque}`, /^rejected \[redacted\]$/],
+    [`rejected eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c`, /^rejected \[redacted\]$/],
+    [`rejected ${'3f2a9c1e7b5d8046a1c9e2f4b7d60935'.repeat(2)}`, /^rejected \[redacted\]$/],
+  ]
+  for (const [cause, expected] of cases) {
+    const safe = safeErrorText(cause)
+    assert.match(safe, expected, cause)
+    assert.ok(!safe.includes(opaque) && !safe.includes('sk-abcdefghijklmnopqrstuvwx'), cause)
+  }
+  // An ordinary long identifier is not a secret and stays readable.
+  assert.equal(
+    safeErrorText('llm error: stream_did_not_finish_within_the_allocated_deadline_window'),
+    'llm error: stream_did_not_finish_within_the_allocated_deadline_window',
+  )
+})
+
+test('safeErrorText caps the cause at the audit width and is idempotent', () => {
+  assert.equal(MAX_DIRECT_ERROR_CHARS, 200)
+  const capped = safeErrorText('x'.repeat(900))
+  assert.equal(capped.length, MAX_DIRECT_ERROR_CHARS)
+  const once = safeErrorText(`denied: token=${'Ab3'.repeat(20)}`)
+  assert.equal(safeErrorText(once), once, 're-running a redacted cause changes nothing (the curator logs the same string it audits)')
 })

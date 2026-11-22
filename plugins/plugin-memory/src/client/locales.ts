@@ -4,11 +4,10 @@
  *
  * The namespace is declared by the client entry (`src/client.ts`, the
  * `declare module` merge into `LocaleNamespaceMap`); this module owns the
- * keys. zh is the source of truth and stays byte-identical to the pre-i18n
- * page copy; {@link MemoryKey} is its key union, and the English dictionary
- * is typed with it, so a missing or extra key on either side is a compile
- * error. The same union constrains the page's `t` seat (`TranslateNS`), so a
- * key removed from the dictionary cannot be rendered.
+ * keys. zh is the source of truth; {@link MemoryKey} is its key union, and the
+ * English dictionary is typed with it, so a missing or extra key on either side
+ * is a compile error. The same union constrains the page's `t` seat
+ * (`TranslateNS`), so a key removed from the dictionary cannot be rendered.
  *
  * The `memory.host.*` keys hold the sentences for messages the HOST half used
  * to write itself: it now sends a stable code plus the values to interpolate
@@ -21,7 +20,7 @@
 /** Locale namespace owned by this plugin's client half. */
 export const NS = 'dsh-app.memory'
 
-/** Simplified Chinese dictionary — the pre-i18n page copy, verbatim. */
+/** Simplified Chinese dictionary — the source of truth. */
 export const zh = {
   'memory.nav': '会话记忆',
   'memory.title': '会话记忆',
@@ -47,9 +46,9 @@ export const zh = {
   'memory.card.pin': '固定',
   'memory.card.pin.aria': '固定这条记忆',
   'memory.card.pinned': '已固定',
-  'memory.card.unpin': '取消固定',
   'memory.card.unpin.aria': '取消固定这条记忆',
   'memory.card.delete.aria': '删除这条记忆',
+  'memory.card.withheld': '疑似含凭据：不注入任何会话，后台整理也不会动它；去留由你决定',
   'memory.category.preference': '偏好',
   'memory.category.convention': '约定',
   'memory.category.decision': '决策',
@@ -59,6 +58,13 @@ export const zh = {
   'memory.projects.meta': '{cards} 条 · {size}',
   'memory.projects.loading': '加载中…',
   'memory.projects.empty': '（暂无记忆）',
+  'memory.projects.unreadable': '无法读取这个项目的记忆目录（{reason}）。里面的卡片可能还在；修复或移走该目录后会自动恢复。',
+  'memory.projects.configUnreadable': '该项目的 config.json 无法解析：固定状态读不出来，修改也不会保存',
+  'memory.projects.metric.domains': '{domains} 个领域（最大的 {max} 张）',
+  'memory.projects.metric.rot': '含易过期内容 {rot} 张',
+  'memory.projects.metric.stale': '长期未更新 {stale} 张',
+  'memory.projects.cardWarn': '卡片数接近整理上限',
+  'memory.projects.indexWarn': '索引行数接近注入上限',
   'memory.action.collapse': '收起',
   'memory.action.items': '条目',
   'memory.action.curate': '整理',
@@ -70,7 +76,7 @@ export const zh = {
   'memory.confirm.forgetPinnedTitle': '删除已固定的记忆',
   'memory.confirm.forgetTitle': '删除这条记忆',
   'memory.confirm.clearMessage': '即将删除{target}（{cards} 条），连同它已有的撤销副本一起删除，之后无法恢复。只想删一条、并保留可恢复副本时，请用卡片上的「删除」。',
-  'memory.confirm.forgetMessage': '即将从{where}中删除这条记忆：\n「{summary}」（名称：{topic}）\n删除后不可恢复。',
+  'memory.confirm.forgetMessage': '即将从{where}中删除这条记忆：\n「{summary}」（名称：{topic}）\n删除前会先留一份副本，保留 {days} 天或最近 {max} 条，期间可在「已删除的记忆」里恢复。',
   'memory.notice.enabled': '已启用：新会话将注入记忆，模型可主动记录',
   'memory.notice.disabled': '已禁用：新会话不再注入记忆，保存工具将拒绝写入',
   'memory.notice.distillOn': '已开启后台整理：记忆发生变化后，会在冷却窗口内合并近似主题、清理重复与过时条目',
@@ -82,7 +88,7 @@ export const zh = {
   'memory.notice.clearedProject': '已删除项目「{title}」的记忆',
   'memory.notice.curateCompleted': '已整理：合并 {merged} 张、删除 {deleted} 张、改写 {rewritten} 张',
   'memory.notice.curateNothing': '整理完成：没有需要改动的记忆',
-  'memory.notice.curateRefused': '整理完成：没有改动落地，{refused} 条提案被拒绝（见「最近整理记录」）',
+  'memory.notice.curateRefused': '整理完成：没有改动落地，{refused} 条提案被保护规则拒绝，记忆内容未变',
   'memory.notice.curateBusy': '已经有一次整理在进行，请稍后再试',
   'memory.notice.curateNoRoute': '需要至少一个打开中的会话来借用模型路由，稍后再试',
   'memory.notice.curateDisabled': '会话记忆已禁用，先在上面的开关里启用',
@@ -99,6 +105,7 @@ export const zh = {
   'memory.host.projectUnknown': '未知的项目 slug',
   'memory.host.topicInvalid': 'topic 必须是合法的主题名（ASCII kebab-case）',
   'memory.host.pinnedNotBoolean': 'pinned 必须是布尔值',
+  'memory.host.configUnreadable': '设置文件 config.json 无法解析，本次修改未写入；请修复或删除该文件后重试',
   'memory.host.topicUnknown': '未知的主题',
   'memory.host.matchRequired': 'match 必须是非空字符串',
   'memory.host.enabledNotBoolean': 'enabled 必须是布尔值',
@@ -108,9 +115,10 @@ export const zh = {
   'memory.host.clearProjectFailed': '清空项目记忆失败，请稍后重试',
   'memory.archive.title': '已删除的记忆（{count}）',
   'memory.archive.hint': '后台整理（合并近似主题、清理重复）与手动删除都会先把原文件复制到归档目录，保留 {days} 天或最近 {max} 条，之后自动清理。恢复会把该条放回记忆列表；同名记忆已存在时不会覆盖。清空记忆会一并清空归档。',
-  'memory.archive.loading': '加载中…',
   'memory.archive.empty': '（归档为空）',
-  'memory.archive.failed': '上次删除的撤销副本没能写入（{detail}），这张卡已无法恢复。',
+  'memory.archive.failed': '上次删除已取消：撤销副本没能写入（{detail}）。卡片仍在记忆列表里，修好归档目录后可以再试。',
+  'memory.archive.failures': '{count} 次删除因写不出撤销副本而被取消，卡片仍在记忆列表里。最近 {shown} 条：',
+  'memory.archive.failureRow': '{time} · {scope} · {topic}',
   'memory.archive.row': '{topic} · {day} · {scope}',
   'memory.archive.restore': '恢复',
   'memory.archive.restore.aria': '恢复这条记忆',
@@ -126,9 +134,10 @@ export const zh = {
   'memory.archive.restored': '已恢复「{topic}」',
   'memory.host.restoreOccupied': '同名记忆已存在，未覆盖',
   'memory.host.restoreMissing': '归档中没有这条记忆',
-  'memory.host.restoreInvalid': '归档条目的日期或主题名不合法',
+  'memory.host.restoreInvalid': '这份归档副本不是合法的卡片（格式损坏、超过长度上限或疑似含凭据），未恢复',
   'memory.host.restoreArgsRequired': '缺少 day 或 topic',
-  'memory.host.archiveFailed': '读取归档失败，请稍后重试',
+  'memory.host.archiveDeleteArgsRequired': '缺少 day 或 file',
+  'memory.host.archiveDeleteMissing': '归档中没有这份副本',
 
   // --- Draining the legacy-global holding pen (P0-1) and the injection ledger
   // (P0-2). ---
@@ -140,21 +149,45 @@ export const zh = {
   'memory.move.noTargets': '还没有可移动到的项目：先在目标项目里保存一条记忆，或直接把这张卡删除。',
   'memory.notice.moved': '已把「{topic}」移动到项目「{to}」',
   'memory.confirm.moveOverwriteTitle': '目标项目已有同名记忆',
-  'memory.confirm.moveOverwriteMessage': '项目「{to}」里已经有一条同名记忆（{topic}）：\n「{summary}」\n继续会用这次移动的版本覆盖它，被覆盖的内容不会保留。',
+  // The host's 409 names the topic only: the page has no summary to quote, and
+  // a placeholder nothing fills renders as a literal brace.
+  'memory.confirm.moveOverwriteMessage': '项目「{to}」里已经有一条同名记忆（{topic}）。\n继续会用这次移动的版本覆盖它，被覆盖的内容不会保留。',
   'memory.host.moveTargetLegacy': '「未归位」是旧全局卡的收容处，不能再作为移动目标',
   'memory.host.moveSameProject': '目标项目就是源项目',
   'memory.host.moveOccupied': '目标项目已有同名记忆，未覆盖',
   'memory.host.moveFailed': '移动失败：{detail}',
   'memory.host.forgetFailed': '删除失败：{detail}',
   'memory.host.movePartial': '无法确认移动是否完成或已回滚，请人工核对两个项目后再试',
+  'memory.host.archiveClearPartial': '已清空 {cleared} 条撤销副本；另有 {count} 个项目的归档未能完全清空：{slugs}',
   'memory.host.overwriteNotBoolean': 'overwrite 必须是布尔值',
+  // A config the host cannot parse is read as defaults and never written over:
+  // the switches would look writable and not persist.
+  'memory.config.unreadable': '记忆配置文件（config.json）无法解析：开关与固定按默认值读取，本页的改动不会被保存。请先修复该文件。',
   'memory.injection.title': '注入量实测',
-  'memory.injection.hint': '最近一次提示词装配实际注入的字符数。guidelines 与索引是每轮都要付的固定开销，只有「正文」受 2800 字符预算约束；没有这组数就没法判断预算是否真的在起作用。',
+  'memory.injection.hint': '最近一次提示词装配实际注入的字符数。guidelines 与索引是每轮都要付的固定开销，只有「正文」受正文预算约束；没有这组数就没法判断预算是否真的在起作用。',
   'memory.injection.latest': '最近一次',
   'memory.injection.mean': '近 {samples} 次均值',
+  'memory.injection.project': '最近一次装配所属的项目：{title}',
   'memory.injection.row': 'guidelines {guidelines} · 索引 {index}（{lines} 行）· 正文 {body} · 合计 {total}',
+  'memory.injection.loss': '正文未注入 {dropped} 张（其中疑似凭据屏蔽 {shielded} 张）· 索引截掉 {overflow} 行',
   'memory.injection.cards': '正文 {count} 张卡{truncated}',
   'memory.injection.truncated': '（仍有卡未注入）',
+
+  // --- The cumulative tool counters. Refusal reasons arrive as the host's
+  // stable codes and are shown verbatim. ---
+  'memory.tools.title': '工具调用计数',
+  'memory.tools.hint': 'memory_save / memory_recall / memory_forget 自开始统计以来的累计次数；只计数，不含任何记忆内容。',
+  'memory.tools.save': '保存',
+  'memory.tools.save.row': '创建 {created} · 更新 {updated} · 未变 {unchanged} · 被拒 {refused}',
+  'memory.tools.save.reasons': '被拒原因：{reasons}',
+  'memory.tools.more': '另有 {count} 种',
+  'memory.tools.recall': '召回',
+  'memory.tools.recall.row': '按键 {topic} · 检索 {query} · 列出 {list} · 空结果 {empty} · 回退 {fallback} · 降词 {relaxed} · 被拒 {refused}',
+  'memory.tools.recall.hits': '按键与检索每次返回的卡数：恰好 1 张 {one} · 2–5 张 {few} · 6 张以上 {many}',
+  'memory.tools.forget': '遗忘',
+  'memory.tools.forget.row': '按键删 {byTopic} · 文本扫除 {byText} · 共移除 {removed}',
+  'memory.tools.gate': '相似度闸',
+  'memory.tools.gate.row': '重复拒绝 {duplicate} · 相似提示 {related}',
 } as const
 
 /** English dictionary, key-identical to the Chinese source of truth. */
@@ -183,9 +216,9 @@ export const en: Record<MemoryKey, string> = {
   'memory.card.pin': 'Pin',
   'memory.card.pin.aria': 'Pin this memory',
   'memory.card.pinned': 'Pinned',
-  'memory.card.unpin': 'Unpin',
   'memory.card.unpin.aria': 'Unpin this memory',
   'memory.card.delete.aria': 'Delete this memory',
+  'memory.card.withheld': 'Looks like it carries a credential: no session is shown it and the background curator leaves it alone; whether it stays is yours to decide',
   'memory.category.preference': 'preference',
   'memory.category.convention': 'convention',
   'memory.category.decision': 'decision',
@@ -195,6 +228,13 @@ export const en: Record<MemoryKey, string> = {
   'memory.projects.meta': '{cards} entries · {size}',
   'memory.projects.loading': 'Loading…',
   'memory.projects.empty': '(no memory yet)',
+  'memory.projects.unreadable': 'This project\u2019s memory directory cannot be read ({reason}). Its cards may still be there; it recovers by itself once the directory is fixed or moved away.',
+  'memory.projects.configUnreadable': 'This project\u2019s config.json cannot be parsed: its pins cannot be read, and changes are not saved',
+  'memory.projects.metric.domains': '{domains} domains (largest {max})',
+  'memory.projects.metric.rot': '{rot} with rot-prone content',
+  'memory.projects.metric.stale': '{stale} long unedited',
+  'memory.projects.cardWarn': 'card count near the curation ceiling',
+  'memory.projects.indexWarn': 'index lines near the injection ceiling',
   'memory.action.collapse': 'Collapse',
   'memory.action.items': 'Entries',
   'memory.action.curate': 'Curate',
@@ -206,7 +246,7 @@ export const en: Record<MemoryKey, string> = {
   'memory.confirm.forgetPinnedTitle': 'Delete a pinned memory',
   'memory.confirm.forgetTitle': 'Delete this memory',
   'memory.confirm.clearMessage': 'About to delete {target} ({cards} entries) together with the undo copies it already has; neither can be recovered afterwards. To remove one card and keep a restorable copy, use the card’s own Delete.',
-  'memory.confirm.forgetMessage': 'About to delete this memory from {where}:\n"{summary}" (topic: {topic})\nThis cannot be undone.',
+  'memory.confirm.forgetMessage': 'About to delete this memory from {where}:\n"{summary}" (topic: {topic})\nA copy is kept first — for {days} days, or the newest {max} copies — and can be restored from "Deleted memory" meanwhile.',
   'memory.notice.enabled': 'Enabled: new sessions will inject memory, and the model may record on its own',
   'memory.notice.disabled': 'Disabled: new sessions no longer inject memory, and the save tools will refuse to write',
   'memory.notice.distillOn': 'Background maintenance is on: after memory changes, near-duplicate topics are merged and duplicates and stale entries are pruned inside a cooldown window',
@@ -218,7 +258,7 @@ export const en: Record<MemoryKey, string> = {
   'memory.notice.clearedProject': 'Deleted the memory of project "{title}"',
   'memory.notice.curateCompleted': 'Curated: {merged} merged, {deleted} deleted, {rewritten} rewritten',
   'memory.notice.curateNothing': 'Curated: nothing needed changing',
-  'memory.notice.curateRefused': 'Curated: nothing was applied — {refused} proposal(s) were refused (see the ledger)',
+  'memory.notice.curateRefused': 'Curated: nothing was applied — {refused} proposal(s) were refused by the safeguards; memory is unchanged',
   'memory.notice.curateBusy': 'A pass is already running; try again shortly',
   'memory.notice.curateNoRoute': 'Needs at least one open session to borrow a model route from — try again shortly',
   'memory.notice.curateDisabled': 'Session memory is disabled — enable it with the switch above',
@@ -232,6 +272,7 @@ export const en: Record<MemoryKey, string> = {
   'memory.host.projectUnknown': 'unknown project slug',
   'memory.host.topicInvalid': 'topic must be a valid topic key (ASCII kebab-case)',
   'memory.host.pinnedNotBoolean': 'pinned must be a boolean',
+  'memory.host.configUnreadable': 'config.json could not be parsed, so nothing was written; fix or remove the file and retry',
   'memory.host.topicUnknown': 'unknown topic',
   'memory.host.matchRequired': 'match must be a non-empty string',
   'memory.host.enabledNotBoolean': 'enabled must be a boolean',
@@ -242,9 +283,10 @@ export const en: Record<MemoryKey, string> = {
 
   'memory.archive.title': 'Deleted memory ({count})',
   'memory.archive.hint': 'Background maintenance (merging near-duplicate topics, clearing duplicates) and manual deletion both copy the original file into an archive first, kept for {days} days or the newest {max} entries. Restoring puts that entry back into the memory list; an existing memory with the same topic is never overwritten. Clearing memory clears the archive too.',
-  'memory.archive.loading': 'Loading…',
   'memory.archive.empty': '(the archive is empty)',
-  'memory.archive.failed': 'The undo copy for the last delete could not be written ({detail}); that card cannot be restored.',
+  'memory.archive.failed': 'The last delete was cancelled because its undo copy could not be written ({detail}). The card is still in the memory list; retry once the archive folder is writable.',
+  'memory.archive.failures': '{count} deletes were cancelled because the undo copy could not be written; the cards are still in the memory list. Newest {shown}:',
+  'memory.archive.failureRow': '{time} · {scope} · {topic}',
   'memory.archive.row': '{topic} · {day} · {scope}',
   'memory.archive.restore': 'Restore',
   'memory.archive.restore.aria': 'Restore this memory',
@@ -260,9 +302,10 @@ export const en: Record<MemoryKey, string> = {
   'memory.archive.restored': 'Restored "{topic}"',
   'memory.host.restoreOccupied': 'A memory with that topic already exists; nothing was overwritten',
   'memory.host.restoreMissing': 'No such entry in the archive',
-  'memory.host.restoreInvalid': 'The archived entry has a malformed day or topic',
+  'memory.host.restoreInvalid': 'The archived copy is not a valid card (malformed, over the size cap, or credential-like), so it was not restored',
   'memory.host.restoreArgsRequired': 'day or topic is missing',
-  'memory.host.archiveFailed': 'Could not read the archive. Try again later.',
+  'memory.host.archiveDeleteArgsRequired': 'day or file is missing',
+  'memory.host.archiveDeleteMissing': 'No such copy in the archive',
 
   'memory.legacy.banner': '{count} old "global" memories are still unassigned: they are on disk, but no session can read them. Open this row and use "Move to project…" on each card to assign it to a real project.',
   'memory.action.move': 'Move',
@@ -272,21 +315,39 @@ export const en: Record<MemoryKey, string> = {
   'memory.move.noTargets': 'No project can receive it yet: save one memory in the target project first, or just delete this card.',
   'memory.notice.moved': 'Moved "{topic}" to project "{to}"',
   'memory.confirm.moveOverwriteTitle': 'The target project already has that topic',
-  'memory.confirm.moveOverwriteMessage': 'Project "{to}" already holds a memory with the topic "{topic}":\n"{summary}"\nContinuing overwrites it with the version being moved; the replaced text is not kept.',
+  'memory.confirm.moveOverwriteMessage': 'Project "{to}" already holds a memory with the topic "{topic}".\nContinuing overwrites it with the version being moved; the replaced text is not kept.',
   'memory.host.moveTargetLegacy': '"Unassigned" is the holding pen for old global cards and cannot be a move target',
   'memory.host.moveSameProject': 'The target project is the source project',
   'memory.host.moveOccupied': 'The target project already has that topic; nothing was overwritten',
   'memory.host.moveFailed': 'The move failed: {detail}',
   'memory.host.forgetFailed': 'The delete failed: {detail}',
   'memory.host.movePartial': 'Cannot confirm whether the move completed or was rolled back; check both projects before retrying',
+  'memory.host.archiveClearPartial': 'Cleared {cleared} undo copies; the archive of {count} other project(s) could not be fully cleared: {slugs}',
   'memory.host.overwriteNotBoolean': 'overwrite must be a boolean',
+  'memory.config.unreadable': 'The memory config file (config.json) cannot be parsed: switches and pins read as defaults, and changes made on this page are not saved. Repair the file first.',
   'memory.injection.title': 'What injection actually costs',
-  'memory.injection.hint': 'Characters the last prompt assembly really injected. The guidelines and the index are fixed cost paid every turn; only the bodies are bounded by the 2800-character budget \u2014 without these numbers there is no way to tell whether that budget binds.',
+  'memory.injection.hint': 'Characters the last prompt assembly really injected. The guidelines and the index are fixed cost paid every turn; only the bodies are bounded by the body budget \u2014 without these numbers there is no way to tell whether that budget binds.',
   'memory.injection.latest': 'Last assembly',
   'memory.injection.mean': 'Mean of the last {samples}',
+  'memory.injection.project': 'Project of the last assembly: {title}',
   'memory.injection.row': 'guidelines {guidelines} · index {index} ({lines} lines) · bodies {body} · total {total}',
+  'memory.injection.loss': '{dropped} card bodies not injected ({shielded} of them withheld as credential-looking) · {overflow} index lines cut',
   'memory.injection.cards': '{count} card bodies{truncated}',
   'memory.injection.truncated': ' (some cards not injected)',
+
+  'memory.tools.title': 'Tool call counts',
+  'memory.tools.hint': 'Cumulative calls of memory_save / memory_recall / memory_forget since counting began; counts only, no memory content.',
+  'memory.tools.save': 'Save',
+  'memory.tools.save.row': '{created} created · {updated} updated · {unchanged} unchanged · {refused} refused',
+  'memory.tools.save.reasons': 'Refusal reasons: {reasons}',
+  'memory.tools.more': '{count} more',
+  'memory.tools.recall': 'Recall',
+  'memory.tools.recall.row': '{topic} by topic · {query} by query · {list} listed · {empty} empty · {fallback} fell back · {relaxed} relaxed · {refused} refused',
+  'memory.tools.recall.hits': 'Cards per topic-key or keyword answer: exactly 1 {one} · 2\u20135 {few} · 6 or more {many}',
+  'memory.tools.forget': 'Forget',
+  'memory.tools.forget.row': '{byTopic} by topic · {byText} by text sweep · {removed} removed',
+  'memory.tools.gate': 'Similarity gate',
+  'memory.tools.gate.row': '{duplicate} refused as duplicates · {related} flagged as related',
 }
 
 /** Key domain of the `dsh-app.memory` namespace (zh is the source of truth). */

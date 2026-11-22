@@ -12,7 +12,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { join } from 'node:path'
-import { MemoryRoot, type MemoryStore } from '../src/memory-store.ts'
+import { MAX_TOPIC_BODY_CHARS, MemoryRoot, type MemoryStore } from '../src/memory-store.ts'
 import { scratchRoot } from './scratch.ts'
 import { registerMemoryTools } from '../src/tools.ts'
 
@@ -220,8 +220,9 @@ test('memory_save: an update-path validation failure returns a structured reason
   const save = saveTool(tools)
   await save.execute(SAVE_ARGS, EXEC)
   // Over-long content on an EXISTING topic must come back as a correctable
-  // reason, not a store-level throw.
-  const tooLong = await save.execute({ ...SAVE_ARGS, content: 'x'.repeat(401) }, EXEC)
+  // reason, not a store-level throw. The cap is MAX_TOPIC_BODY_CHARS (500 since
+  // C1), so the fixture has to cross it.
+  const tooLong = await save.execute({ ...SAVE_ARGS, content: 'x'.repeat(MAX_TOPIC_BODY_CHARS + 1) }, EXEC)
   assert.equal(tooLong.saved, false)
   assert.match(tooLong.reason ?? '', /content too long/)
   const credentialSummary = await save.execute({ ...SAVE_ARGS, summary: 'api_key: sk-abc123def456' }, EXEC)
@@ -292,7 +293,7 @@ test('memory_recall: the retired scope and a workspace-less session are refused 
   assert.equal(noCwd.code, 'no-workspace')
 })
 
-test('memory_forget: topic key deletes one card; text sweeps by content', async () => {
+test('memory_forget: topic key deletes one card; a confirmed text sweeps by content', async () => {
   const root = scratchRoot('dshm-tools-forget-')
   await projectStore(root).upsert({ name: 'pnpm-typecheck', category: 'lesson', summary: 'pnpm 跑检查', body: '用 pnpm 跑 typecheck' })
   await projectStore(root).upsert({ name: 'tokyo-servers', category: 'fact', summary: '东京服务器', body: '服务器在东京' })
@@ -305,7 +306,8 @@ test('memory_forget: topic key deletes one card; text sweeps by content', async 
   assert.deepEqual(byKey.scopes?.project.removed, ['pnpm-typecheck'])
   assert.ok(projectStore(root).get('pnpm-typecheck') === undefined)
 
-  const byContent = await forget.execute({ match: '东京', scope: 'project' }, EXEC)
+  // P3: free text is a sweep, and a sweep needs the explicit confirmation.
+  const byContent = await forget.execute({ match: '东京', scope: 'project', sweep: 'text' }, EXEC)
   assert.equal(byContent.forgotten, 1)
   assert.equal(projectStore(root).list().length, 0)
 })

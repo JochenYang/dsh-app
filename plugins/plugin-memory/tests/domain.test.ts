@@ -252,10 +252,12 @@ test('D4 index cost: an inferred domain adds nothing, a declared one adds exactl
   const inferred = scratchStore('dshm-domain-cost-a-')
   for (let i = 0; i < 6; i += 1) await save(inferred, `dsh-card-${String(i)}`, `body ${String(i)}`)
   await inferred.reindex()
-  // The pre-domain line format, rebuilt here so the comparison is explicit.
+  // The line WITHOUT a domain prefix, rebuilt here so the comparison is
+  // explicit: `- [category] key — summary`, the shape an inferred domain
+  // must leave exactly as it finds it. (No `(updated …)` tail since V3.)
   // Trimmed, because `indexText()` trims the trailing newline of the stored file.
   const legacy = ['# Memory index (auto-generated from topics/; edits are overwritten)', '',
-    ...inferred.list().sort((a, b) => a.name.localeCompare(b.name)).map(card => `- [${card.category}] ${card.name} — ${card.summary} (updated ${card.updated})`), '']
+    ...inferred.list().sort((a, b) => a.name.localeCompare(b.name)).map(card => `- [${card.category}] ${card.name} — ${card.summary}`), '']
     .join('\n').trim()
   // EQUAL, not "at most": an inferred domain is already in the key, so a single
   // added character here would be the redundancy the design refuses.
