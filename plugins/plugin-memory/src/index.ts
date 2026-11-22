@@ -9,6 +9,15 @@
  *    (resolved from the assembling agent's session cwd; bounded, see
  *    prompt.ts), so a mid-session memory_save is visible to the next turn.
  *    The retired root-level scope injects nothing;
+ * 1b. two additions around that section, both background notes and both
+ *    absent when they have nothing to say:
+ *    - the memory index another coding assistant keeps for the same workspace
+ *      (ZCode), read-only, inside the section (see external-index.ts);
+ *    - the stored cards that bear on the CURRENT request (see relevance.ts),
+ *      OUTSIDE the section: the section is the cached prompt prefix and must
+ *      not change with every turn, so they ride as a runtime-context snapshot
+ *      (`ctx.systemPrompt.context`, a user-role message the kernel appends
+ *      only when its text changes);
  * 2. three LLM tools, `memory_save` / `memory_recall` / `memory_forget`
  *    (model-driven proactive saving with upsert semantics; the project comes
  *    from the executing agent's session cwd, never from model input, and a
@@ -33,7 +42,13 @@
  * then injected into every project's sessions. Measured in practice, that
  * put one workspace's research conclusions into all of them. Memory is now
  * what the model decides to keep through `memory_save`, into the memory of
- * the project it is working in; nothing subscribes to the session event feed.
+ * the project it is working in.
+ *
+ * The ONE subscription that remains is `agent/inbox/claimed`, and it is not
+ * the extractor come back: it only remembers, per agent, the text of the
+ * message a person typed — the request the request-relevant cards are picked
+ * for. No timer, no model call, no write, and nothing is done with any other
+ * event.
  *
  * Boot migrations, in order: a store still holding the pre-card `memory.md`
  * timeline is converted to topic cards deterministically (see
@@ -57,7 +72,9 @@
 import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 // Type-only: pulls the connection Context merge (ctx.connection) into scope.
 import type {} from '@deepseek-ai/dsh-client-connection'
 // Type-only: pulls the tools Context merge (ctx.tools) into scope.
@@ -71,6 +88,7 @@ import { MemoryRoot, projectSlug, type MemoryStore } from './memory-store.ts'
 import { MemoryCurator } from './curator.ts'
 import { lightSweep } from './light-sweep.ts'
 import { assembleMemoryText } from './prompt.ts'
+import { clipRequest } from './relevance.ts'
 import { InjectionMetricsRing } from './injection-metrics.ts'
 import { registerMemoryRoutes } from './routes.ts'
 import { registerMemoryTools } from './tools.ts'
@@ -98,6 +116,40 @@ export const Config: z<Config> = z.object({
 
 /** Tool-guidance section order (upstream convention: 100–199). */
 const PROMPT_SECTION_ORDER = 118
+
+/** Order of the request-relevant cards among the runtime contexts. Upstream
+ *  allocates its own up to 210 (`CONTEXT_ORDERS.WEB_SURFACE`); an outside
+ *  contribution may take any finite number, so this sits after all of them. */
+const RELEVANT_CONTEXT_ORDER = 300
+
+/** The runtime-context contribution's name. */
+const RELEVANT_CONTEXT_NAME = 'tool:memory-relevant'
+
+/**
+ * The text a person typed, or undefined for everything else that reaches the
+ * model as a user-role message. The harness injects its own material through
+ * the same inbox — runtime context, a skill catalog, a notice that a job
+ * finished, a relay from another agent — each under its own producer `kind`;
+ * only `kind: 'user'` is the request. An injected snapshot is no stand-in for
+ * it: a skill catalog or a runtime-context snapshot shares technical
+ * vocabulary with almost any card.
+ *
+ * What else arrives as `kind: 'user'`: a delegation prompt a swarm lead sends
+ * a teammate (its text IS what that agent is to work on, so attaching for it
+ * is right), and a few synthesized messages of the kernel's own, such as a
+ * `/goal` attachment note. The last one claimed wins; a short synthesized
+ * message after the request costs that step its attached cards and nothing
+ * else.
+ */
+function requestTextOf(message: UserMessage): string | undefined {
+  if (message.source.kind !== 'user') return undefined
+  let text = ''
+  for (const block of message.content) {
+    if (block.type === 'text') text += `${block.text}\n`
+  }
+  const request = clipRequest(text)
+  return request === '' ? undefined : request
+}
 
 /** The scope label the light sweep / curator logs and state key by. */
 function scopeLabel(root: MemoryRoot, store: MemoryStore): string {
@@ -138,6 +190,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     return
   }
 
+  // The request each agent is answering, and the request-relevant block picked
+  // for it at the last assembly. Keyed by the agent object, so an agent that
+  // goes away takes its entries with it. Two providers share them, and the
+  // order is the kernel's own: inside one `assemble()` the sections are
+  // resolved before the contexts, so the block the section provider computes
+  // here is what the context provider of the SAME assembly hands out — it can
+  // never name a card that assembly did not leave out of the section.
+  const requestOf = new WeakMap<Agent, string>()
+  const relevantOf = new WeakMap<Agent, string>()
+
   // Provider evaluated on every assembly: guidelines + the live current-project
   // index/cards, honoring the toggle without a restart.
   //
@@ -155,8 +217,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     order: PROMPT_SECTION_ORDER,
     interpolate: false,
     text: context => {
-      const cwd = context.agent?.session.header.cwd
-      const assembly = assembleMemoryText(root, cwd)
+      const agent = context.agent
+      const cwd = agent?.session.header.cwd
+      const request = agent === undefined ? undefined : requestOf.get(agent)
+      const assembly = assembleMemoryText(root, cwd, request === undefined ? {} : { relevantTo: request })
+      if (agent !== undefined) {
+        if (assembly.relevant === undefined) relevantOf.delete(agent)
+        else relevantOf.set(agent, assembly.relevant.text)
+      }
       // Measured at the ONE point an assembly exists, so the numbers can never
       // disagree with the text the prompt actually received. A session without
       // a workspace assembles only the static guidelines, so there is nothing
@@ -167,6 +235,36 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       return assembly.text
     },
   }), 'plugin-memory: system prompt section')
+
+  // The request-relevant cards (Z3). The kernel claims the inbox right before
+  // it assembles a step, so the listener below has the step's request by the
+  // time the section provider above runs.
+  //
+  // Why a runtime context and not a part of the section: the section is the
+  // prompt's cached prefix. A per-turn block inside it would invalidate that
+  // prefix on every turn the request changes — which is every turn. A context
+  // is a separate user-role snapshot the kernel appends ONLY when its text
+  // changes and marks as superseding the earlier ones, so an unchanged
+  // request (the steps of one turn) costs nothing and the prefix stays cached.
+  // The text must therefore be STABLE for a given agent between assemblies
+  // (it is re-read when the kernel refreshes contexts): it is the last
+  // assembly's block, not a fresh ranking.
+  //
+  // `interpolate: false` for the same reason as the section: card text.
+  ctx.inject(['agents'], agentCtx => {
+    agentCtx.on('agent/inbox/claimed', ({ agent, message }) => {
+      const request = requestTextOf(message)
+      if (request !== undefined) requestOf.set(agent, request)
+    })
+    agentCtx.effect(() => agentCtx.systemPrompt.context({
+      name: RELEVANT_CONTEXT_NAME,
+      order: RELEVANT_CONTEXT_ORDER,
+      interpolate: false,
+      // '' contributes nothing: no request, nothing relevant, or a session
+      // without a workspace.
+      text: context => context.agent === undefined ? '' : relevantOf.get(context.agent) ?? '',
+    }), 'plugin-memory: request-relevant cards context')
+  })
 
   // The write path's maintenance trigger. Tools mount regardless of the
   // agents/llm seam (below), so the curator half of the callback is a
@@ -202,13 +300,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // CONSOLIDATES memory that a memory_save already wrote; it calls the model
   // directly on the route of the session whose save triggered it.
   //
-  // Nothing subscribes to the session event feed: extraction from a
-  // conversation is retired for good. Its turn/end subscription was what
-  // armed a quiet-timer model call, and a session without a workspace had its
-  // cards written to the global scope — which was then injected into every
-  // project's sessions. The model saves what it judges worth keeping, through
-  // memory_save, into the memory of the project it is working in: no
-  // subscription, no timer, no request.
+  // The curator subscribes to nothing — extraction from a conversation is
+  // retired for good. Its turn/end subscription was what armed a quiet-timer
+  // model call, and a session without a workspace had its cards written to the
+  // global scope — which was then injected into every project's sessions. The
+  // model saves what it judges worth keeping, through memory_save, into the
+  // memory of the project it is working in: no subscription, no timer, no
+  // request. (The plugin's one remaining subscription is the request text
+  // above, which triggers nothing.)
   ctx.inject(['agents', 'llm'], memCtx => {
     const curator = new MemoryCurator(memCtx, root, log)
     // A save hands maintenance its trigger with the session id: the light

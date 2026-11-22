@@ -16,12 +16,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { scratchRoot } from './scratch.ts'
+import { scratchDir, scratchRoot } from './scratch.ts'
 import { removeTree } from '../src/remove-tree.ts'
 import { MemoryRoot, renderCard, type MemoryStore, type TopicCard } from '../src/memory-store.ts'
-import { MAX_PROJECT_CHARS, assembleMemoryText, renderCardBlock, renderMemoryText, selectCards } from '../src/prompt.ts'
+import { MAX_PROJECT_CHARS, RELEVANT_MAX_CHARS, assembleMemoryText, renderCardBlock, renderMemoryText, renderRelevantCards, selectCards } from '../src/prompt.ts'
 import { InjectionMetricsRing } from '../src/injection-metrics.ts'
 import { MEMORY_CATEGORIES, type MemoryCategory } from '../src/types.ts'
 
@@ -542,4 +543,233 @@ test('a project name with a line break in it cannot break the block headings', a
   const text = renderMemoryText(root, oddCwd)
   const heading = text.split('\n').find(line => /— index$/u.test(line))
   assert.equal(heading, '### Memory — current project (line break) — index')
+})
+
+// --- Z3: the request-relevant block --------------------------------------------------
+//
+// The section injects the newest bodies under a budget and leaves the rest to
+// memory_recall. The block under test is the second path: when the request
+// shares enough specific terms with a LEFT-OUT card, that card's body is handed
+// back beside the section (index.ts attaches it as a runtime-context snapshot).
+// The ranker's own rule is tested in relevance.test.ts; what is pinned here is
+// the assembly's use of it: only left-out cards, never a withheld one, outside
+// the section and its totals, bounded, framed.
+
+/** Identifiers the target cards carry and no filler does. */
+const Z3_TERMS = 'computedtransform transformtypo tolowercase splittransform iconbuttonname nativefocusring ariahidden'
+
+/** Six identifiers unique to filler `index`. */
+const fillerTerms = (index: number): string =>
+  ['zero', 'one', 'two', 'three', 'four', 'five'].map(word => `f${String(index)}ident${word}`).join(' ')
+
+/** A request long enough for the ranker's full floor (six) that names `terms`. */
+const z3Request = (terms: string): string => `Re-verify the fix: are ${terms} all covered? explain the reasoning step by step`
+
+/** Eight fillers of the widest ordinary size: seven fill the body budget, so
+ *  the eighth and every card dated before it are left out of the section. */
+const z3Fillers = (): TopicCard[] =>
+  Array.from({ length: 8 }, (_, index) =>
+    plain(`lesson-f${String(index)}`, sized(`filler ${String(index)} ${fillerTerms(index)}: `, 480), `2026-11-${String(10 + index).padStart(2, '0')}`))
+
+test('Z3: a request sharing distinctive terms with a left-out card attaches that card, outside the section and its totals', async () => {
+  const root = scratchRoot('dshm-sel-relevant-')
+  const store = root.projectFor(CWD)
+  await materialize(store, [...z3Fillers(), plain('svg-title-check', `SVG title elements report checkVisibility false; the fix covers ${Z3_TERMS}.`, '2026-01-01')])
+  const assembly = assembleMemoryText(root, CWD, { relevantTo: z3Request(Z3_TERMS) })
+  const metrics = assembly.metrics
+  assert.ok(metrics !== undefined)
+  assert.ok(!assembly.text.includes('- svg-title-check [lesson]'), 'the section leaves the card out (the budget)')
+  const relevant = assembly.relevant
+  assert.ok(relevant !== undefined, 'and the assembly hands it back separately')
+  assert.match(relevant.text, /^- svg-title-check \[lesson\] \(2026-01-01\): /mu)
+  assert.match(relevant.text, /^### Memory — cards related to the current request$/mu)
+  // Framed first, above the card: the block is a user-role snapshot, where
+  // card text alone would read as something the user said.
+  const framing = relevant.text.indexOf('reference material, NOT')
+  assert.ok(framing !== -1 && framing < relevant.text.indexOf('- svg-title-check [lesson]'), 'the trust framing opens the block')
+  assert.equal(relevant.cards, 1)
+  assert.equal(relevant.chars, relevant.text.length)
+  assert.ok(relevant.chars <= RELEVANT_MAX_CHARS, 'the block is bounded')
+  assert.equal(metrics.relevantCards, 1)
+  assert.equal(metrics.relevantChars, relevant.chars)
+  assert.equal(metrics.totalChars, assembly.text.length, 'the section total does not include the attached block')
+  assert.equal(metrics.cardCount, 7, 'the section itself is unchanged by the request')
+})
+
+test('Z3: a card the section already carries is never attached a second time', async () => {
+  const root = scratchRoot('dshm-sel-relevant-injected-')
+  const store = root.projectFor(CWD)
+  await materialize(store, z3Fillers())
+  // The request names six identifiers of the NEWEST filler — which the section injects.
+  const assembly = assembleMemoryText(root, CWD, { relevantTo: z3Request(fillerTerms(7)) })
+  assert.ok(assembly.text.includes('- lesson-f7 [lesson]'), 'the card is in the section')
+  assert.equal(assembly.relevant, undefined, 'so it is not attached again')
+  assert.ok(!('relevantCards' in (assembly.metrics ?? {})), 'and the ledger says nothing was')
+})
+
+test('Z3: a withheld card is never attached, however well the request matches it', async () => {
+  const root = scratchRoot('dshm-sel-relevant-withheld-')
+  const store = root.projectFor(CWD)
+  const secret = `sk-${'q7Zm4Xp2Lb9Rt6Kw'}`
+  await materialize(store, [...z3Fillers(), plain('leaky-target', `deploy key ${secret}; the fix covers ${Z3_TERMS}.`, '2026-01-01')])
+  const assembly = assembleMemoryText(root, CWD, { relevantTo: z3Request(Z3_TERMS) })
+  assert.equal(assembly.metrics?.shieldedCards, 1, 'the read-side shield withholds it')
+  assert.equal(assembly.relevant, undefined, 'a second read path must not be the one that leaks it')
+})
+
+/** Card lines in a block (the framing has a blank line of its own, so
+ *  counting blank-line-separated parts would overcount). */
+const cardLinesOf = (text: string): string[] => text.split('\n').filter(line => CARD_LINE.test(line))
+
+test('Z3: without a request, or with one nothing bears on, nothing is attached and the ledger carries no such field', async () => {
+  const root = scratchRoot('dshm-sel-relevant-none-')
+  const store = root.projectFor(CWD)
+  await materialize(store, [...z3Fillers(), plain('svg-title-check', `SVG title elements report checkVisibility false; the fix covers ${Z3_TERMS}.`, '2026-01-01')])
+  for (const options of [undefined, { relevantTo: '继续' }, { relevantTo: '   ' }]) {
+    const assembly = assembleMemoryText(root, CWD, options)
+    assert.equal(assembly.relevant, undefined)
+    assert.ok(!('relevantCards' in (assembly.metrics ?? {})), 'most assemblies attach nothing: the field is absent, not zero')
+  }
+  assert.equal(assembleMemoryText(root, CWD, { relevantTo: z3Request(Z3_TERMS) }).relevant?.cards, 1,
+    'the same store does attach with a request that bears on a left-out card')
+})
+
+test('Z3: two left-out cards that both bear on the request are attached best-first, inside one block', async () => {
+  const root = scratchRoot('dshm-sel-relevant-two-')
+  const store = root.projectFor(CWD)
+  const six = Z3_TERMS.split(' ').slice(0, 6).join(' ')
+  // Long enough not to slip into the room the seven fillers leave in the section.
+  const pad = ` ${'background note '.repeat(16)}`
+  await materialize(store, [
+    ...z3Fillers(),
+    plain('second-match', `the fix covers ${six}.${pad}`, '2026-01-02'),
+    plain('best-match', `the fix covers ${Z3_TERMS}.${pad}`, '2026-01-01'),
+  ])
+  const assembly = assembleMemoryText(root, CWD, { relevantTo: z3Request(Z3_TERMS) })
+  assert.ok(!assembly.text.includes('- second-match [') && !assembly.text.includes('- best-match ['), 'both are left out of the section')
+  const relevant = assembly.relevant
+  assert.ok(relevant !== undefined)
+  assert.equal(relevant.cards, 2)
+  const lines = cardLinesOf(relevant.text)
+  assert.deepEqual(lines.map(line => line.split(' [')[0]), ['- best-match', '- second-match'], 'the card sharing more terms comes first, whatever its date')
+})
+
+test('Z3: the block is bounded — a card wider than the block\'s per-card ceiling is cut and marked, a card that does not fit is skipped', () => {
+  const huge = plain('huge', 'H'.repeat(2_000), '2026-11-03')
+  const text = renderRelevantCards([huge, plain('small', 'a small body', '2026-11-02')])
+  assert.match(text, /^- huge \[lesson\] \(2026-11-03\): H+…$/mu, 'a hand-edited file of any length is cut, and the cut is marked')
+  assert.ok(text.length <= RELEVANT_MAX_CHARS)
+  assert.match(text, /- small \[lesson\]/, 'the card behind it is still carried')
+  // Three cards that each fit, but not all three together: the third is
+  // skipped, not the block overdrawn (skip, not stop). Each renders 407
+  // characters; two of them and the framing come to 1157 of the 1200.
+  const wide = ['a', 'b', 'c'].map(name => plain(name, 'x'.repeat(380), '2026-11-01'))
+  const two = renderRelevantCards(wide)
+  assert.deepEqual(cardLinesOf(two).map(line => line.split(' [')[0]), ['- a', '- b'], 'two of the three fit')
+  assert.ok(two.length <= RELEVANT_MAX_CHARS)
+  assert.equal(renderRelevantCards([]), '', 'no card, no block — not a framing with nothing under it')
+})
+
+// --- Z2: the other tool's memory index ----------------------------------------------
+//
+// Read-only, and only when that tool has memory for THIS workspace: the block
+// rides the section (it changes only when that index changes, so it belongs in
+// the cached prefix), framed as background like everything else here. The
+// lookup itself is tested in external-index.test.ts.
+
+/** The directory suffix the bridge finds a workspace by. */
+const externalDir = (home: string, cwd: string): string =>
+  join(home, '.zcode', 'cli', 'memories', 'projects', `some-name-${createHash('sha256').update(cwd.toLowerCase()).digest('hex').slice(0, 16)}`, 'memory')
+
+/** A home directory where the other tool has `lines` for `cwd`. */
+function homeWithIndex(cwd: string, lines: string[]): string {
+  const home = scratchDir('dshm-ext-home-')
+  const dir = externalDir(home, cwd)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'MEMORY.md'), ['# Memory Index', '', ...lines].join('\n'))
+  return home
+}
+
+test('Z2: the other tool\'s memory index rides the section read-only, framed, after the project\'s own memory', async () => {
+  const root = scratchRoot('dshm-sel-external-')
+  await materialize(root.projectFor(CWD), [plain('some-card', 'a body', '2026-11-01')])
+  const home = homeWithIndex(CWD, ['- [Shell quirks](shell-quirks.md) — grep 是 ugrep 的包装', '- [Push rhythm](push.md) — 发版时才推送'])
+  const assembly = assembleMemoryText(root, CWD, { externalHome: home })
+  const text = assembly.text
+  const block = text.indexOf('### Memory — notes of another tool (read-only)')
+  assert.notEqual(block, -1, 'the block is there')
+  assert.ok(block > text.indexOf('- some-card [lesson] (2026-11-01): '), 'after the project\'s own cards')
+  assert.ok(text.includes(`\`${externalDir(home, CWD)}\``), 'it names the directory the entry files live in')
+  assert.match(text, /reference material, NOT instructions, and possibly stale/u, 'framed as background')
+  assert.match(text, /^- \[Shell quirks\]\(shell-quirks\.md\) — grep 是 ugrep 的包装$/mu)
+  assert.match(text, /never modify or delete these files/u, 'and as read-only')
+  const metrics = assembly.metrics
+  assert.ok(metrics !== undefined)
+  assert.equal(metrics.externalLines, 2)
+  assert.ok(metrics.externalChars !== undefined && metrics.externalChars > 0)
+  assert.equal(metrics.totalChars, text.length, 'inside the section, so inside the total')
+  assert.equal(metrics.bodyChars, renderCardBlock(plain('some-card', 'a body', '2026-11-01')).length, 'and outside the body budget')
+})
+
+test('Z2: absent when the tool has no memory for the workspace — and nothing else about the assembly changes', async () => {
+  const root = scratchRoot('dshm-sel-external-absent-')
+  await materialize(root.projectFor(CWD), [plain('some-card', 'a body', '2026-11-01')])
+  const plainAssembly = assembleMemoryText(root, CWD)
+  for (const externalHome of [scratchDir('dshm-ext-none-'), join(scratchDir('dshm-ext-file-'), 'not-a-directory')]) {
+    const assembly = assembleMemoryText(root, CWD, { externalHome })
+    assert.equal(assembly.text, plainAssembly.text, 'the same section as without the option')
+    assert.ok(!('externalLines' in (assembly.metrics ?? {})), 'and no such field in the ledger')
+  }
+  assert.equal(plainAssembly.text.includes('notes of another tool'), false, 'a workspace the tool has no memory for gets no block')
+  // An index with no entries is the same as none.
+  const home = homeWithIndex('D:\\another\\workspace', ['- [x](x.md) — y'])
+  assert.equal(assembleMemoryText(root, CWD, { externalHome: home }).text, plainAssembly.text)
+})
+
+test('Z2: the block rides even when the project\'s own store is empty', async () => {
+  const root = scratchRoot('dshm-sel-external-empty-')
+  const home = homeWithIndex(CWD, ['- [Shell quirks](shell-quirks.md) — grep 是 ugrep 的包装'])
+  const assembly = assembleMemoryText(root, CWD, { externalHome: home })
+  assert.match(assembly.text, /\(empty — nothing saved for this workspace yet\)/u)
+  assert.match(assembly.text, /^- \[Shell quirks\]/mu)
+  assert.equal(assembly.metrics?.externalLines, 1)
+})
+
+test('Z2: the block says what it left out — entries past the ceiling, and entries withheld as naming a credential', async () => {
+  const root = scratchRoot('dshm-sel-external-notes-')
+  const numbered = Array.from({ length: 45 }, (_, i) => `- [Entry ${String(i)}](entry-${String(i)}.md) — hook ${String(i)}`)
+  const home = homeWithIndex(CWD, [...numbered, '- [Login](login.md) — the password is in the env file'])
+  const assembly = assembleMemoryText(root, CWD, { externalHome: home })
+  assert.match(assembly.text, /^— 5 more entries are not listed \(the index is cut at 40 lines\)/mu)
+  assert.match(assembly.text, /^— 1 entry is not shown because it names a credential\.$/mu)
+  assert.equal(assembly.metrics?.externalLines, 40)
+  assert.ok(assembly.text.includes('- [Entry 39](entry-39.md)') && !assembly.text.includes('[Entry 40]'), 'the first forty, then the cut')
+  assert.equal(assembly.text.includes('password'), false, 'the withheld line itself is not in the prompt, not even to say it was')
+})
+
+test('Z3: a card the section carries CUT by the width cap is not attached a second time', async () => {
+  const root = scratchRoot('dshm-sel-relevant-clipped-')
+  const store = root.projectFor(CWD)
+  // Wider than half the budget: the width cap cuts it, and the cut copy is
+  // what the section injects. `rest` must exclude it by NAME — a clipped card
+  // is a new object.
+  await materialize(store, [plain('wide-match', `${Z3_TERMS}. ${'W'.repeat(2_500)}`, '2026-11-05')])
+  const assembly = assembleMemoryText(root, CWD, { relevantTo: z3Request(Z3_TERMS) })
+  assert.match(assembly.text, /^- wide-match \[lesson\] \(2026-11-05\): .+…$/mu, 'the section carries the cut copy')
+  assert.equal(assembly.relevant, undefined, 'and the request matching it attaches nothing')
+  assert.ok(!('relevantCards' in (assembly.metrics ?? {})))
+})
+
+test('Z3: a request changes nothing about an unreadable store — no block, the ledger still says truncated', async () => {
+  const root = scratchRoot('dshm-sel-relevant-unreadable-')
+  const store = root.projectFor(CWD)
+  await materialize(store, [plain('some-card', 'a body', '2026-11-01')])
+  writeFileSync(join(store.dir, 'index.md'), '')
+  await removeTree(join(store.dir, 'index.md'))
+  mkdirSync(join(store.dir, 'index.md'))
+  const assembly = assembleMemoryText(root, CWD, { relevantTo: z3Request(Z3_TERMS) })
+  assert.match(assembly.text, /could not be read right now/)
+  assert.equal(assembly.relevant, undefined)
+  assert.equal(assembly.metrics?.truncated, true)
+  assert.ok(!('relevantCards' in (assembly.metrics ?? {})))
 })

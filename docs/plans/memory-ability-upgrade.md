@@ -1,6 +1,6 @@
 # plugin-memory 记忆能力增强：先让人看得到，再让保存与召回少卡顿
 
-- Status: active
+- Status: done
 - Plan date: 2026-11-22
 - Risk: high
 
@@ -23,9 +23,9 @@
 |---|---|
 | 作用域按 git 根 / `git-common-dir` 寻址 | 用户决定：记忆不需要跟仓库走 |
 | L4：只注入索引，正文一律 recall | 对 56% 的卡已是现状，不提高可见性；且 DSH 模型两个月只召回 18 次 |
-| 每轮用一次小模型调用从索引里挑选相关卡 | 每轮多一次模型调用；先用无模型的词重叠方案（Z3）验证收益 |
+| 每轮用一次小模型调用从索引里挑选相关卡 | 每轮多一次模型调用；先用无模型的词重叠方案（Z3，已做）把收益与噪声量出来 |
 | 重新引入后台从对话抽取与定期巩固 | 本仓 09-21 已因噪声退役后台抽取；整理器已承担巩固 |
-| 跨工具双向同步外部记忆 | 复制会产生两份会漂移的真源；只考虑只读索引桥（Z2，待决） |
+| 跨工具双向同步外部记忆 | 复制会产生两份会漂移的真源；只做只读索引桥（Z2，已做） |
 | 正文超限时自动截断保存 | 会无声丢掉模型认为重要的尾部；改为放宽上限（C1） |
 | 取消 `memory_forget` 的文本扫除 | 是已发布能力；改为显式参数才启用（P3） |
 
@@ -67,8 +67,8 @@
 | U2 | P1 | 对话框换宿主 `Modal` + `Button`，删除手绘 `ConfirmDialog`；初始焦点落取消按钮，焦点陷阱与回焦交给原语 | [x] |
 | U3 | P2 | 文案：`curateRefused` 不再指向已删面板；删除确认与归档可恢复的说法一致（30 天或最近 200 条）；补新 code 的中文；清死键 | [x] |
 | M3 | P2 | 度量脚本入库：`plugins/plugin-memory/scripts/memory-usage.mjs`（会话日志聚合，只输出计数与固定桶名，读的目录写 stderr；注明依赖内核日志格式） | [x] |
-| Z2 | OPT | 跨工具索引桥（待用户决定）：读取同项目的 ZCode 记忆索引 `~/.zcode/cli/memories/projects/<base>-<sha256(小写 cwd)[:16]>/memory/MEMORY.md`，作为只读「外部记忆索引」块注入（≤40 行）并提示按需读取；目录不存在则不注入 | [!] |
-| Z3 | OPT | 按相关性选正文（待探针）：用最近一轮用户消息对索引做词重叠排序，正文经 `systemPrompt.context`（user 角色快照）附加而不改系统提示前缀；先验证该座位的每轮累积与缓存行为 | [!] |
+| Z2 | OPT | 跨工具索引桥：读取同项目的 ZCode 记忆索引 `~/.zcode/cli/memories/projects/<base>-<sha256(小写 cwd)[:16]>/memory/MEMORY.md`，作为只读「外部记忆索引」块注入（≤40 行）并提示按需读取；目录不存在则不注入。主人 2026-11-22 裁决加入。实施时按安全审查收紧：只读普通文件（`lstat`）、≤64 KB；只取列表行，去掉控制符与双向控制符；凭据形状或点名凭据的行整行丢弃；链接目标只保留裸文件名，其余去掉目标、保留标题 | [x] |
+| Z3 | OPT | 按相关性选正文：用最近一轮**用户消息**（`source.kind === 'user'`）对**未被注入**的卡做词重叠排序——ASCII 标识符（≥5 字符）与汉字三字串，库内多张卡共有的词不计，共享数 ≥6 才附（短请求按一半计、下限 3）；最多 2 张、整块 ≤1200 字符；正文经 `systemPrompt.context`（user 角色快照）附加而不改系统提示前缀。原计划的字符相似度经回放证明不可用（任何阈值下精确率 10–15%），改用本规则；回放脚本入库 | [x] |
 
 状态流转（就地更新，不得跳级）：`[ ]` 待办 → `[~]` 已改未审 → `[x]` 审查通过；`[?]` 审查不通过；`[–]` 本轮不做；`[!]` 待用户决定。类目：P0 不做就走不通 · P1 静默失败或数据风险 · P2 清理与一致性 · OPT 可选。
 
@@ -82,7 +82,7 @@
 | 4 整理器 | K1–K4, K6, K5, K7 | 条目全 `[x]`；T14–T17 PASS |
 | 5 防护 | P1–P7, P8–P10 | 条目全 `[x]`；T18–T28 PASS；两路独立审查无阻塞发现 |
 | 6 界面与文档 | U1–U3, M3 | 条目全 `[x]`；T29–T31 PASS；真机点查记录入 Phase log |
-| 7 待决项 | Z2, Z3 | 用户裁决后转 `[x]` / `[?]` / `[–]` |
+| 7 相关性与外部索引 | Z2, Z3 | 条目全 `[x]`；T32–T40 PASS；真实内核里一轮真实对话的会话日志（快照只在该附时出现、文本不变时不重复） |
 
 阶段闸门：任何条目处于 `[~]`、`[?]` 或 `[!]` 时不得开始下一阶段。每个阶段一个提交，带插件版本 bump 与 changeset 片段（补丁位单位数，0.11.9 之后进位到 0.12.0）。条目转 `[x]` 前回答五问（主张复核、最小性、新风险、反例、可检查性）；Risk 为 high，每阶段至少两路 subagent 独立审查，记录存 `.devflow/memory-ability-upgrade/review-<阶段>.md`。
 
@@ -117,6 +117,9 @@
 | 单趟移除上限计入 merge 的源卡 | modified | `plugins/plugin-memory/src/curator.ts` |
 | 落盘或下发的错误文本 | modified | `src/memory-store.ts`（`safeFsErrorText`）、`src/card-file.ts`（`ArchiveWriteError`）、`src/routes.ts`（`/forget`、`/move`） |
 | 整理器输入里的索引与屏蔽卡 | modified | `plugins/plugin-memory/src/curator.ts`（`serializeStore` 用 `shieldedIndexText`） |
+| 与当前请求相关的卡片正文如何到达模型 | added | `plugins/plugin-memory/src/relevance.ts`、`src/prompt.ts`（`renderRelevant`、`MemoryAssembly.relevant`）、`src/index.ts`（`agent/inbox/claimed` 监听、`systemPrompt.context` 贡献 `tool:memory-relevant`） |
+| 另一个工具的记忆索引是否进入提示 | added | `plugins/plugin-memory/src/external-index.ts`、`src/prompt.ts`（`externalBlock`） |
+| 注入量面板的两行 | modified | `src/client/memory-section.tsx`、`src/client/locales.ts`、`src/types.ts`（`MemoryInjectionSample` 的可选字段） |
 
 ## Test plan
 
@@ -153,6 +156,15 @@
 | 29 (U1) | 度量可见 | 构造超 24 张卡与含腐烂标记的库后打开设置页 | 页面显示预警、腐烂、丢卡数、工具计数与命中分桶；被屏蔽的卡有标注 | `node scripts/probe-settings-rail.mjs` + 真机点查 | PASS (真机 CDP 点查 `scratch/memory-audit/ui-check.mjs`，2026-11-22) |
 | 30 (U2, U3) | 对话框与文案 | 触发删除确认；Tab 遍历 | 初始焦点在取消按钮，焦点不出对话框；zh/en 词条成对 | 类型检查 + 真机点查 + 词典用例 | PASS (真机点查 + `tests/client.test.ts`，2026-11-22) |
 | 31 (M3) | 使用统计脚本 | 对本机会话日志运行 | 只输出计数，退出码 0 | `node plugins/plugin-memory/scripts/memory-usage.mjs` | PASS (233 个日志全部解析，2026-11-22) |
+| 32 (Z3) | 词的口径 | 标识符大小写折叠、4 字符不算；汉字三字串不跨空格与标点 | `relevanceTerms` 的集合逐项相等 | 新增 `tests/relevance.test.ts` | PASS (npm test, 2026-11-22) |
+| 33 (Z3) | 门槛与短请求 | 共享 5 个不附、6 个附；短请求按一半计、下限 3 | 返回的卡 | `tests/relevance.test.ts` | PASS (npm test, 2026-11-22) |
+| 34 (Z3) | 库内通用词与排序 | 一个词被 3 张卡带有时不计；库到 24 张卡时上限升到 3；共享多的排前、同分按键、最多 2 张、不改输入顺序 | 同上 | `tests/relevance.test.ts` | PASS (npm test, 2026-11-22) |
+| 35 (Z3) | 只附未被注入的卡 | 预算留出的卡被附；段里已有的卡（含被宽度上限截断的）与被屏蔽的卡不附；块先框定后列卡、≤1200 字符、单卡 ≤500；库读不出时没有块 | `assembly.relevant` 与 `assembly.text` | `tests/selection.test.ts` | PASS (npm test, 2026-11-22) |
+| 36 (Z3) | 宿主接线 | 监听 `agent/inbox/claimed` 后装配 | 段里没有的卡出现在 context 贡献里；运行时上下文注入不是请求；文本两次读取相同；无请求为空；只挂了这一个监听 | host stub 的 section / context provider | `tests/background.test.ts` | PASS (npm test, 2026-11-22) |
+| 37 (Z3) | 真实内核里的一轮对话 | 隔离 home 的开发版窗口，发一条与某张未注入卡共享标识符的消息 | 请求之后一条带 `tool:memory-relevant` 的运行时上下文快照，内容与事先用生产代码预测的卡一致；同一请求再来一轮不追加快照；换成有额度的路由后该轮完成并作答 | 真机 CDP `scratch/memory-audit/z23-live.mjs`（预测由 `z23-live-seed.mjs` 给出） | PASS (2026-11-22：首轮快照 754 字符，与预测一致；第二轮无新快照；第三轮 `turn/end completed`，模型作答；复核 17/17) |
+| 38 (Z3) | 标定可复现 | 对真实会话日志与真实库副本回放 | 只输出计数；27/316 轮触发、47 张 | `node plugins/plugin-memory/scripts/relevance-replay.mjs --root <副本>` | PASS (234 个会话、504 条用户消息，2026-11-22) |
+| 39 (Z2) | 找得到与找不到 | 目录名后缀等于小写路径哈希即命中（名称段随意、大小写与分隔符不敏感）；没有该工具、别的项目、无索引、索引是目录、条目是文件、超大都是「不注入」且不抛错 | 返回值 | 新增 `tests/external-index.test.ts` | PASS (npm test, 2026-11-22) |
+| 40 (Z2) | 进入提示的内容 | 只取列表行、顺序不变；控制符与双向控制符去掉；凭据形状或点名凭据的行丢弃并计数；越界的链接目标去掉、保留标题；40 行与 300 字符上限带标记；块在项目记忆之后、先框定后列条目；度量字段只在注入时出现 | `readExternalIndex` 与 `assembleMemoryText` | `tests/external-index.test.ts`、`tests/selection.test.ts`；设置页两行真机点查（外部索引一行用并入 `/status` 的样本） | PASS (npm test；真机 `z23-live.mjs` 设置页 4 项，2026-11-22) |
 
 ## Verification commands
 
@@ -168,6 +180,8 @@ node plugins/plugin-memory/scripts/memory-health.mjs --root <副本> --snapshot
 node scratch/memory-audit/simulate.mjs
 # 使用历史的聚合（只输出计数）
 node plugins/plugin-memory/scripts/memory-usage.mjs
+# 相关性规则的回放（只输出计数；Z3 的阈值依据，调阈值后重跑比较）
+node plugins/plugin-memory/scripts/relevance-replay.mjs --root <副本>
 ```
 
 真机点查不在上面的命令里：用隔离的 `DSH_HOME`（真实库的副本）起开发版窗口
@@ -193,6 +207,13 @@ node plugins/plugin-memory/scripts/memory-usage.mjs
 | 度量脚本的 `--since` 仍解压全部历史 | 只影响脚本耗时 | 日志量大到脚本跑不动时 |
 | 「清空归档」某库中途失败的口径 | `clearArchive()` 在一天删到一半失败时不回报已删的部分，`cleared` 少计而横幅说该库「保持原样」（审查第 3 轮 P3） | 出现该实例时让 `clearArchive` 返回已删与失败两部分 |
 | 移动失败后补偿路径的 `source` 回填 | 实现已写（`adoptSource`），只有成功覆盖的移动有用例；触发补偿需要让移动在目标写入之后失败 | 下次动移动路径时补一条 |
+| Z2 的信任边界 | 索引行过滤了凭据，**被指向的正文文件不过滤**：块让模型「按需去读那个目录里的文件」，读是模型自己的文件工具在做。另一个工具的模型写的文本进入 system 角色，只靠文案框定（主人已决定加入这条桥） | 出现一次经外部索引读进不该读的内容的实例，或内核提供按目录限定的只读座位 |
+| Z2 没有独立开关 | 只有插件总开关；目录布局是另一工具的内部约定，它一改版这条桥就静默不注入，页面上看不出原因（只在注入量面板少了那一行） | 有用户反馈「不想让另一个工具的记忆进来」时加配置项 |
+| Z2 的目录路径发往模型提供方 | 块里写着索引目录的绝对路径（含用户名），否则模型不知道去哪读条目；这是本插件唯一把 home 路径放进提示的地方 | 内核提供不暴露路径的只读座位时改掉 |
+| 中文请求的触发门槛没有负例 | 汉字三字串实际约等于「共享 8 个汉字」才到 6（三字串相互重叠），比英文的「6 个词」严；标定库里中文边界只有一条强命中的例子，没有「5 个不触发」的用例 | 回放脚本显示中文项目的触发率明显偏低时，按汉字词（二字）重标 |
+| `kind:'user'` 的合成消息 | 内核自己的少量合成 user 消息（如 `/goal` 的附件说明）会把真实请求覆盖成一个短句，那一步就不附卡；子代理的委派提示也是 `kind:'user'`，那是它的请求，附是对的 | 出现「明明相关却没附」且日志里请求之后跟着合成 user 消息的实例 |
+| 相关性排序不在降级保护内 | `rankRelevantCards` 是纯函数、输入是已解析的卡，没有 I/O；`renderScope` 的 try 不覆盖它 | 它开始读文件的那一天挪进同一个 try |
+| `cardIsWithheld` 不检查卡名 | 写入侧检查主题键，读侧只看 `summary + body`；手改的文件名若恰为凭据形状会经卡片标题进入提示。既有不对称，不是本次引入 | 与上面的凭据规则一并再标定时对齐 |
 
 ## Rollback
 
@@ -213,6 +234,8 @@ node plugins/plugin-memory/scripts/memory-usage.mjs
 | 4 整理器（K1–K4, K6, K5, K7） | 2026-11-22 | T14–T17 PASS（`tests/curator-reliability.test.ts`、`tests/direct.test.ts`、`tests/background.test.ts`） | Gate 通过。五问——主张复核：审计带脱敏原因与已花 token，连续失败 2 次退避，rename 当单键 merge，单趟移除上限 `max(3, ⌈25%⌉)` 计入 merge 源卡、rename 不计、按实际移除扣；最小性：上限是计划公式，不另加门槛；新风险：非归档类写入失败曾穿出 `applyEdits` 丢台账行，现逐条捕获记 `io-failed` 且本趟不记录为已整理；小库（≤3 张）手动整理可被清空（有归档）；反例：rename 曾被扣额度、merge 源卡归档失败曾报「已合并」、布尔排除曾丢行尾，各有用例；可检查性：台账词表与 `isLedgerEntry` 对每个拒绝原因成对断言。 |
 | 5 防护（P1–P7, P8–P10） | 2026-11-22 | T18–T28 PASS（`tests/store-safety.test.ts`、`tests/tool-stats.test.ts`、`tests/routes.test.ts`）；真机坏库行 8 项、清空归档 6 项、根 config 损坏 7 项 | Gate 通过（两路独立审查无阻塞发现：重审后工程 APPROVE_WITH_COMMENTS、安全面无未关闭敏感 finding）。五问——主张复核：归档失败拒删、恢复看形状（**口径修正**，见 Work items P2）、路由与工具的扫除确认、坏 config 不回写、摘要单行与长键哈希、轻扫按原文、读侧屏蔽覆盖所有把卡文本交给模型的路径、来源三处、凭据规则、坏库容错覆盖页面/挂载/整理/审计；最小性：`listProjects` 的容错模式替代了路由里的重复枚举；新风险：恢复不再复检凭据——读侧屏蔽承担这一面；curator 不动被屏蔽卡，误判会留在库里等用户处理；反例：重审抓到「删得掉恢复不了」与「后台自动删除被屏蔽卡」两条，都已关闭；可检查性：每条防护都有失败路径用例，删除路径另有真机点查。 |
 | 6 界面与文档（U1–U3, M3） | 2026-11-22 | T29–T31 PASS；真机 `probe-settings-rail.mjs` 4 项 + `ui-check.mjs` 41 项（主检查 14：初始焦点在取消、Tab 不出对话框、Esc 不删卡）；`memory-usage.mjs` 解析 233 个真实日志；`OPTIMIZATION.md` §4.14、`DESIGN.md` 对齐 | Gate 通过。五问——主张复核：页面显示每库预警/腐烂/领域/长期未更新、注入损失与屏蔽、工具计数与命中分桶、归档失败、config 提示、被屏蔽卡标注；对话框是宿主 `Modal` + `Button`；最小性：只加字段与文案，不改原语；新风险：客户端渲染仍无自动化覆盖，真机点查是一次性 CDP 脚本（在 `scratch/`，不入库）；反例：部分清空后面板曾不刷新，现先重载再显示横幅；可检查性：词典 zh/en 成对由类型保证，Tab 轨迹与焦点元素在真机逐项断言。 |
-| 7 待决项（Z2, Z3） | — | — | 未开始：两条都是 `[!]`，等用户裁决。 |
+| 7 相关性与外部索引（Z2, Z3） | 2026-11-22 | T32–T40 PASS：新增 33 条用例（`tests/relevance.test.ts` 9、`tests/external-index.test.ts` 10、`tests/selection.test.ts` 12、`tests/background.test.ts` 1、`tests/client.test.ts` 1），插件套件 465 → **498**；回放脚本 `scripts/relevance-replay.mjs`：234 个会话、504 条用户消息、316 轮有未注入的卡，**27 轮触发（9%）、47 张**，逐条人工读 25–26 条切题；真机（隔离 home 的开发版窗口，真实内核）：事先用生产代码预测「附 1 张 `dsh-svg-title-visibility-check`、754 字符」，新会话首轮请求之后的运行时上下文快照与预测一致（7 项贡献里含 `tool:memory-relevant`，模型收到的那条消息里带着这张卡）；同一请求第二轮**没有**新快照；换成有额度的路由后第三轮 `turn/end completed`、模型作答；设置页「按请求相关性另附正文 1 张」来自真实装配 | Gate 通过（两路独立审查：工程 APPROVE_WITH_COMMENTS，安全面 1 条中危与若干低危，全部处置，见 `.devflow/memory-ability-upgrade/review-z2z3.md`）。五问——主张复核：计划写的「字符相似度排序」先被回放否决（任何阈值下精确率 10–15%），换成标识符与汉字三字串的重叠计数；座位的前提（段先于 context 求值、文本不变不重发）从内核源码与真机两头核实。最小性：一个纯函数模块、一个只读模块，没有模型调用与新依赖；Z2 放在系统提示段里而不是 context，因为它只随外部索引变，不该每轮重发。新风险：Z2 把另一个工具的模型写的文本带进 system 角色并指示模型去读它指向的文件——安全审查据此加了链接目标白名单、`lstat`、控制符清理、点名凭据的行整行丢弃。反例：用例抓到渲染时把字符串按字符展开；审查抓到「被宽度上限截断的卡不再附一次」没有用例；`check:graph` 抓到正则里的汉字，按 `card-rot.ts` 的先例改成转义。可检查性：回放脚本只输出计数，任何一次调阈值都能重跑比较；精确率仍靠人工阅读，脚本不替这一步。 |
 
 与计划的一处偏差：计划写「每个阶段一个提交，带插件版本 bump 与 changeset 片段」。六个阶段是并发实施、集成后一起审查与验证的，中间状态没有各自通过门禁的记录，拆成六个提交等于伪造六次验收。建议作为**一个提交**落地（一次 bump 到 0.12.0、一个 changeset、回滚单位是整轮），由主人在授权提交时裁决。
+
+阶段 7 是另一个提交（0.12.1，changeset `memory-request-relevant-cards.md`）：它改变的是「哪些正文到达模型」，与阶段 1–6 的「把已有的注入做对」不是同一件事，回滚单位也该分开。

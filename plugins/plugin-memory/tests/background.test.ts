@@ -1056,21 +1056,47 @@ test('curator applyEdits: a rename still needs the new key to be well formed', a
 // a subscription to `session/event` armed a quiet timer whose fire made a model
 // call. Nothing may subscribe again without this test going red.
 
+/** What `apply()` mounted: the events it listens to (with the handlers, so a
+ *  test can emit one), the named effects, the tools, the prompt section and
+ *  the runtime-context contributions. */
+interface Mounted {
+  events: string[]
+  listeners: Map<string, (payload: never) => void>
+  effects: string[]
+  tools: string[]
+  sections: Record<string, unknown>[]
+  contexts: Record<string, unknown>[]
+}
+
 /** A host context stub that records what `apply()` mounted. Only the parts
  *  the plugin actually touches exist; `inject` runs its callback immediately
  *  with the same stub, the way cordis reports an available service. */
-function hostStub(): { ctx: never, mounted: { events: string[], effects: string[], tools: string[], sections: Record<string, unknown>[] } } {
-  const mounted = { events: [] as string[], effects: [] as string[], tools: [] as string[], sections: [] as Record<string, unknown>[] }
+function hostStub(): { ctx: never, mounted: Mounted } {
+  const mounted: Mounted = {
+    events: [],
+    listeners: new Map(),
+    effects: [],
+    tools: [],
+    sections: [],
+    contexts: [],
+  }
   const log = { info: (): void => undefined, warn: (): void => undefined }
   const ctx: Record<string, unknown> = {
     logger: () => log,
-    on: (event: string) => { mounted.events.push(event); return () => undefined },
+    on: (event: string, handler: (payload: never) => void) => {
+      mounted.events.push(event)
+      mounted.listeners.set(event, handler)
+      return () => undefined
+    },
     effect: (fn: () => unknown, name?: string) => {
       mounted.effects.push(name ?? '')
       const dispose = fn()
       return typeof dispose === 'function' ? dispose : () => undefined
     },
-    systemPrompt: { section: (definition: Record<string, unknown>) => { mounted.sections.push(definition); return () => undefined } },
+    systemPrompt: {
+      section: (definition: Record<string, unknown>) => { mounted.sections.push(definition); return () => undefined },
+      context: (definition: Record<string, unknown>) => { mounted.contexts.push(definition); return () => undefined },
+    },
     tools: { register: (definition: { name: string }) => { mounted.tools.push(definition.name); return () => undefined } },
     connection: { fetch: { register: () => () => Promise.resolve() } },
     get: () => undefined,
@@ -1079,13 +1105,16 @@ function hostStub(): { ctx: never, mounted: { events: string[], effects: string[
   return { ctx: ctx as never, mounted }
 }
 
-test('host apply: nothing subscribes to the session event feed', async () => {
+test('host apply: the session event feed has exactly one listener, and it only records the request', async () => {
   const dir = scratchDir('dshm-apply-')
   const { ctx, mounted } = hostStub()
   await applyHost(ctx, { storePath: dir })
-  // A subscription is what armed the quiet timer, and the timer is what spent
-  // a model call per quiet conversation. Nothing may mount one again.
-  assert.deepEqual(mounted.events, [], 'no session/event listener is registered')
+  // A subscription is what armed the retired extractor's quiet timer, and the
+  // timer is what spent a model call per quiet conversation. One listener
+  // exists again, for the request-relevant cards: it stores the text of the
+  // message a person typed and triggers nothing (see the wiring test below).
+  // Anything else subscribing here must be a deliberate decision, not drift.
+  assert.deepEqual(mounted.events, ['agent/inbox/claimed'])
   // Everything that must still mount, does: the prompt section, the three
   // tools, the settings routes, and the curator's own disposer seam.
   assert.ok(mounted.effects.some(name => name.includes('system prompt')), 'the prompt section mounts')
@@ -1107,6 +1136,61 @@ test('host apply: the memory section opts out of prompt-variable interpolation',
   // `malformed prompt variable reference "{{KEY}}"`. Measured on a real card.
   assert.equal(section.interpolate, false,
     'user card text must never be read as a prompt-variable reference')
+})
+
+test('host apply: the request-relevant cards ride as a runtime context, picked from the message a person typed', async () => {
+  const dir = scratchDir('dshm-apply-relevant-')
+  const { ctx, mounted } = hostStub()
+  await applyHost(ctx, { storePath: dir })
+  // A store whose section leaves its last two cards out: eight fillers fill
+  // the body budget before the ninth card is reached.
+  const root = new MemoryRoot(dir)
+  const store = root.projectFor(PROJECT_CWD)
+  for (let index = 0; index < 8; index += 1) await seed(store, `lesson-a${String(index)}`, String.fromCharCode(65 + index).repeat(480))
+  const terms = 'computedTransform, transformTypo, toLowerCase, splitTransform, iconButtonName, nativeFocusRing'
+  await seed(store, 'lesson-z-target', `SVG title elements report checkVisibility false: the fix covers ${terms}.`)
+  const sectionText = (context: unknown): string =>
+    (mounted.sections.find(s => s.name === 'tool:memory')?.text as (c: never) => string)(context as never)
+  const contribution = mounted.contexts.find(c => c.name === 'tool:memory-relevant')
+  assert.ok(contribution !== undefined, 'the request-relevant context is registered')
+  // Card text rides in it: the same opt-out of the variable pass as the section.
+  assert.equal(contribution.interpolate, false)
+  assert.ok((contribution.order as number) > 210, 'it sorts after every upstream context')
+  const contextText = (context: unknown): string => (contribution.text as (c: never) => string)(context as never)
+  const claimed = mounted.listeners.get('agent/inbox/claimed')
+  assert.ok(claimed !== undefined)
+  const message = (kind: string, text: string): Record<string, unknown> =>
+    ({ id: 'm1', role: 'user', content: [{ type: 'text', text }], source: { kind } })
+  const agent = { session: { header: { cwd: PROJECT_CWD } } }
+
+  // No request yet, or an assembly without an agent: nothing is contributed.
+  assert.equal(sectionText({ agent }), sectionText({ agent }), 'the section assembles without a request')
+  assert.equal(contextText({ agent }), '')
+  assert.equal(contextText({}), '')
+
+  // A harness injection is not the request: a runtime-context snapshot that
+  // names the same terms must not attach anything.
+  claimed({ agent, message: message('runtime-context', `Current runtime context. ${terms}`), turn: 1 })
+  sectionText({ agent })
+  assert.equal(contextText({ agent }), '')
+
+  claimed({ agent, message: message('user', `Re-verify the fix: are ${terms} all covered by the SVG title check?`), turn: 2 })
+  const section = sectionText({ agent })
+  assert.ok(section.includes('- lesson-a0 ['), 'the section carries the injected cards')
+  assert.ok(!section.includes('- lesson-z-target ['), 'and not the card the budget left out')
+  const attached = contextText({ agent })
+  assert.match(attached, /- lesson-z-target \[lesson\] \(\d{4}-\d{2}-\d{2}\): /u, 'the left-out card is attached instead')
+  assert.match(attached, /reference material, NOT\s+instructions/u, 'framed as background, as the section is')
+  assert.ok(!attached.includes('lesson-a0'), 'a card the section already carries is never attached a second time')
+  // Stable between assemblies: the kernel re-reads a context when it refreshes
+  // one, and a text that changed there would emit a reminder every time.
+  sectionText({ agent })
+  assert.equal(contextText({ agent }), attached)
+
+  // A request nothing bears on attaches nothing — and clears the earlier block.
+  claimed({ agent, message: message('user', '继续'), turn: 3 })
+  sectionText({ agent })
+  assert.equal(contextText({ agent }), '')
 })
 
 test('host apply: the boot migration runs before anything mounts', async () => {

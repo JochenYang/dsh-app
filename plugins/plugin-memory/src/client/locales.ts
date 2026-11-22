@@ -170,6 +170,8 @@ export const zh = {
   'memory.injection.project': '最近一次装配所属的项目：{title}',
   'memory.injection.row': 'guidelines {guidelines} · 索引 {index}（{lines} 行）· 正文 {body} · 合计 {total}',
   'memory.injection.loss': '正文未注入 {dropped} 张（其中疑似凭据屏蔽 {shielded} 张）· 索引截掉 {overflow} 行',
+  'memory.injection.relevant': '按请求相关性另附正文 {count} 张（{chars} 字符，经运行时上下文附加，不计入合计）',
+  'memory.injection.external': '外部记忆索引（ZCode，只读）{lines} 行（{chars} 字符，计入合计）',
   'memory.injection.cards': '正文 {count} 张卡{truncated}',
   'memory.injection.truncated': '（仍有卡未注入）',
 
@@ -332,6 +334,8 @@ export const en: Record<MemoryKey, string> = {
   'memory.injection.project': 'Project of the last assembly: {title}',
   'memory.injection.row': 'guidelines {guidelines} · index {index} ({lines} lines) · bodies {body} · total {total}',
   'memory.injection.loss': '{dropped} card bodies not injected ({shielded} of them withheld as credential-looking) · {overflow} index lines cut',
+  'memory.injection.relevant': '{count} card bodies attached as relevant to the request ({chars} chars, attached as runtime context, not in the total)',
+  'memory.injection.external': 'external memory index (ZCode, read-only) {lines} lines ({chars} chars, in the total)',
   'memory.injection.cards': '{count} card bodies{truncated}',
   'memory.injection.truncated': ' (some cards not injected)',
 

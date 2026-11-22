@@ -355,6 +355,26 @@ function injectionLossText(
   })
 }
 
+/** The two optional parts of the LATEST assembly's ledger: the card bodies
+ *  attached to the step as relevant to the request (outside the section, so
+ *  outside the total) and the other tool's memory index (inside it). Each is
+ *  drawn only when the host sent it — most assemblies have neither, and a
+ *  "0 cards attached" line next to the totals would be noise. Latest only: an
+ *  average over assemblies that mostly did without them says nothing. */
+function injectionExtraText(
+  sample: Pick<MemoryInjectionSample, 'relevantCards' | 'relevantChars' | 'externalLines' | 'externalChars'>,
+  t: TranslateNS<typeof NS>,
+): string[] {
+  const parts: string[] = []
+  if (isCount(sample.relevantCards) && isCount(sample.relevantChars)) {
+    parts.push(t('memory.injection.relevant', { count: String(sample.relevantCards), chars: String(sample.relevantChars) }))
+  }
+  if (isCount(sample.externalLines) && isCount(sample.externalChars)) {
+    parts.push(t('memory.injection.external', { lines: String(sample.externalLines), chars: String(sample.externalChars) }))
+  }
+  return parts
+}
+
 /** Local date-time of an epoch-ms stamp, to the minute ('' when unusable). */
 function formatStamp(epochMs: unknown): string {
   if (!isCount(epochMs)) return ''
@@ -956,6 +976,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
   // The ledger's "what was left out" lines, computed once per render: each is
   // undefined when the host sent no such field, and the line is then not drawn.
   const latestLoss = status?.injection === undefined ? undefined : injectionLossText(status.injection.latest, t)
+  const latestExtra = status?.injection === undefined ? [] : injectionExtraText(status.injection.latest, t)
   const meanLoss = status?.injection === undefined ? undefined : injectionLossText(status.injection.mean, t)
   // The refused deletes, newest first. The host already answers them newest
   // first (`MemoryRoot.archiveFailures` reverses its FIFO), so the most
@@ -1047,6 +1068,7 @@ export function MemorySection({ t }: MemorySectionProps): ReactNode {
               <div className="dshm_metricStack">
                 <span className="dshm_metricLine">{t('memory.injection.latest')} · {injectionText(status.injection.latest, t)}</span>
                 {latestLoss === undefined ? null : <span className="dshm_metricLine">{latestLoss}</span>}
+                {latestExtra.map(line => <span key={line} className="dshm_metricLine">{line}</span>)}
               </div>
             </div>
             <div className="dshm_activityRow">

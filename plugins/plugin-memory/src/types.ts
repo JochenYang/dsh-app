@@ -423,6 +423,16 @@ export interface MemoryInjectionSample {
   truncated: boolean
   /** Cards whose text was NOT injected because it looked like a credential. */
   shieldedCards: number
+  /** Card bodies attached to the step as relevant to the request, with their
+   *  characters (framing included). Absent when none was attached — they ride
+   *  outside the section, so they are not in `totalChars` or the body budget. */
+  relevantCards?: number
+  relevantChars?: number
+  /** Lines of the other tool's memory index injected into the section, with
+   *  their characters (framing included; inside `totalChars`). Absent when
+   *  that tool has no memory for the project. */
+  externalLines?: number
+  externalChars?: number
 }
 
 /** The /status injection block: latest assembly + the ring's averages. */

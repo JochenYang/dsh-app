@@ -166,3 +166,28 @@ test('every refusal the routes can answer has copy, and no mapping points at a c
     assert.ok(mapped.some(([, mappedCode]) => mappedCode === code), `the host answers ${code} and the page has no copy for it`)
   }
 })
+
+test('the attached-cards and external-index lines come from the latest sample only, and only when the host sent the fields', () => {
+  // The request-relevant card bodies ride OUTSIDE the section and the other
+  // tool's index rides inside it; the host reports both as optional fields.
+  // Most assemblies have neither: a line reading "0 attached" beside the
+  // totals would be noise, and a mean over assemblies that mostly did without
+  // them says nothing.
+  const section = source('../src/client/memory-section.tsx')
+  assert.match(section, /injectionExtraText\(status\.injection\.latest, t\)/u, 'the latest sample carries the lines')
+  assert.doesNotMatch(section, /injectionExtraText\(status\.injection\.mean/u, 'the mean does not')
+  assert.match(section, /if \(isCount\(sample\.relevantCards\) && isCount\(sample\.relevantChars\)\) \{/u,
+    'a missing field draws nothing, never "undefined"')
+  assert.match(section, /if \(isCount\(sample\.externalLines\) && isCount\(sample\.externalChars\)\) \{/u)
+  for (const dict of [zh, en]) {
+    assert.match(dict['memory.injection.relevant'], /\{count\}/u)
+    assert.match(dict['memory.injection.relevant'], /\{chars\}/u)
+    assert.match(dict['memory.injection.external'], /\{lines\}/u)
+    assert.match(dict['memory.injection.external'], /\{chars\}/u)
+  }
+  // The host sends exactly what the page reads.
+  const types = source('../src/types.ts')
+  for (const field of ['relevantCards', 'relevantChars', 'externalLines', 'externalChars']) {
+    assert.match(types, new RegExp(`${field}\\?: number`, 'u'), `${field} is optional on the wire: most assemblies do not carry it`)
+  }
+})
