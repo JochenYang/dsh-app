@@ -431,11 +431,11 @@ const cssText = `
 }
 
 .dshPptBrandInputInvalid {
-  border-color: var(--dsw-alias-danger-primary);
+  border-color: var(--dsw-alias-state-error-primary, #dc2626);
 }
 
 .dshPptBrandError {
-  color: var(--dsw-alias-danger-primary);
+  color: var(--dsw-alias-state-error-primary, #dc2626);
 }
 `
 

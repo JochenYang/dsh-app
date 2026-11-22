@@ -62,7 +62,7 @@ const cssText = `
   color: var(--dsw-alias-label-secondary);
 }
 .dshRewind-iconAction:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-primary-primary);
+  outline: 2px solid var(--dsw-alias-brand-primary);
   outline-offset: 1px;
 }
 /* The containing block for the absolutely positioned icon row. */
@@ -152,7 +152,7 @@ const cssText = `
   background: var(--dsw-alias-interactive-bg-hover);
 }
 .dshRewind-fileAction[data-action="restore"] {
-  color: var(--dsw-alias-state-warning-primary);
+  color: var(--dsw-alias-state-warn-label);
 }
 .dshRewind-fileAction[data-action="remove"] {
   color: var(--dsw-alias-state-error-primary);
@@ -178,7 +178,7 @@ const cssText = `
   color: var(--dsw-alias-label-tertiary);
 }
 .dshRewind-dialogNote[data-tone="warn"] {
-  color: var(--dsw-alias-state-warning-primary);
+  color: var(--dsw-alias-state-warn-label);
 }
 /*
  * The quarantine manager (a tab of the suite's maintenance settings section).
@@ -272,7 +272,7 @@ const cssText = `
   background: var(--dsw-alias-interactive-bg-hover);
 }
 .dshRewind-quarantineKind[data-kind="created"] {
-  color: var(--dsw-alias-state-warning-primary);
+  color: var(--dsw-alias-state-warn-label);
 }
 .dshRewind-quarantinePath {
   flex: auto;
