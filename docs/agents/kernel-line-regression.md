@@ -63,7 +63,7 @@ npm run check:preflight -- --npm <目标版本>             # 下载 + 校验 sh
 |---|---|---|
 | `line` | 我们消费的每个包是否落在同一个版本；**低于**跟随线的拷贝一律 blocker，**高于**它的是「该 bump 了」的 note（`--line-policy=exact` 下升为 blocker） | 脏拷贝静默赢得解析、上游发版后插件树按 `^` 先行 |
 | `published` | 目标线是否还发布这些包 | 改名（`dsh-office-to-pdf` → `dsh-office-kit`） |
-| `engines` | 目标的 `engines.node` 下限 vs CI 的 Node | 打包进运行时的 Node 低于内核要求 |
+| `engines` | 目标的 `engines.node` 下限 vs CI 的 Node，按**范围**判（CI 的 `24.9` 是一条小版本线，`24` 是整个大版本） | 打包进运行时的 Node 低于内核要求；2026-11-23 前只比大版本，`0.2.3-alpha.2` 把下限从 `>=24.9` 抬到 `^24.22.3` 时读成「没问题」 |
 | `exports` | 我们 import 的每个具名导出是否还在 | 内核删掉具名导出（编译期是 `undefined`） |
 | `declarations` | 同一符号的签名是否变了 | 返回类型/必填字段增减（`SubagentActivation` 多了必填 `name`）；纯新增可选成员降为 note |
 | `slots` | 注册的每个 slot id 是否还有声明 | 座位退役 → 静默无操作 |
@@ -71,7 +71,7 @@ npm run check:preflight -- --npm <目标版本>             # 下载 + 校验 sh
 | `overlay` | overlay 改的每一行是否还有目标；insert id 是否撞行 | 补丁成为静默空操作 / 重复挂载 |
 | `skill-office` | 两处技能名单 vs 包自带名单 | 7 → 4 那次（构建与启动各拒一次） |
 | `deps` | 目标精确钉住的传递依赖，本地是否是那个版本 | `zod` 4.4.3 → 4.6.6（投影的 `ZodType` 缺方法） |
-| `peers` | 目标**新增**的 peer，本仓 manifest 是否声明了 | `--legacy-peer-deps` 不装 peer → 打包期 "Could not resolve" |
+| `peers` | 目标**新增**的 peer，本仓 manifest 是否声明了；以及对 cordis 一家（`NON_LINE`）**已声明**的 peer，本仓的 spec 与目标要求的范围是否有交集（预发布范围按其最低版本判：`^4.1.0` 够不到 `~4.2.0-alpha.1`） | `--legacy-peer-deps` 不装 peer → 打包期 "Could not resolve"；范围判空 → 类型门禁按 4.1.0 查、内核跑 4.2.0（2026-11-23 前只比名字） |
 | `payload` | 哪些包真的变了、变了多少文件（需 `--npm`） | 决定先看哪里 |
 
 **实测**（2026-11-12，0.2.2-rc.1 → rc.2，用换线前的仓库快照当被测树，两侧都是检出）：

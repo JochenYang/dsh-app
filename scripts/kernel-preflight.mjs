@@ -74,6 +74,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import semver from 'semver'
 import { installedKernelPackages, pluginDirs } from './lib/kernel-exports.mjs'
 import { removeTree } from './lib/remove-tree.mjs'
 import { followedSpec } from './kernel-line.mjs'
@@ -874,20 +875,33 @@ function checkLine(target, imports, findings, policy = 'floor') {
   return [...versions.keys()][0]
 }
 
-/** 2. Node floor vs CI. */
-function checkEngines(target, findings) {
+/**
+ * 2. Node floor vs CI.
+ *
+ * Judged as RANGES, not majors. The first version of this check compared the
+ * major alone, which was right for 0.2.2's `>=24.9` against a 22.x runner and
+ * blind to the move 0.2.3-alpha.2 actually made: `^24.22.3 || >=26.13.1` keeps
+ * the major and raises the minor, so a CI pinned to `24.9` — the floor of the
+ * PREVIOUS line, and the Node `build-runtime.mjs` packs into the artifact — read
+ * as fine. A CI `node-version` is itself a semver range (`24` is the whole major,
+ * `24.9` is its minor line, `24.22.3` one version), so the question is whether
+ * that range and the floor share a version.
+ *
+ * @param {object} target - the target facade.
+ * @param {Findings} findings - the report.
+ * @param {string[]} [configured] - the CI `node-version` values; the real workflows by default.
+ */
+function checkEngines(target, findings, configured = ciNodeVersions()) {
   const floor = target.enginesOfDsh()
   if (typeof floor !== 'string') {
     findings.note('engines', 'dsh', 'the target declares no engines.node')
     return
   }
-  const configured = ciNodeVersions()
-  const major = Number.parseInt(/(\d+)\./u.exec(floor)?.[1] ?? '', 10)
-  if (!Number.isFinite(major) || configured.length === 0) {
-    findings.note('engines', `node ${floor}`, `CI node-version lines: ${configured.join(', ') || 'none found'}`)
+  if (configured.length === 0) {
+    findings.note('engines', `node ${floor}`, 'CI node-version lines: none found')
     return
   }
-  const tooLow = configured.filter((version) => Number.parseInt(/(\d+)/u.exec(version)?.[1] ?? '0', 10) < major)
+  const tooLow = configured.filter((version) => !semver.intersects(version, floor))
   if (tooLow.length > 0) {
     findings.blocker('engines', `node ${floor}`, `CI runs ${tooLow.join(', ')}`,
       'raise .github/workflows node-version to the floor (and check scripts/build-runtime.mjs packs that Node)')
@@ -1111,46 +1125,113 @@ function checkSkillOffice(target, findings) {
  * @param {object} imports - our import map.
  * @param {object} findings - the report.
  */
-function checkPeers(target, baseline, imports, findings) {
+function checkPeers(target, baseline, imports, findings, specsOf = declaredSpecs()) {
   const packages = [...new Set([...imports.keys()].map((spec) => splitSpec(spec).pkg))]
-  const declared = declaredDependencies()
   let judged = 0
+  // The ranges the target's packages put on a peer we ALREADY declare: judged
+  // once per (peer, range), below the new-peer loop.
+  const ranges = new Map()
   for (const name of packages.sort()) {
-    const peers = Object.keys(target.packageOf(name)?.manifest?.peerDependencies ?? {})
-    if (peers.length === 0) continue
+    const peers = target.packageOf(name)?.manifest?.peerDependencies ?? {}
+    if (Object.keys(peers).length === 0) continue
     const before = new Set(Object.keys(baseline.packageOf(name)?.manifest?.peerDependencies ?? {}))
-    for (const peer of peers.filter((candidate) => candidate.startsWith('@deepseek-ai/') && !before.has(candidate))) {
+    for (const peer of Object.keys(peers).filter((candidate) => candidate.startsWith('@deepseek-ai/') && !before.has(candidate))) {
       judged += 1
-      if (declared.has(peer)) {
+      if (specsOf.has(peer)) {
         findings.note('peers', `${name} → ${peer}`, 'a new peer, already declared in this repository\'s manifests')
         continue
       }
       findings.blocker('peers', `${name} → ${peer}`, 'newly declared peer that no manifest of this repository installs',
         'add it to the devDependencies of every plugin whose suite bundles this package — --legacy-peer-deps skips peers')
     }
+    for (const [peer, range] of Object.entries(peers)) {
+      // Line packages are the line check's question (this tree sits one line
+      // behind before a bump — the expected state); the fork family is the one
+      // whose version moves on its own schedule.
+      if (!NON_LINE.has(peer) || typeof range !== 'string') continue
+      const key = `${peer}@${range}`
+      if (!ranges.has(key)) ranges.set(key, { peer, range, from: name })
+    }
   }
   findings.note('peers', `${String(judged)} new peer(s)`, judged === 0 ? 'the target adds no peer over the baseline' : 'see above')
+  // A peer we declare at a spec that shares no version with the target's range:
+  // the name check above is silent, because the name IS declared. 0.2.3-alpha.2
+  // moved the vendored cordis to `~4.2.0-alpha.1` (and schemastery to
+  // `~3.20.0-alpha.1`) while this repository pins `4.1.0` for the type gate —
+  // the gate would then check our plugins against 4.1.0 while the kernel runs
+  // 4.2.0, the kind of drift no export scan sees. Judged per spec: an exact
+  // devDependency pin is the one that decides what tsc resolves, a caret peer
+  // range the one the profile checks, and they can disagree.
+  let mismatched = 0
+  for (const { peer, range, from } of [...ranges.values()].sort((left, right) => `${left.peer}@${left.range}`.localeCompare(`${right.peer}@${right.range}`))) {
+    const ours = specsOf.get(peer)
+    if (ours === undefined || ours.size === 0) continue
+    const outside = [...ours].filter((spec) => !specReaches(spec, range))
+    if (outside.length === 0) continue
+    mismatched += 1
+    findings.blocker('peers', `${peer} ${range} ← ${from}`,
+      `the target requires ${range}; this repository declares ${outside.join(', ')}, which shares no version with it`,
+      'move the spec with the line: the exact devDependencies pin decides what the type gate resolves, the peerDependencies range what the profile checks')
+  }
+  findings.note('peers', `${String(mismatched)} peer range(s) outside the target's`, mismatched === 0 ? 'every declared peer spec shares a version with the target\u2019s range' : 'see above')
 }
 
 /**
- * Every `@deepseek-ai/*` name any manifest in this repository depends on.
+ * Whether a spec we declare can be satisfied by what the target's range installs.
+ *
+ * A range whose lowest version is a PRERELEASE (`~4.2.0-alpha.1`) installs that
+ * prerelease or a later one of the same tuple, and semver lets a prerelease
+ * satisfy a spec only when the spec itself carries a prerelease on that tuple —
+ * so `^4.1.0` does NOT reach it, at npm's hands or at pnpm's peer check, even
+ * though the two ranges share every stable 4.2.x that might ship one day. The
+ * probe is therefore the range's lowest version for a prerelease range, and the
+ * plain range intersection otherwise (a stable `~4.1.0` installs its newest
+ * 4.1.x, which a `^4.1.5` admits even though its lowest version does not).
+ *
+ * @param {string} spec - the spec this repository declares.
+ * @param {string} range - the range the target requires.
+ * @returns {boolean} whether some version the target can install satisfies the spec.
+ */
+function specReaches(spec, range) {
+  const lowest = semver.minVersion(range)
+  if (lowest === null) return true // not decidable: never a finding on a guess
+  if (lowest.prerelease.length > 0) return semver.satisfies(lowest, spec)
+  return semver.intersects(spec, range)
+}
+
+/**
+ * Every `@deepseek-ai/*` name any manifest in this repository depends on, with
+ * the specs it is declared at.
  *
  * Read as text from the manifests rather than resolved from `node_modules`, so
  * the answer is the same before an install and after one.
  *
- * @returns {Set<string>} the declared package names.
+ * @returns {Map<string, Set<string>>} declared package name → its specs.
  */
-function declaredDependencies() {
-  const declared = new Set()
+function declaredSpecs() {
+  const declared = new Map()
   const manifests = [path.join(root, 'package.json'), ...pluginDirs(root).map((dir) => path.join(dir, 'package.json'))]
   for (const file of manifests) {
     if (!existsSync(file)) continue
     const manifest = readManifest(path.dirname(file))
     for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
-      for (const name of Object.keys(manifest[field] ?? {})) declared.add(name)
+      for (const [name, spec] of Object.entries(manifest[field] ?? {})) {
+        if (typeof spec !== 'string') continue
+        const specs = declared.get(name)
+        if (specs === undefined) declared.set(name, new Set([spec]))
+        else specs.add(spec)
+      }
     }
   }
   return declared
+}
+
+/**
+ * Every `@deepseek-ai/*` name any manifest in this repository depends on.
+ * @returns {Set<string>} the declared package names.
+ */
+function declaredDependencies() {
+  return new Set(declaredSpecs().keys())
 }
 
 
@@ -1497,5 +1578,7 @@ export {
   buildTarget,
   installedTarget,
   checkLine,
+  checkEngines,
+  checkPeers,
   Findings,
 }

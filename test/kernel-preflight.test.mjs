@@ -43,7 +43,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { followedSpec } from '../scripts/kernel-line.mjs'
-import { Findings, checkLine, compareVersions, installedTarget, ourImports, ourOverlayRows } from '../scripts/kernel-preflight.mjs'
+import { Findings, checkEngines, checkLine, checkPeers, compareVersions, installedTarget, ourImports, ourOverlayRows } from '../scripts/kernel-preflight.mjs'
 import { scratchDir } from './scratch.mjs'
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -364,4 +364,76 @@ test('a line package pinned to the line version is not a transitive mismatch', (
     'a line package pin belongs to the line check, not the transitive one')
   assert.ok(report.findings.some((item) => item.check === 'deps' && item.subject.startsWith('zod 99.0.0')),
     'a third-party pin that is behind is still a finding')
+})
+
+test('the Node floor is judged as a range, so a raised minor inside the same major is a blocker', () => {
+  // 0.2.3-alpha.2 kept the major and raised the minor: `^24.22.3 || >=26.13.1`.
+  // The first version of this check compared majors, and a CI pinned to the
+  // PREVIOUS floor (`24.9`) — the Node build-runtime.mjs packs — read as fine.
+  const raised = { enginesOfDsh: () => '^24.22.3 || >=26.13.1' }
+  const behind = new Findings()
+  checkEngines(raised, behind, ['24.9', '24.9'])
+  assert.equal(behind.count('blocker'), 1, 'one finding for every workflow line that is under the floor')
+  assert.match(behind.items[0].detail, /CI runs 24\.9, 24\.9/u)
+
+  const atFloor = new Findings()
+  checkEngines(raised, atFloor, ['24.22.3', '24.22.3'])
+  assert.equal(atFloor.count('blocker'), 0)
+  assert.equal(atFloor.count('note'), 1)
+
+  const wholeMajor = new Findings()
+  checkEngines(raised, wholeMajor, ['24', '26'])
+  assert.equal(wholeMajor.count('blocker'), 0, 'a bare major is the whole major, and the runner hands over its newest')
+
+  const oldFloor = { enginesOfDsh: () => '>=24.9.0' }
+  const majorBehind = new Findings()
+  checkEngines(oldFloor, majorBehind, ['22'])
+  assert.equal(majorBehind.count('blocker'), 1, 'the 0.2.2 case still holds')
+  const unparseable = new Findings()
+  checkEngines({ enginesOfDsh: () => undefined }, unparseable, ['24.9'])
+  assert.equal(unparseable.count('blocker'), 0, 'no declared floor is a note, not a guess')
+})
+
+test('a declared peer whose spec shares no version with the target\u2019s range is a blocker', () => {
+  // 0.2.3-alpha.2 moved the vendored cordis to `~4.2.0-alpha.1`; this repository
+  // pins `4.1.0` for the type gate, so tsc would check the plugins against 4.1.0
+  // while the kernel runs 4.2.0. The name check is silent — the name IS declared.
+  const target = {
+    packageOf: (name) => ({
+      '@deepseek-ai/dsh-agent': { manifest: { peerDependencies: { '@deepseek-ai/cordis': '~4.2.0-alpha.1', '@deepseek-ai/dsh-tools': '0.2.3-alpha.2' } } },
+      '@deepseek-ai/dsh-tools': { manifest: { peerDependencies: { '@deepseek-ai/cordis': '~4.2.0-alpha.1' } } },
+    })[name],
+  }
+  const baseline = { packageOf: () => ({ manifest: { peerDependencies: { '@deepseek-ai/dsh-tools': '0.2.2-rc.5' } } }) }
+  const imports = new Map([['@deepseek-ai/dsh-agent', new Set(['defineTool'])], ['@deepseek-ai/dsh-tools', new Set(['ToolDefinition'])]])
+  const declared = new Map([
+    ['@deepseek-ai/cordis', new Set(['4.1.0', '^4.1.0'])],
+    ['@deepseek-ai/dsh-tools', new Set(['^0.2.2-rc.5'])],
+  ])
+  const findings = new Findings()
+  checkPeers(target, baseline, imports, findings, declared)
+  const blockers = findings.items.filter((item) => item.severity === 'blocker')
+  assert.equal(blockers.length, 1, 'one per (peer, range), not one per consuming package')
+  assert.match(blockers[0].subject, /^@deepseek-ai\/cordis ~4\.2\.0-alpha\.1 ← /u)
+  // The caret peer range is named too: semver lets a prerelease satisfy a spec
+  // only when the spec carries a prerelease on the same tuple, so `^4.1.0` does
+  // not reach a `~4.2.0-alpha.1` install — at npm's hands or at pnpm's peer check.
+  assert.match(blockers[0].detail, /declares 4\.1\.0, \^4\.1\.0, which shares no version/u)
+  assert.ok(!blockers.some((item) => item.subject.includes('dsh-tools 0.2.3-alpha.2')),
+    'a line package peer is the line check\u2019s question, not this one')
+
+  const moved = new Map([['@deepseek-ai/cordis', new Set(['4.2.0-alpha.1', '~4.2.0-alpha.1'])], ['@deepseek-ai/dsh-tools', new Set(['^0.2.2-rc.5'])]])
+  const after = new Findings()
+  checkPeers(target, baseline, imports, after, moved)
+  assert.equal(after.count('blocker'), 0, 'once the pin moves with the line, nothing is reported')
+  assert.match(after.items.find((item) => item.check === 'peers' && /peer range/u.test(item.subject)).detail, /every declared peer spec shares a version/u)
+
+  // A stable range is judged by intersection, not by its lowest version: the
+  // target's `~4.1.0` installs its newest 4.1.x, which a `^4.1.5` admits.
+  const stable = {
+    packageOf: () => ({ manifest: { peerDependencies: { '@deepseek-ai/cordis': '~4.1.0' } } }),
+  }
+  const stableFindings = new Findings()
+  checkPeers(stable, { packageOf: () => ({ manifest: {} }) }, imports, stableFindings, new Map([['@deepseek-ai/cordis', new Set(['^4.1.5'])]]))
+  assert.equal(stableFindings.count('blocker'), 0)
 })
