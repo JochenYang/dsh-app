@@ -834,6 +834,17 @@ describe('renderImpact — the call itself: the site line, the target source, an
     assert.match(rendered, /^⚠️ 1 file\(s\) this answer cites changed since it was indexed \(src\/shared\.ts\)[^\n]*\ncodegraph_impact: "dup" is declared 2 time\(s\)/u)
   })
 
+  it('prints the provenance legend when only a node deeper in the tree carries the mark', () => {
+    // The root is a parsed caller; its caller is reached through an IPC channel.
+    // The mark is on the second row, so the legend has to be there too.
+    const inner = { id: 'src/preload.ts#function:open', name: 'open', kind: 'function', path: 'src/preload.ts', line: 4, children: [], provenance: 'ipc' as const }
+    const root = { id: 'src/x.ts#function:g', name: 'g', kind: 'function', path: 'src/x.ts', line: 9, children: [inner] }
+    const rendered = text(renderImpact({ symbol: 'f' }, impact({ callers: { depth: 2, nodes: 2, truncated: false, roots: [root] } })))
+    assert.match(rendered, /^- src\/x\.ts:9 function g$/mu)
+    assert.match(rendered, /^  - src\/preload\.ts:4 function open ⇢ ipc$/mu)
+    assert.equal(rendered.split('\n').filter(line => line.startsWith('(⇢ ipc = a SYNTHESIZED edge')).length, 1, 'the legend is printed once, for the tree alone')
+  })
+
   it('carries the same banner on find and context', () => {
     const symbol = { id: 'app/types.ts#interface:User', name: 'User', kind: 'interface', path: 'app/types.ts', line: 4, parent: undefined }
     const found = text(renderFind({ freshness: 'stale', note: undefined, pendingFiles: ['app/types.ts'], truncated: false, symbols: [{ ...symbol, references: 9 }] }))

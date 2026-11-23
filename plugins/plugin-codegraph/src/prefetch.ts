@@ -30,7 +30,7 @@
  * @module @dsh-app/plugin-codegraph/host/prefetch
  */
 
-import { allRows, fileNodeId, oneRow, type Graph } from './store.ts'
+import { allRows, fileNodeId, oneRow, NAME_RESOLVABLE, type Graph } from './store.ts'
 
 /**
  * What one pack may cost, framing sentence included.
@@ -290,7 +290,7 @@ function resolveFile(graph: Graph, token: string): string | undefined {
 function resolveName(graph: Graph, token: string): SymbolHit | undefined {
   const rows = allRows<Omit<SymbolHit, 'references'>>(
     graph.db,
-    'SELECT id, path, name, kind, line, parent, signature FROM symbols WHERE name = ? LIMIT 2',
+    `SELECT id, path, name, kind, line, parent, signature FROM symbols WHERE name = ? AND ${NAME_RESOLVABLE} LIMIT 2`,
     token,
   )
   if (rows.length !== 1) return undefined

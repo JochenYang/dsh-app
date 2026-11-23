@@ -32,7 +32,7 @@
  * @module @dsh-app/plugin-codegraph/grep-note
  */
 
-import { allRows, type Graph } from './store.ts'
+import { allRows, NAME_RESOLVABLE, type Graph } from './store.ts'
 
 /** The longest note that may ride on another tool's answer. */
 export const SEARCH_NOTE_MAX_CHARS = 320
@@ -133,7 +133,7 @@ export function searchNote(graph: Graph, pattern: string): string | undefined {
   // a name shared by 317 declarations should not read all of them to say nothing.
   const declared = allRows<Declaration>(
     graph.db,
-    'SELECT id, name, kind, path, line, signature FROM symbols WHERE name = ? LIMIT 2',
+    `SELECT id, name, kind, path, line, signature FROM symbols WHERE name = ? AND ${NAME_RESOLVABLE} LIMIT 2`,
     name,
   )
   if (declared.length !== 1) return undefined

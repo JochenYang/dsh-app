@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { validateJsonSchemaValue, type JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import { apply } from '../src/index.ts'
 import { ANSWER_LIST_CHARS, ANSWER_LIST_TOKENS } from '../src/budget.ts'
+import { handlerId, routeId } from '../src/synthesis.ts'
 import { removeTree } from '../../../scripts/lib/remove-tree.mjs'
 
 /** Scratch roots this suite created, removed on the way out. */
@@ -173,6 +174,77 @@ function writeProject(root: string): void {
   writeFileSync(join(root, 'src', 's.ts'), functions(20, 's'))
   writeFileSync(join(root, 'src', 'm.ts'), functions(45, 'm'))
   writeFileSync(join(root, 'src', 'l.ts'), functions(80, 'l'))
+  // The three pairings no parse sees (synthesis.ts): an IPC channel spelled as a
+  // constant on both sides, an event on a bus, a route and the fetch of its path.
+  writeFileSync(join(root, 'src', 'channels.ts'), "export const PLATFORM_IPC = { open: 'platform:open', localeChanged: 'platform:locale-changed' }\n")
+  writeFileSync(join(root, 'src', 'ipc.ts'), [
+    "import { ipcMain, BrowserWindow } from 'electron'",
+    "import { PLATFORM_IPC } from './channels'",
+    '/** Opens a platform view. */',
+    'export function onOpen(event: unknown, page: unknown): void {',
+    '  void event',
+    '  void page',
+    '}',
+    'export function install(): void {',
+    '  ipcMain.handle(PLATFORM_IPC.open, onOpen)',
+    "  ipcMain.handle('platform:bounds', (event, bounds: unknown): void => {",
+    '    void event',
+    '    void bounds',
+    '  })',
+    '}',
+    'export function notifyLocale(view: BrowserWindow): void {',
+    '  view.webContents.send(PLATFORM_IPC.localeChanged)',
+    '}',
+    "  ipcMain.handle('open', (event: unknown): void => {",
+    '    void event',
+    '  })',
+  ].join('\n'))
+  writeFileSync(join(root, 'src', 'preload.ts'), [
+    "import { ipcRenderer } from 'electron'",
+    "import { PLATFORM_IPC } from './channels'",
+    'export function open(page: unknown): Promise<void> {',
+    '  return ipcRenderer.invoke(PLATFORM_IPC.open, page)',
+    '}',
+    'export function bounds(value: unknown): void {',
+    "  ipcRenderer.send('platform:bounds', value)",
+    '}',
+    'export function onLocaleChanged(): void {',
+    '  ipcRenderer.on(PLATFORM_IPC.localeChanged, () => {',
+    '    void 0',
+    '  })',
+    '}',
+    'export function openBare(page: unknown): Promise<void> {',
+    "  return ipcRenderer.invoke('open', page)",
+    '}',
+  ].join('\n'))
+  writeFileSync(join(root, 'src', 'handlers.ts'), [
+    'export function onCreated(user: unknown): void {',
+    '  void user',
+    '}',
+    'export function listUsers(): unknown[] {',
+    '  return []',
+    '}',
+  ].join('\n'))
+  writeFileSync(join(root, 'src', 'bus.ts'), [
+    "import { onCreated } from './handlers'",
+    'export function wire(bus: EventEmitter): void {',
+    "  bus.on('user:created', onCreated)",
+    '}',
+  ].join('\n'))
+  writeFileSync(join(root, 'src', 'api.ts'), [
+    "import { listUsers } from './handlers'",
+    'export function mount(app: unknown): void {',
+    "  app.get('/users', listUsers)",
+    '}',
+    'export function signup(bus: EventEmitter): void {',
+    "  bus.emit('user:created', {})",
+    '}',
+  ].join('\n'))
+  writeFileSync(join(root, 'src', 'client.ts'), [
+    'export async function loadUsers(): Promise<unknown> {',
+    "  return fetch('/users')",
+    '}',
+  ].join('\n'))
 }
 
 /** Run one tool, assert its answer against the schema IT declared, and render it. */
@@ -440,6 +512,77 @@ describe('the three answers on real files', () => {
       assert.match(overview.text, /^⚠️ 1 file\(s\) this answer cites changed since it was indexed \(src\/caller\.ts\)/u)
       const tree = await answer(tools, 'codegraph_impact', { symbol: 'target', depth: 2 }, root)
       assert.deepEqual(tree.value.pendingFiles, ['src/caller.ts'], 'the caller tree cites its nodes')
+    } finally {
+      await dispose()
+    }
+  })
+
+  it('joins the two sides of a channel, an event and a route, and marks every join', async () => {
+    const { root } = fixture()
+    writeProject(root)
+    const { ctx, tools, emit, dispose } = fakeContext()
+    apply(ctx as never)
+    const agent = { session: { header: { cwd: root } } }
+    try {
+      emit('session/created', { header: { cwd: root } } as never)
+      await until(async () => {
+        const found = await tools.get('codegraph_find')!.execute({ query: 'onOpen' }, { agent })
+        return found.freshness === 'current' && (found.symbols as unknown[]).length === 1
+      }, 'the first pass to settle')
+
+      // IPC: the preload's `invoke` is a caller of the main-process handler, by the
+      // constant both files import; the dispatch line rides the row like any other.
+      const open = await answer(tools, 'codegraph_impact', { symbol: 'onOpen' }, root)
+      const rows = open.value.referencing as { path: string, line: number, name?: string, provenance?: string, narrowed?: boolean, text?: string }[]
+      assert.deepEqual(rows.map(row => [row.name, row.path, row.line, row.provenance, row.narrowed]), [['open', 'src/preload.ts', 4, 'ipc', undefined]])
+      assert.match(rows[0]?.text ?? '', /ipcRenderer\.invoke\(PLATFORM_IPC\.open, page\)/u)
+      assert.match(open.text, /^- `open` — `src\/preload\.ts:4` ⇢ ipc: `/mu)
+      assert.match(open.text, /^\(⇢ ipc = a SYNTHESIZED edge/mu)
+      assert.doesNotMatch(open.text, / ✓/u, 'nothing here resolved a name')
+
+      // The inline handler is a declaration now, findable by the id the route and
+      // handler ids are made of, and the second channel reaches it.
+      const inline = handlerId('src/ipc.ts', 'platform:bounds')
+      const bounds = await answer(tools, 'codegraph_impact', { symbol: inline }, root)
+      assert.deepEqual((bounds.value.referencing as { name?: string, path: string, provenance?: string }[]).map(row => [row.name, row.path, row.provenance]), [['bounds', 'src/preload.ts', 'ipc']])
+      assert.equal((bounds.value.target as { kind: string }).kind, 'handler')
+      assert.equal((bounds.value.source as { endLine: number }).endLine, 13, 'the declaration spans the registering call')
+
+      // The reverse channel: a renderer-side listener, sent to from the main
+      // process. And the depth-2 tree carries the same mark as the list.
+      const locale = await answer(tools, 'codegraph_impact', { symbol: handlerId('src/preload.ts', 'PLATFORM_IPC.localeChanged') }, root)
+      assert.deepEqual((locale.value.referencing as { name?: string, provenance?: string }[]).map(row => [row.name, row.provenance]), [['notifyLocale', 'ipc']])
+      const deep = await answer(tools, 'codegraph_impact', { symbol: 'onOpen', depth: 2 }, root)
+      const root0 = (deep.value.callers as { roots: { name: string, provenance?: string }[] }).roots[0]
+      assert.deepEqual([root0?.name, root0?.provenance], ['open', 'ipc'])
+      assert.match(deep.text, /^- src\/preload\.ts:4 function open ⇢ ipc$/mu)
+
+      // A key that spells a real function's name: the synthesized handler is a
+      // declaration `find` lists and an id resolves, but no NAME lookup sees it —
+      // `impact('open')` is the function, not "declared twice".
+      const found = await answer(tools, 'codegraph_find', { query: 'open' }, root)
+      const exact = (found.value.symbols as { name: string, kind: string }[]).filter(row => row.name === 'open')
+      assert.deepEqual(exact.map(row => row.kind).sort(), ['function', 'handler'], '`find` lists every kind, the synthesized one beside the parsed one')
+      const byName = await answer(tools, 'codegraph_impact', { symbol: 'open' }, root)
+      assert.equal((byName.value.target as { kind: string }).kind, 'function')
+      const handlerByName = await answer(tools, 'codegraph_context', { symbol: handlerId('src/ipc.ts', 'open') }, root)
+      assert.deepEqual((handlerByName.value.calledBy as { provenance?: string }[]).map(row => row.provenance), ['ipc'])
+      // The `path` of a `calledBy` row is the caller's id for a symbol caller —
+      // a pre-existing shape, left as it is; the mark is what this case is for.
+      assert.match(handlerByName.text, /^called by:\n- src\/preload\.ts#function:openBare:15 ⇢ ipc$/mu, 'the context answer marks the same edge the impact answer does')
+      assert.match(handlerByName.text, /\(⇢ ipc = a SYNTHESIZED edge/u)
+
+      // The event pairs on the bus and the name; the route is a declaration the
+      // fetch points at, and the route points at its handler.
+      const created = await answer(tools, 'codegraph_impact', { symbol: 'onCreated' }, root)
+      assert.deepEqual((created.value.referencing as { name?: string, provenance?: string }[]).map(row => [row.name, row.provenance]), [['signup', 'event']])
+      const route = routeId('src/api.ts', 'get', '/users')
+      const users = await answer(tools, 'codegraph_impact', { symbol: route }, root)
+      assert.deepEqual((users.value.referencing as { name?: string, path: string, provenance?: string }[]).map(row => [row.name, row.path, row.provenance]), [['loadUsers', 'src/client.ts', 'route']])
+      assert.equal((users.value.target as { kind: string, name: string }).kind, 'route')
+      const listed = await answer(tools, 'codegraph_impact', { symbol: 'listUsers' }, root)
+      assert.deepEqual((listed.value.referencing as { name?: string, provenance?: string }[]).map(row => [row.name, row.provenance]), [['GET /users', 'route']])
+      assert.match(listed.text, /^- `GET \/users` — `src\/api\.ts:3` ⇢ route: `app\.get\('\/users', listUsers\)`$/mu)
     } finally {
       await dispose()
     }

@@ -213,10 +213,23 @@ function callerNodeLines(node: CallerNode, level: number): string[] {
   const indent = '  '.repeat(level)
   const cut = node.callers === undefined ? '' : ` — ${String(node.callers)} caller(s), ${String(node.children.length)} shown`
   const repeated = node.repeated === true ? ' (see above)' : ''
+  // The same mark the list prints: a caller reached by a synthesized edge is a
+  // claim about a key convention, and the tree must not show it as a parsed call.
+  const origin = node.provenance === undefined ? '' : ` ⇢ ${node.provenance}`
   return [
-    `${indent}- ${node.path}:${String(node.line)} ${node.kind} ${node.name}${cut}${repeated}`,
+    `${indent}- ${node.path}:${String(node.line)} ${node.kind} ${node.name}${origin}${cut}${repeated}`,
     ...node.children.flatMap(child => callerNodeLines(child, level + 1)),
   ]
+}
+
+/** The mark a synthesized edge wears on a context row (`⇢ ipc`). */
+function originOf(edge: { readonly provenance?: string | undefined }): string {
+  return edge.provenance === undefined ? '' : ` ⇢ ${edge.provenance}`
+}
+
+/** The one legend line for the provenances an answer carries. */
+function provenanceLegendOf(provenances: readonly string[]): string {
+  return `(⇢ ${[...new Set(provenances)].join(', ')} = a SYNTHESIZED edge: that call names the key of a registration elsewhere — an IPC channel, an event on the same receiver, a route path — which no parse saw meet; the key is a convention, not a resolved name.)`
 }
 
 /**
@@ -304,11 +317,13 @@ export function renderImpact(args: unknown, result: ImpactResult): TextBlock[] {
   // the file past the answer's bounds, the text budget spent) is still a
   // location, and the header says how many rows carry text when not all do.
   const referenceLines = result.referencing.map((ref) => {
-    const where = `\`${ref.path}:${String(ref.line)}\`${ref.narrowed === true ? ' ✓' : ''}`
+    const origin = ref.provenance === undefined ? '' : ` ⇢ ${ref.provenance}`
+    const where = `\`${ref.path}:${String(ref.line)}\`${ref.narrowed === true ? ' ✓' : ''}${origin}`
     if (ref.text === undefined) return `- ${ref.name === undefined ? '' : `\`${ref.name}\` — `}${where}`
     return `- ${ref.name === undefined ? '' : `\`${ref.name}\` — `}${where}: \`${ref.text}\`${ref.drift === true ? ' ⚠ file changed since it was indexed — this line may no longer be the call' : ''}`
   })
   const withText = result.referencing.filter(ref => ref.text !== undefined).length
+  const synthesized = result.referencing.filter(ref => ref.provenance !== undefined)
   const textNote = withText === 0
     ? []
     : [
@@ -319,6 +334,16 @@ export function renderImpact(args: unknown, result: ImpactResult): TextBlock[] {
           ? [`call-site text is shown for ${String(withText)} of ${String(result.referencing.length)} row(s); the rest are locations only.`]
           : []),
       ]
+  // The provenance legend, printed once and only when a synthesized row is here —
+  // in the list or anywhere in the tree, which is walked once for both:
+  // such a row is a claim about a convention (two calls naming one key), and a
+  // reader who took it for a resolved name would trust it more than it deserves.
+  const treeProvenances = (result.callers?.roots ?? []).flatMap(function walk(node: CallerNode): string[] {
+    return node.provenance === undefined ? node.children.flatMap(walk) : [node.provenance, ...node.children.flatMap(walk)]
+  })
+  const provenanceLegend = synthesized.length === 0 && treeProvenances.length === 0
+    ? []
+    : [provenanceLegendOf([...synthesized.map(ref => String(ref.provenance)), ...treeProvenances])]
   const legend = result.referencing.some(ref => ref.narrowed === true)
     ? ['(✓ = resolved by a same-file declaration or an import clause; unmarked rows are name matches.)']
     : []
@@ -342,6 +367,7 @@ export function renderImpact(args: unknown, result: ImpactResult): TextBlock[] {
         ]),
     ...textNote,
     ...legend,
+    ...provenanceLegend,
     // The tests, out of the rows above and into the group the reader runs first.
     ...testLines(result.tests),
     // The callers walked further when more than one level was asked for.
@@ -545,9 +571,14 @@ export function renderContext(result: ContextResult, maxRows: number): TextBlock
       ? []
       : [
           'calls made from here:',
-          ...result.calls.map(edge => `- ${edge.name ?? '?'} at line ${String(edge.line)}${callsSigned && typeof edge.signature === 'string' && edge.signature !== '' ? ` — ${edge.signature}` : ''}`),
+          ...result.calls.map(edge => `- ${edge.name ?? '?'} at line ${String(edge.line)}${callsSigned && typeof edge.signature === 'string' && edge.signature !== '' ? ` — ${edge.signature}` : ''}${originOf(edge)}`),
         ]),
-    ...(result.calledBy.length === 0 ? [] : ['called by:', ...result.calledBy.map(edge => `- ${edge.path ?? '?'}:${String(edge.line)}`)]),
+    ...(result.calledBy.length === 0 ? [] : ['called by:', ...result.calledBy.map(edge => `- ${edge.path ?? '?'}:${String(edge.line)}${originOf(edge)}`)]),
+    // The same legend `impact` prints, when either list holds a synthesized edge:
+    // a convention about a key must not read as a parsed call here either.
+    ...([...result.calls, ...result.calledBy].some(edge => edge.provenance !== undefined)
+      ? [provenanceLegendOf([...result.calls, ...result.calledBy].flatMap(edge => edge.provenance === undefined ? [] : [edge.provenance]))]
+      : []),
     ...(result.imports.length === 0 ? [] : ['imports:', ...result.imports.map(path => `- ${path}`)]),
     ...(result.documents.length === 0 ? [] : ['described in:', ...result.documents.map(doc => `- ${doc.path}:${String(doc.line)}`)]),
     // The symbol branch's lists share one boolean, so the sentence names no count. It

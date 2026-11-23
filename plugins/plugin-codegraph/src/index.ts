@@ -904,6 +904,9 @@ export function apply(ctx: Context): void {
                 // The caller's file no longer matches its recorded hash, so the
                 // line number counts the old bytes. Printed as a warning on the row.
                 drift: { type: 'boolean' },
+                // Set when the edge was synthesized: this call names the key of a
+                // registration in another file (an IPC channel, an event, a route).
+                provenance: { type: 'string', enum: ['ipc', 'event', 'route'] },
               },
             },
           },
@@ -957,6 +960,7 @@ export function apply(ctx: Context): void {
                     line: { type: 'number', required: true },
                     callers: { type: 'number' },
                     repeated: { type: 'boolean' },
+                    provenance: { type: 'string', enum: ['ipc', 'event', 'route'] },
                     children: {
                       type: 'array',
                       required: true,
@@ -971,6 +975,7 @@ export function apply(ctx: Context): void {
                           line: { type: 'number', required: true },
                           callers: { type: 'number' },
                           repeated: { type: 'boolean' },
+                          provenance: { type: 'string', enum: ['ipc', 'event', 'route'] },
                           children: {
                             type: 'array',
                             required: true,
@@ -985,6 +990,7 @@ export function apply(ctx: Context): void {
                                 line: { type: 'number', required: true },
                                 callers: { type: 'number' },
                                 repeated: { type: 'boolean' },
+                                provenance: { type: 'string', enum: ['ipc', 'event', 'route'] },
                                 children: { type: 'array', required: true },
                               },
                             },
@@ -1278,6 +1284,7 @@ export function apply(ctx: Context): void {
                 name: { type: 'string' },
                 // The callee's head, only when the call resolves to one declaration.
                 signature: { type: 'string' },
+                provenance: { type: 'string', enum: ['ipc', 'event', 'route'] },
               },
             },
           },
@@ -1292,6 +1299,7 @@ export function apply(ctx: Context): void {
                 line: { type: 'number', required: true },
                 path: { type: 'string' },
                 name: { type: 'string' },
+                provenance: { type: 'string', enum: ['ipc', 'event', 'route'] },
               },
             },
           },

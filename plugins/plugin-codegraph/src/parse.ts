@@ -797,18 +797,65 @@ export interface SyntaxNode {
   childForFieldName(name: string): SyntaxNode | null
 }
 
+/**
+ * One call site.
+ *
+ * `name`, `line`, `endLine` and `owner` are what a call EDGE is built from. The
+ * other three describe the call's ARGUMENTS, for an edge no declaration links:
+ * when two files write the same KEY — `ipcMain.handle(K, h)` in one,
+ * `ipcRenderer.invoke(K)` in the other; `app.get(p, h)` and `fetch(p)` — the key
+ * is the only thing connecting them, and the handler is what such an edge should
+ * point at. The three are `undefined` when the call does not spell that shape,
+ * and absent altogether for a scanner that reads no tree; none of them is
+ * resolved — they are what the file wrote.
+ */
+export interface ParsedCall {
+  /** The callee's name as the edge resolver reads it (`ipcMain.handle(...)` → `handle`). */
+  readonly name: string
+  /** The line the call expression starts on, 1-based. */
+  readonly line: number
+  /**
+   * The line the call expression ends on, 1-based. A handler written inline spans
+   * exactly this extent, which is what a synthetic symbol's `endLine` needs.
+   * Absent for the schema-file scanners, which read no tree.
+   */
+  readonly endLine?: number | undefined
+  /** The enclosing declaration's node id, or undefined for a call made at file scope. */
+  readonly owner: string | undefined
+  /**
+   * The receiver of a member call as written — `ipcMain` in `ipcMain.handle(...)`,
+   * `obj` in `obj.emit(...)`, the whole `obj.m` in `obj.m?.n(...)` — and undefined
+   * for a call that is not a member call. Text, never a resolved symbol.
+   */
+  readonly receiver?: string | undefined
+  /**
+   * The first argument when it is a KEY: a string literal's content (quotes
+   * removed, `\'` `\"` `\\` `\n` decoded, every other escape left as written) or an
+   * identifier chain (`PLATFORM_IPC.open`, `Events.user.created`). Any other shape
+   * — a number, a call, an object, a template string, an optional chain `a?.b` —
+   * is undefined rather than a text that happens to look matchable.
+   */
+  readonly key?: string | undefined
+  /**
+   * The second argument when it is a handler: an identifier chain's text
+   * (`onOpen`), or the literal `(inline)` for a function written in place. Undefined
+   * otherwise.
+   */
+  readonly handler?: string | undefined
+}
+
 /** What one file parsed to. */
 export interface ParsedFile {
   readonly symbols: readonly SymbolRecord[]
   /**
-   * Call targets by name, with the line they were called from and the symbol that
-   * contains the call.
+   * Call sites, with the line each was called from and the symbol that contains
+   * it; {@link ParsedCall} carries the argument fields a synthesised edge reads.
    *
    * `owner` is the enclosing declaration's node id, or undefined for a call made
    * at file scope. It is what lets an edge say "this FUNCTION calls X" rather
    * than "this file does".
    */
-  readonly calls: readonly { readonly name: string, readonly line: number, readonly owner: string | undefined }[]
+  readonly calls: readonly ParsedCall[]
   /** Import specifiers, verbatim (resolution happens against the project). */
   /**
    * Import specifiers, verbatim (resolution happens against the project).
@@ -954,6 +1001,103 @@ function calleeName(node: SyntaxNode): string {
   const constructor = node.childForFieldName('constructor')
   if (constructor !== null) return leafName(constructor)
   return ''
+}
+
+/**
+ * An identifier, or a chain of them joined by dots: `PLATFORM_IPC.open`,
+ * `Events.user.created`. The shape a key or a handler must have to be matchable
+ * by text across files; an optional chain (`a?.b`) or a non-null assertion
+ * (`a!.b`) fails it on purpose.
+ */
+const IDENTIFIER_CHAIN = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/u
+
+/** What a handler written in place is recorded as: the call cannot give it a name. */
+const INLINE_HANDLER = '(inline)'
+
+/**
+ * The receiver of a member call, as written: `ipcMain` in `ipcMain.handle(...)`,
+ * the whole `obj.m` in `obj.m?.n(...)`. Undefined for any other callee shape.
+ *
+ * Text, never a resolved symbol: the consumer matches receivers by what the file
+ * wrote (`ipcMain`), which is a fact; resolving `ipcMain` to a declaration would
+ * be a guess this module does not make.
+ */
+function memberReceiver(callee: SyntaxNode): string | undefined {
+  return callee.type === 'member_expression' ? callee.childForFieldName('object')?.text : undefined
+}
+
+/**
+ * A call's positional arguments in source order, or none for a grammar that names
+ * no `arguments` field (Kotlin, Swift, C#): such a call is recorded without its
+ * argument fields, the shape it had before those fields existed.
+ *
+ * Read from the FIELD only. A type argument list (`foo<T>(x)`) is a separate
+ * `type_arguments` field on the call and never enters this list, and a comment
+ * between two arguments is an extra the grammar interleaves, not an argument.
+ */
+function positionalArguments(node: SyntaxNode): readonly SyntaxNode[] {
+  const list = node.childForFieldName('arguments')
+  return list === null ? [] : list.namedChildren.filter(child => child.type !== 'comment')
+}
+
+/**
+ * The text of an argument that NAMES something — a bare identifier or a dotted
+ * chain — when it is one. Anything else answers undefined: a key is matched by
+ * text across files, and only the plain chain is stable enough to match on.
+ */
+function identifierChainText(node: SyntaxNode | undefined): string | undefined {
+  if (node === undefined || (node.type !== 'identifier' && node.type !== 'member_expression')) return undefined
+  return IDENTIFIER_CHAIN.test(node.text) ? node.text : undefined
+}
+
+/**
+ * The content of a TS/JS string literal: quotes dropped, `\'` `\"` `\\` `\n`
+ * decoded, every other escape (`\t`, `\u0041`) kept as written.
+ *
+ * Assembled from the `string_fragment` and `escape_sequence` children rather than
+ * by stripping the node's own quotes — which is also what confines it to the
+ * TS/JS grammars: Python's `string` is built from `string_start` / `string_content`
+ * / `string_end` and answers undefined, its keys deliberately not read.
+ *
+ * Only called for a `string` node.
+ */
+function stringLiteralValue(node: SyntaxNode): string | undefined {
+  let value = ''
+  for (const child of node.namedChildren) {
+    if (child.type === 'string_fragment') value += child.text
+    else if (child.type === 'escape_sequence') value += decodeEscape(child.text)
+    else return undefined
+  }
+  return value
+}
+
+function decodeEscape(escape: string): string {
+  if (escape === '\\n') return '\n'
+  // `\'`, `\"` and `\\` each stand for their own second character.
+  if (escape === "\\'" || escape === '\\"' || escape === '\\\\') return escape.slice(1)
+  return escape
+}
+
+/**
+ * The KEY a first argument names, when it names one: a string literal's content
+ * (`'/users/:id'` → `/users/:id`) or an identifier chain (`PLATFORM_IPC.open`).
+ * A number, a call, an object, a template string or an optional chain is not a
+ * key and answers undefined.
+ */
+function argumentKey(argument: SyntaxNode | undefined): string | undefined {
+  if (argument === undefined) return undefined
+  return argument.type === 'string' ? stringLiteralValue(argument) : identifierChainText(argument)
+}
+
+/**
+ * The HANDLER a second argument is, when it is one: an identifier chain's text
+ * (`onOpen`), or the literal `(inline)` for a function written in place — whose
+ * extent is the call's own `line`..`endLine`. Anything else answers undefined.
+ */
+function argumentHandler(argument: SyntaxNode | undefined): string | undefined {
+  if (argument === undefined) return undefined
+  if (argument.type === 'arrow_function' || argument.type === 'function' || argument.type === 'function_expression') return INLINE_HANDLER
+  return identifierChainText(argument)
 }
 
 /** Type names that never resolve to a project declaration. */
@@ -1294,9 +1438,10 @@ export function normalizeSignature(nodeText: string, kind: string): string {
   }
   const head = stripHeadComments(cuts.length === 0 ? text : text.slice(0, Math.min(...cuts)))
     .replace(/\s+/gu, ' ')
-    // After the fold, so line breaks are gone: any control character left cannot be
-    // read in a head, and a placeholder can.
-    .replace(/\p{Cc}/gu, '?')
+    // After the fold, so line breaks are gone: any control or FORMAT character
+    // left cannot be read in a head — a bidi override would rearrange the row it
+    // sits in — and a placeholder can.
+    .replace(/[\p{Cc}\p{Cf}]/gu, '?')
     .trim()
   if (head.replace(MODIFIERS_ONLY, '').trim() === '') return ''
   // The cap includes the ellipsis, so a head is never longer than MAX_SIGNATURE.
@@ -1507,8 +1652,11 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
    * started at `file:<path>`, so `codegraph_context` could answer "what does this
    * file call" but never "what does this function call" — the question the tool
    * is actually asked.
+   *
+   * The argument fields ({@link ParsedCall}) are for an edge no declaration
+   * links; see the helpers that read them.
    */
-  const calls: { name: string, line: number, owner: string | undefined }[] = []
+  const calls: ParsedCall[] = []
   const imports: { specifier: string, line: number, names: string[] }[] = []
   const heritage: { from: string, name: string, line: number, kind: 'extends' | 'implements' }[] = []
   const typeRefs: { name: string, line: number, owner: string | undefined }[] = []
@@ -1596,7 +1744,20 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
         : node.childForFieldName(callShape.field)
       if (callee === null) continue
       const name = calleeName(callee)
-      if (name !== '') calls.push({ name, line: node.startPosition.row + 1, owner: ownerId })
+      if (name === '') continue
+      // The argument fields come from the `arguments` FIELD; a grammar without one
+      // leaves them undefined (see `positionalArguments`). `endLine` is the call
+      // expression's own extent, which an inline handler fills exactly.
+      const args = positionalArguments(node)
+      calls.push({
+        name,
+        line: node.startPosition.row + 1,
+        endLine: node.endPosition.row + 1,
+        owner: ownerId,
+        receiver: memberReceiver(callee),
+        key: argumentKey(args[0]),
+        handler: argumentHandler(args[1]),
+      })
     }
     if (shape.import !== undefined && node.type === shape.import.type) {
       // An empty `field` means the grammar names the target as a CHILD node

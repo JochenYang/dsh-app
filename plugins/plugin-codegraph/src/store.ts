@@ -55,8 +55,15 @@ import { dirname } from 'node:path'
  * comment" about the 41% that do), and `edges.narrowed` (0 in an older graph, which
  * would mark every import-narrowed reference as project-wide). None is derived at
  * query time, so a rebuild is the only way an existing graph gets them.
+ *
+ * Version 6 adds the `registrations` table and `edges.provenance`, and it is the
+ * version-3 story again: an older graph has no registrations and no synthesized
+ * edges, and the incremental pass only rebuilds the files that changed — so a
+ * project indexed before this version would answer "no direct callers" for every
+ * IPC handler until each of its files happened to change. The rebuild is what
+ * makes the join exist.
  */
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 /** One indexed file, as the incremental pass sees it. */
 export interface FileRecord {
@@ -84,6 +91,14 @@ export type SymbolKind =
   | 'module'
   | 'constant'
   | 'variable'
+  /**
+   * A handler that exists only as an inline function passed to a registration
+   * (`ipcMain.handle(K, async (event) => …)`), synthesized by the indexer so the
+   * dispatch side has a declaration to point at (`synthesis.ts`).
+   */
+  | 'handler'
+  /** A web route (`app.get('/x', h)`), synthesized so `fetch('/x')` has a target. */
+  | 'route'
   | 'unknown'
 
 /** One symbol node. */
@@ -151,6 +166,31 @@ export interface SymbolRecord {
  */
 export type EdgeKind = 'contains' | 'references' | 'imports' | 'documents' | 'extends' | 'implements' | 'type_refs' | 'exports'
 
+/**
+ * How an edge came to exist. `parse` is every edge the grammar saw: a name the
+ * file wrote, resolved to a declaration. The other three are SYNTHESIZED
+ * (`synthesis.ts`): two calls in two files that name the same key — an IPC
+ * channel, an event name, a route path — are joined because the runtime joins
+ * them, and no parse can see that. A reader is told which is which, because a
+ * synthesized edge is a claim about a convention, not a fact the file states.
+ */
+export type EdgeProvenance = 'parse' | 'ipc' | 'event' | 'route'
+
+/**
+ * The SQL predicate for symbols a NAME may resolve to. The synthesized kinds are
+ * left out on purpose: a `handler`'s name is an IPC key or an event name, and a
+ * `route`'s is `GET /x` — neither is a name the code calls. Without this, a call
+ * to `open()` would link to `ipcMain.handle('open', …)` as if it were a
+ * declaration named `open`, and a real function `open` would become "ambiguous".
+ * Lookups by id, and `find`, which lists declarations, keep every kind.
+ */
+export const NAME_RESOLVABLE = "kind NOT IN ('handler', 'route')"
+
+/** The kinds {@link NAME_RESOLVABLE} keeps, for the lookups that filter in JavaScript. */
+export function isResolvableKind(kind: string): boolean {
+  return kind !== 'handler' && kind !== 'route'
+}
+
 /** One edge. `from` and `to` are node ids. */
 export interface EdgeRecord {
   readonly from: string
@@ -168,6 +208,42 @@ export interface EdgeRecord {
    * `documents` never resolve by name and carry `false`. See `edges.narrowed`.
    */
   readonly narrowed?: boolean
+  /** How the edge came to exist; absent means `parse`. */
+  readonly provenance?: EdgeProvenance
+}
+
+/** The kinds of registration a file can make, each with its dispatch counterpart. */
+export type RegistrationKind = Exclude<EdgeProvenance, 'parse'>
+
+/**
+ * One registration: a call that binds a key to a handler — `ipcMain.handle(K, h)`,
+ * `bus.on(K, h)`, `app.get(K, h)`. Stored per file so a dispatch in ANOTHER file
+ * can find it without that file being re-parsed: the incremental pass rebuilds
+ * only the changed file's edges, and the registration it points at lives on.
+ */
+export interface Registration {
+  /** The file that registers, project-relative POSIX. */
+  readonly path: string
+  /** 1-based line of the registering call. */
+  readonly line: number
+  readonly kind: RegistrationKind
+  /** The normalized key: a string literal's content, or a dotted identifier chain. */
+  readonly key: string
+  /**
+   * The receiver the registration was made on, as written (`ipcMain`, `bus`,
+   * `app`); '' for a bare call. An event dispatch pairs only with a registration
+   * on the same receiver — `stream.on('x')` and `bus.emit('x')` are different
+   * channels even when the name matches.
+   */
+  readonly receiver: string
+  /**
+   * The node a dispatch points at: the handler's symbol id when the handler is a
+   * name that resolved, else the synthesized `handler` / `route` symbol for an
+   * inline function, else the registering file's node.
+   */
+  readonly target: string
+  /** The handler argument as written: a name, `(inline)`, or '' when there was none to read. */
+  readonly handler: string
 }
 
 /** Index state of one project, as the settings page and the tools report it. */
@@ -261,8 +337,29 @@ CREATE TABLE IF NOT EXISTS edges (
   -- The same reference can be observed twice in one parse (a duplicate match, or
   -- an import emitted from both the file node and a symbol). Without this, the
   -- duplicate survives into impact output and inflates every count.
+  -- provenance says whether the grammar saw the edge (parse) or the indexer
+  -- joined two calls by a shared key (ipc / event / route; see synthesis.ts).
+  provenance TEXT NOT NULL DEFAULT 'parse',
   PRIMARY KEY (src, dst, kind, line)
 ) WITHOUT ROWID;
+
+-- One row per registering call (ipcMain.handle(K, h), bus.on(K, h), app.get(K, h)).
+-- Kept apart from the edges table because a registration is not yet an edge: it is the
+-- half a dispatch in another file needs, and that file may be re-parsed long
+-- after the registering one. Keyed by (kind, key) for that lookup.
+CREATE TABLE IF NOT EXISTS registrations (
+  path     TEXT NOT NULL,
+  line     INTEGER NOT NULL,
+  kind     TEXT NOT NULL,
+  key      TEXT NOT NULL,
+  receiver TEXT NOT NULL DEFAULT '',
+  target   TEXT NOT NULL,
+  handler  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS registrations_key ON registrations(kind, key);
+-- The other direction: every write deletes a file's registrations by path, once
+-- per parsed file, and without this each is a scan of the table.
+CREATE INDEX IF NOT EXISTS registrations_path ON registrations(path);
 
 -- The queries this plugin actually runs, as indexes rather than scans:
 -- find-by-name (symbols), impact (edges by destination), file outline
@@ -344,6 +441,7 @@ export function openGraph(file: string): Graph {
     db.exec('DROP TABLE IF EXISTS edges')
     db.exec('DROP TABLE IF EXISTS symbols')
     db.exec('DROP TABLE IF EXISTS files')
+    db.exec('DROP TABLE IF EXISTS registrations')
     db.exec('DROP TABLE IF EXISTS meta')
   }
   db.exec(SCHEMA)
@@ -569,6 +667,8 @@ export function replaceFile(
   file: FileRecord,
   symbols: readonly SymbolRecord[],
   edges: readonly EdgeRecord[],
+  /** The file's registrations (`synthesis.ts`); omitted means none. */
+  registrations: readonly Registration[] = [],
 ): void {
   const previous = db.prepare('SELECT id FROM symbols WHERE path = ?').all(file.path) as { id: string }[]
   const ids = new Set(previous.map(row => row.id))
@@ -619,9 +719,16 @@ export function replaceFile(
     // OR IGNORE, not a bare INSERT: the primary key is what collapses a
     // duplicate observation, and a parse that reports the same reference twice
     // is not an error worth failing the whole file over.
-    const insertEdge = db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line, narrowed) VALUES (?, ?, ?, ?, ?)')
+    const insertEdge = db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line, narrowed, provenance) VALUES (?, ?, ?, ?, ?, ?)')
     for (const edge of edges) {
-      insertEdge.run(edge.from, edge.to, edge.kind, edge.line, edge.narrowed === true ? 1 : 0)
+      insertEdge.run(edge.from, edge.to, edge.kind, edge.line, edge.narrowed === true ? 1 : 0, edge.provenance ?? 'parse')
+    }
+    // The registrations go with the file: a call that no longer registers must
+    // not keep answering dispatches.
+    db.prepare('DELETE FROM registrations WHERE path = ?').run(file.path)
+    const insertRegistration = db.prepare('INSERT INTO registrations (path, line, kind, key, receiver, target, handler) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    for (const registration of registrations) {
+      insertRegistration.run(registration.path, registration.line, registration.kind, registration.key, registration.receiver, registration.target, registration.handler)
     }
     db.exec('COMMIT')
   } catch (error) {
@@ -658,6 +765,7 @@ export function forgetFile(db: DatabaseSync, path: string): void {
     }
     db.prepare('DELETE FROM symbols WHERE path = ?').run(path)
     db.prepare('DELETE FROM files WHERE path = ?').run(path)
+    db.prepare('DELETE FROM registrations WHERE path = ?').run(path)
     db.exec('COMMIT')
   } catch (error) {
     // `COMMIT` itself can fail (SQLITE_BUSY, a full disk), and SQLite may have
@@ -672,6 +780,27 @@ export function forgetFile(db: DatabaseSync, path: string): void {
 /** The node id a file itself carries (the source of `imports` and `contains`). */
 export function fileNodeId(path: string): string {
   return `file:${path}`
+}
+
+/**
+ * Every registration of one kind under one key, wherever it lives.
+ *
+ * The lookup a dispatch makes: `ipcRenderer.invoke(K)` in one file asks for the
+ * `ipc` registrations under `K`, and the answer may be in a file this pass did
+ * not touch — which is why registrations are rows and not parse results.
+ *
+ * @param db - the open database.
+ * @param kind - `ipc`, `event` or `route`.
+ * @param key - the normalized key.
+ * @returns the registrations, in row order.
+ */
+export function registrationsFor(db: DatabaseSync, kind: RegistrationKind, key: string): Registration[] {
+  return allRows<Registration>(db, 'SELECT path, line, kind, key, receiver, target, handler FROM registrations WHERE kind = ? AND key = ?', kind, key)
+}
+
+/** Every registration one file makes, for the tests and the settings page. */
+export function registrationsIn(db: DatabaseSync, path: string): Registration[] {
+  return allRows<Registration>(db, 'SELECT path, line, kind, key, receiver, target, handler FROM registrations WHERE path = ? ORDER BY line', path)
 }
 
 /**

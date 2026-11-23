@@ -18,7 +18,7 @@
  * @module @dsh-app/plugin-codegraph/host/tools
  */
 
-import { allRows, fileNodeId, oneRow, type Graph } from './store.ts'
+import { allRows, fileNodeId, oneRow, NAME_RESOLVABLE, type EdgeProvenance, type Graph } from './store.ts'
 import { parseSymbolQuery, queryTokens, type SymbolQuery } from './search.ts'
 import type { SourceRefusal } from './source.ts'
 import type { OutlineDetail } from './budget.ts'
@@ -90,6 +90,8 @@ export interface EdgeView {
    * rather than the first candidate's.
    */
   readonly signature?: string | undefined
+  /** Set when the edge was synthesized (`Referrer.provenance`): the row is a claim about a key. */
+  readonly provenance?: EdgeProvenanceSynthesized | undefined
 }
 
 /** The result of `codegraph_find`. */
@@ -290,6 +292,12 @@ export type CallerNode = {
    * 300 callers shown as 12 from a function with 12.
    */
   readonly callers?: number
+  /**
+   * Set when the edge above this node was SYNTHESIZED (`Referrer.provenance`):
+   * the tree prints the same `⇢` the list does, so a depth-2 view never shows
+   * a key convention as a parsed call.
+   */
+  readonly provenance?: EdgeProvenanceSynthesized
 }
 
 /** The caller tree behind one symbol, to the requested depth. */
@@ -783,10 +791,24 @@ export interface Referrer {
    */
   readonly text?: string | undefined
   /**
-   * True when the referring file no longer hashes to what the graph recorded:
-   * `line` counts the old bytes, so `text` may not be the call the graph saw.
+   * True when the file no longer hashes to what the graph recorded: `line` counts
+   * the old bytes, so `text` may not be the call the graph saw.
    */
   readonly drift?: boolean | undefined
+  /**
+   * Set when the edge was SYNTHESIZED (synthesis.ts): this call names the key of
+   * a registration in another file — an IPC channel, an event, a route path —
+   * and no parse saw the two meet. Absent on an edge the grammar produced.
+   */
+  readonly provenance?: EdgeProvenanceSynthesized | undefined
+}
+
+/** The provenances a `references` row can carry (every one but `parse`). */
+export type EdgeProvenanceSynthesized = Exclude<EdgeProvenance, 'parse'>
+
+/** Whether a stored provenance is one the rows carry; `parse` and anything unknown are not. */
+function isProvenance(value: string): value is EdgeProvenanceSynthesized {
+  return value === 'ipc' || value === 'event' || value === 'route'
 }
 
 /**
@@ -904,10 +926,10 @@ export function referencesTo(graph: Graph, symbolId: string, limit: number): { r
   // `limit + 1` keeps `truncated` a fact rather than a guess: a symbol with 200 callers
   // used to answer 40 rows with NO signal, so the model read a complete-looking list
   // that was missing 80% of the callers and would then edit the symbol and miss them.
-  const rows = allRows<{ src: string, line: number, kind: string, name: string | null, path: string | null, narrowed: number }>(
+  const rows = allRows<{ src: string, line: number, kind: string, name: string | null, path: string | null, narrowed: number, provenance: string }>(
     graph.db,
-    `SELECT src, line, kind, name, path, narrowed FROM (
-       SELECT e.src AS src, e.line AS line, e.kind AS kind, s.name AS name, s.path AS path, e.narrowed AS narrowed,
+    `SELECT src, line, kind, name, path, narrowed, provenance FROM (
+       SELECT e.src AS src, e.line AS line, e.kind AS kind, s.name AS name, s.path AS path, e.narrowed AS narrowed, e.provenance AS provenance,
               ROW_NUMBER() OVER (PARTITION BY e.src ORDER BY e.line) AS rank_in_source
        FROM edges e LEFT JOIN symbols s ON s.id = e.src
        WHERE e.dst = ? AND e.kind = 'references'
@@ -921,19 +943,22 @@ export function referencesTo(graph: Graph, symbolId: string, limit: number): { r
       // The confidence mark and the caller's id ride on every row: `narrowed` is
       // 1 only when the referring file itself resolved the name (parse.ts's
       // `linkFor`), and the id is what lets a reader expand a caller in place
-      // instead of searching for its name.
+      // instead of searching for its name. `provenance` rides along when the edge
+      // was synthesized (synthesis.ts): the row is a claim about a shared key, not
+      // a name the file resolved, and the render says so.
       const confidence = { ...(row.narrowed === 1 ? { narrowed: true } : {}) }
+      const origin = isProvenance(row.provenance) ? { provenance: row.provenance } : {}
       if (row.src.startsWith('file:')) {
-        return { path: row.src.replace(/^file:/u, ''), line: row.line, kind: row.kind, name: undefined, ...confidence }
+        return { path: row.src.replace(/^file:/u, ''), line: row.line, kind: row.kind, name: undefined, ...confidence, ...origin }
       }
       // A symbol id is `<path>#<kind>:<name>`; the join gives both parts, but fall
       // back to unpacking the id when the row is gone (a symbol removed between two
       // passes, which the next pass settles).
       if (row.path !== null && row.name !== null) {
-        return { path: row.path, line: row.line, kind: row.kind, name: row.name, ...confidence, callerId: row.src }
+        return { path: row.path, line: row.line, kind: row.kind, name: row.name, ...confidence, ...origin, callerId: row.src }
       }
       const hash = row.src.lastIndexOf('#')
-      return { path: hash > 0 ? row.src.slice(0, hash) : row.src, line: row.line, kind: row.kind, name: undefined, ...confidence, callerId: row.src }
+      return { path: hash > 0 ? row.src.slice(0, hash) : row.src, line: row.line, kind: row.kind, name: undefined, ...confidence, ...origin, callerId: row.src }
     }),
     truncated,
     // "There are more" without "how many" is a warning the reader cannot size:
@@ -1021,6 +1046,8 @@ interface CallerRow {
   readonly path: string
   readonly kind: string
   readonly line: number
+  /** The first edge's provenance: a caller reached only by a synthesized edge says so. */
+  readonly provenance: string
 }
 
 /**
@@ -1034,7 +1061,8 @@ interface CallerRow {
 function callersOf(graph: Graph, id: string, limit: number): { rows: CallerRow[], total?: number } {
   const rows = allRows<CallerRow>(
     graph.db,
-    `SELECT e.src AS src, s.name AS name, s.path AS path, s.kind AS kind, MIN(e.line) AS line
+    `SELECT e.src AS src, s.name AS name, s.path AS path, s.kind AS kind, MIN(e.line) AS line,
+            (SELECT p.provenance FROM edges p WHERE p.src = e.src AND p.dst = e.dst AND p.kind = 'references' ORDER BY p.line LIMIT 1) AS provenance
      FROM edges e JOIN symbols s ON s.id = e.src
      WHERE e.dst = ? AND e.kind = 'references'
      GROUP BY e.src
@@ -1115,6 +1143,7 @@ export function callerTree(
         line: row.line,
         children: [],
         ...(repeated ? { repeated: true } : {}),
+        ...(isProvenance(row.provenance) ? { provenance: row.provenance } : {}),
       }
       seen.add(row.src)
       into.push(node)
@@ -1150,6 +1179,7 @@ interface OutgoingRow {
   readonly name: string | null
   readonly path: string | null
   readonly signature: string | null
+  readonly provenance: string
 }
 
 /**
@@ -1166,7 +1196,7 @@ interface OutgoingRow {
 export function callsOf(graph: Graph, symbolId: string, limit: number): { rows: EdgeView[], truncated: boolean } {
   const rows = allRows<OutgoingRow>(
     graph.db,
-    `SELECT e.kind AS kind, e.line AS line, s.name AS name, s.path AS path, s.signature AS signature
+    `SELECT e.kind AS kind, e.line AS line, s.name AS name, s.path AS path, s.signature AS signature, e.provenance AS provenance
      FROM edges e LEFT JOIN symbols s ON s.id = e.dst
      WHERE e.src = ? AND e.kind = 'references' ORDER BY e.line LIMIT ?`,
     symbolId, limit + 1,
@@ -1188,6 +1218,7 @@ export function callsOf(graph: Graph, symbolId: string, limit: number): { rows: 
       name: row.name ?? undefined,
       path: row.path ?? undefined,
       ...(row.signature !== null && row.signature !== '' && !shared.has(`${String(row.line)}\u0000${row.name ?? ''}`) ? { signature: row.signature } : {}),
+      ...(isProvenance(row.provenance) ? { provenance: row.provenance } : {}),
     })),
     truncated: rows.length > limit,
   }
@@ -1195,13 +1226,19 @@ export function callsOf(graph: Graph, symbolId: string, limit: number): { rows: 
 
 /** Incoming reference edges of one symbol, resolved to the calling file. */
 export function calledBy(graph: Graph, symbolId: string, limit: number): { rows: EdgeView[], truncated: boolean } {
-  const rows = allRows<EdgeRow>(
+  const rows = allRows<EdgeRow & { provenance: string }>(
     graph.db,
-    "SELECT src, line, kind FROM edges WHERE dst = ? AND kind = 'references' ORDER BY src, line LIMIT ?",
+    "SELECT src, line, kind, provenance FROM edges WHERE dst = ? AND kind = 'references' ORDER BY src, line LIMIT ?",
     symbolId, limit + 1,
   )
   return {
-    rows: rows.slice(0, limit).map(row => ({ kind: row.kind, line: row.line, path: row.src.replace(/^file:/u, ''), name: undefined })),
+    rows: rows.slice(0, limit).map(row => ({
+      kind: row.kind,
+      line: row.line,
+      path: row.src.replace(/^file:/u, ''),
+      name: undefined,
+      ...(isProvenance(row.provenance) ? { provenance: row.provenance } : {}),
+    })),
     truncated: rows.length > limit,
   }
 }
@@ -1535,7 +1572,7 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
      WHERE e.kind = 'references'
        AND s.parent IS NULL
        AND s.kind IN ('function', 'class', 'interface', 'type', 'enum')
-       AND (SELECT COUNT(*) FROM symbols s2 WHERE s2.name = s.name) <= 2
+       AND (SELECT COUNT(*) FROM symbols s2 WHERE s2.name = s.name AND ${NAME_RESOLVABLE}) <= 2
      GROUP BY e.dst
      ORDER BY
        CASE WHEN s.path LIKE '%test%' OR s.path LIKE '%spec%'
@@ -1600,7 +1637,7 @@ export function resolveSymbol(graph: Graph, selector: string): SymbolView | unde
   if (byId !== undefined) return byId
   // Two rows is enough to know a name is ambiguous; asking for all of them
   // would read the whole table for a question that only needs "is it 1?".
-  const rows = allRows<{ id: string }>(graph.db, 'SELECT id FROM symbols WHERE name = ? LIMIT 2', selector)
+  const rows = allRows<{ id: string }>(graph.db, `SELECT id FROM symbols WHERE name = ? AND ${NAME_RESOLVABLE} LIMIT 2`, selector)
   if (rows.length !== 1) return undefined
   return readSymbol(graph, rows[0]!.id)
 }
@@ -1624,10 +1661,12 @@ export function resolveSymbol(graph: Graph, selector: string): SymbolView | unde
  * @returns the candidates and how many exist in total.
  */
 export function ambiguousCandidates(graph: Graph, selector: string, limit: number): { candidates: SymbolView[], total: number } {
-  const total = (graph.db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE name = ?').get(selector) as { n: number }).n
+  // Resolvable kinds only: a synthesized handler's name is a key, and listing it
+  // as a candidate would say "declared twice" about a name only one declaration has.
+  const total = (graph.db.prepare(`SELECT COUNT(*) AS n FROM symbols WHERE name = ? AND ${NAME_RESOLVABLE}`).get(selector) as { n: number }).n
   const rows = allRows<SymbolRow>(
     graph.db,
-    `SELECT ${symbolColumns()} FROM symbols WHERE name = ? ORDER BY path, line LIMIT ?`,
+    `SELECT ${symbolColumns()} FROM symbols WHERE name = ? AND ${NAME_RESOLVABLE} ORDER BY path, line LIMIT ?`,
     selector, limit,
   )
   return { candidates: rows.map(toSymbolView), total }

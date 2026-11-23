@@ -54,7 +54,10 @@ import {
   fileNodeId,
   forgetFile,
   graphStats,
+  isResolvableKind,
+  NAME_RESOLVABLE,
   readFiles,
+  registrationsFor,
   replaceFile,
   symbolsOf,
   writeProjectMeta,
@@ -62,8 +65,16 @@ import {
   type FileRecord,
   type Graph,
   type ProjectMeta,
+  type Registration,
+  type RegistrationKind,
   type SymbolRecord,
 } from './store.ts'
+import { dispatchEdges, refineRegistrationTargets, resolveHandler, routeEdges, synthesizeFile } from './synthesis.ts'
+
+/** The names a file's import clauses bring into scope, for the route rule (`synthesis.ts`). */
+function importedNames(parsed: ParsedFile): Set<string> {
+  return new Set(parsed.imports.flatMap(specifier => specifier.names))
+}
 
 const execFileAsync = promisify(execFile)
 
@@ -489,7 +500,7 @@ export function resolveImport(
  */
 function namesIndex(graph: Graph): (name: string) => readonly string[] {
   const byName = new Map<string, string[]>()
-  for (const row of allRows<{ id: string, name: string }>(graph.db, 'SELECT id, name FROM symbols')) {
+  for (const row of allRows<{ id: string, name: string }>(graph.db, `SELECT id, name FROM symbols WHERE ${NAME_RESOLVABLE}`)) {
     const list = byName.get(row.name)
     if (list === undefined) byName.set(row.name, [row.id])
     else list.push(row.id)
@@ -656,7 +667,7 @@ export async function indexProject(
   // `b.ts` was parsed before or after it. Phase 1 writes every changed file's
   // symbols and contains edges; phase 2 resolves the calls against the finished
   // symbol table.
-  const pending: { path: string, fileId: string, parsed: ParsedFile }[] = []
+  const pending: { path: string, fileId: string, parsed: ParsedFile, registrations: readonly Registration[] }[] = []
 
   /**
    * Yield to the event loop, so a long pass does not freeze the kernel.
@@ -760,14 +771,19 @@ export async function indexProject(
       lang: language.id,
     }
     const fileId = fileNodeId(candidate.path)
+    // The declarations a file gains from its registrations (an inline handler, a
+    // route) and the registrations themselves, so a dispatch in another file can
+    // find them after this file is never parsed again (synthesis.ts).
+    const synthesis = synthesizeFile(candidate.path, result.calls, result.symbols, importedNames(result))
+    const symbols = [...result.symbols, ...synthesis.symbols]
     // Phase 1: symbols plus the `contains` edges that need nothing but this file.
-    replaceFile(graph.db, record, result.symbols, result.symbols.map(symbol => ({
+    replaceFile(graph.db, record, symbols, symbols.map(symbol => ({
       from: fileId,
       to: symbol.id,
       kind: 'contains' as const,
       line: symbol.line,
-    })))
-    pending.push({ path: candidate.path, fileId, parsed: result })
+    })), synthesis.registrations)
+    pending.push({ path: candidate.path, fileId, parsed: result, registrations: synthesis.registrations })
     symbolsChanged = true
     parsed += 1
     // After EVERY file, decided by elapsed time rather than a file count: the call
@@ -795,9 +811,11 @@ export async function indexProject(
   if (pending.length > 0) {
     // `narrowed` rides along with the name-resolved kinds; an `imports` edge below
     // binds the column to 0, which is what a kind that never resolves by name carries.
-    const insert = graph.db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line, narrowed) VALUES (?, ?, ?, ?, ?)')
+    // `provenance` is 'parse' for every edge the grammar produced and the pairing's
+    // name for a synthesized one (synthesis.ts).
+    const insert = graph.db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line, narrowed, provenance) VALUES (?, ?, ?, ?, ?, ?)')
     const insertResolved = (edge: EdgeRecord): void => {
-      insert.run(edge.from, edge.to, edge.kind, edge.line, edge.narrowed === true ? 1 : 0)
+      insert.run(edge.from, edge.to, edge.kind, edge.line, edge.narrowed === true ? 1 : 0, edge.provenance ?? 'parse')
     }
     // `imports` targets are project-relative paths; the graph's file nodes are
     // keyed the same way, so membership in the known set is the resolution test.
@@ -816,6 +834,11 @@ export async function indexProject(
     // "new session" did nothing until it finished. The table is a few thousand rows,
     // so reading it once costs milliseconds and turns N queries into 1.
     const resolveOnce = namesIndex(graph)
+    // Every changed file's symbols are in the graph now, so a handler a file
+    // imports can be pointed at its declaration (synthesis.ts). Before the
+    // dispatch edges, which read the registrations these targets belong to.
+    refineRegistrationTargets(graph.db)
+    const registrationsOf = (kind: RegistrationKind, key: string): Registration[] => registrationsFor(graph.db, kind, key)
     /**
      * Files per transaction, and the yield between them.
      *
@@ -854,10 +877,16 @@ export async function indexProject(
         )) {
           insertResolved(edge)
         }
+        // The synthesized edges (synthesis.ts): this file's dispatches against the
+        // registrations the whole graph holds, and its routes against their
+        // handlers. `narrowed` is 0 on all of them — nothing here resolved a
+        // name — and `provenance` is what tells the reader how they were made.
+        for (const edge of dispatchEdges(entry.parsed.calls, entry.fileId, registrationsOf)) insertResolved(edge)
+        for (const edge of routeEdges(entry.registrations, (handler, path) => resolveHandler(graph.db, handler, path))) insertResolved(edge)
         for (const specifier of entry.parsed.imports) {
           const target = resolveImport(entry.path, specifier.specifier, path => knownPaths.has(path))
           if (target === undefined) continue
-          insert.run(entry.fileId, fileNodeId(target), 'imports', specifier.line, 0)
+          insert.run(entry.fileId, fileNodeId(target), 'imports', specifier.line, 0, 'parse')
         }
         inBatch += 1
         if (inBatch >= FILES_PER_COMMIT) {
@@ -918,8 +947,13 @@ export async function indexProject(
     // plugin exists to avoid.
     const byName = new Map<string, SymbolRecord[]>()
     const declared: SymbolRecord[] = []
+    // Every kind counts as a KNOWN name (a paragraph that spells `GET /x` names
+    // something), but only a resolvable kind can be what a mention MEANS: a
+    // synthesized handler's name is an IPC key, and a paragraph that says `open`
+    // means the function, not the channel.
     for (const symbol of symbolsOf(graph.db)) {
       declared.push(symbol)
+      if (!isResolvableKind(symbol.kind)) continue
       const existing = byName.get(symbol.name)
       if (existing === undefined) byName.set(symbol.name, [symbol])
       else existing.push(symbol)

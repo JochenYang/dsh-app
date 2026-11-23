@@ -10,14 +10,14 @@ the three ways it can be quietly wrong.
 
 ## 1. What the graph holds
 
-Four tables, one schema version (`SCHEMA_VERSION` in `src/store.ts`; a mismatch
+Five tables, one schema version (`SCHEMA_VERSION` in `src/store.ts`; a mismatch
 rebuilds rather than migrates, because a graph is derived data).
-
 | Table | One row is | Key |
 |---|---|---|
 | `files` | a file the pass looked at, with its stat cache | `path` |
 | `symbols` | a declaration, with its line extent (`line`..`end_line`) | `id` = `<path>#<kind>:<parent>.<name>` |
-| `edges` | a relation between two nodes | `(src, dst, kind)` |
+| `edges` | a relation between two nodes | `(src, dst, kind, line)` |
+| `registrations` | a call that binds a key to a handler, for the synthesized edges (§8g) | `(kind, key)` |
 | `meta` | the project's own state | one row |
 
 There is deliberately **no full-text index**. A word-part hit is always also a
@@ -86,6 +86,23 @@ above, and 72% of those comments sit one level up from the declaration (inside
 its `export` or `lexical` wrapper) — a reader that looks only at the
 declaration's own previous sibling stores `''` for seven docs in ten.
 
+Schema 6 adds the half a parse cannot see — two calls in two files that the
+RUNTIME joins on a key (§8g's provenance marks; the rules are `synthesis.ts`'s):
+
+| Addition | Holds | Read by |
+|---|---|---|
+| `edges.provenance` | `parse` for every edge the grammar produced; `ipc`, `event` or `route` for a SYNTHESIZED edge — a dispatch and the registration it names | the `⇢` on an `impact` row |
+| `registrations` | one row per registering call (`ipcMain.handle(K, h)`, `bus.on(K, h)`, `app.get(K, h)`): the file, line, kind, key, receiver, the node a dispatch points at, and the handler as written | the dispatch side of a file re-parsed long after the registering file was |
+| `symbols.kind` `handler`, `route` | a declaration synthesized for an inline handler (the extent of the registering call) and for a route (`GET /x`) | the file outline, `impact` on the route, `context` on either |
+
+The registrations are ROWS, not parse results kept in memory, for the incremental
+pass: it rebuilds only the changed file's edges, and the dispatch it must link
+lives on after the file that registered was last parsed. A registration's target
+is resolved in two steps — the file's own symbols in phase 1, the whole graph in
+phase 2 (`refineRegistrationTargets`, a UNIQUE name only) — because a handler a
+file imports is only findable once the sibling's symbols are written, which may
+be after this file in the same pass.
+
 ## 2. Which module decides what
 
 | Module | Owns | Never does |
@@ -110,6 +127,7 @@ declaration's own previous sibling stores `''` for seven docs in ten.
 | `src/overview-state.ts` | which overview text a session gets, across assemblies: the failure / status / full rules (§8b-2) | read a graph or a clock it was not handed |
 | `src/grep-note.ts` | the one line appended after a search the model made itself, and the per-session "already told" rule (§8d) | listen to anything, or decide whether the graph is current |
 | `src/prefetch.ts` | the request pack: the tokens a request names, their strict resolution, the text and its budget (§8e) | listen to anything, read a switch, or decide whether the graph is current |
+| `src/synthesis.ts` | the three pairings by key (ipc / event / route): which calls register, which dispatch, the `handler` / `route` declarations synthesized for inline handlers, the edges a dispatch makes against the registrations the graph holds (§8g) | parse a file, write the graph, or decide freshness |
 | `src/budget.ts` | the source slice's budget (§9b) and the outline's: the detail ladder, the 1,200-token list budget, how many rows survive (§8f) | render a row, or read a graph |
 | `src/switches.ts` | the environment switches — their names, the `0`/`false` convention, which ones are wired (§12) | read anything but the environment |
 | `src/usage.ts` | what the model-facing features did per project, counted in memory for `/status` (§12) | write a file, or reach a prompt |
@@ -904,6 +922,96 @@ off with the slice.
 describes the previous state; `pendingFiles` (§9) names the cited files that
 did, and the render puts them on the first line.
 
+**The two halves of a key, joined.** A parse sees names, and `ipcRenderer.invoke(
+PLATFORM_IPC.open)` in the preload and `ipcMain.handle(PLATFORM_IPC.open, …)` in
+the main process are two calls to two Electron functions; nothing in either file
+says they meet — the runtime does, on the key. Measured on this repository before
+the join existed: the four platform IPC channels had ZERO edges between their two
+sides, so `codegraph_impact` on a handler answered "no direct callers" for the
+only caller the application has. `synthesis.ts` joins three such shapes, always on
+a key that BOTH sides spell identically — a string literal's content or a dotted
+identifier chain — and never by guessing a name:
+
+- `ipc`: `ipcMain.handle / on / once (K, h)` and `ipcRenderer.on / once (K, h)`
+  against `ipcRenderer.invoke / send / sendSync / sendTo (K)` and
+  `<x>.webContents.send (K)`. The receivers are fixed names, so the pairing is
+  exact, and it covers both directions — a renderer's listener is the other half
+  of what the main process sends it. On this repository it joins the five
+  platform channels (four from the preloads to `platform-view.ts`, one from
+  `platform-view.ts` back to `platform-preload.ts`).
+- `event`: `<r>.on / once / addListener / subscribe (K, h)` against `<r>.emit /
+  trigger / fire / publish / dispatch (K)`, the SAME receiver text on both sides
+  — and `this` is excluded, because every class says `this` — with a key that is
+  specific: a dotted chain, or a literal with a separator (`:` `-` `/` `.`), or
+  SCREAMING_CASE. `stream.on('data')` and `process.on('exit')` pair with nothing:
+  their receivers are excluded and their keys are prose words. On this repository
+  53 registrations and no pair, which is the truth: the kernel emits those
+  events, no file in the repository does.
+- `route`: `<app>.get / post / put / patch / delete / all / use ('/p', h)`
+  against `fetch('/p')` and `axios|http|request|api|client .<method>('/p')`,
+  whatever their other arguments (`fetch('/p', init)`, `axios.post('/p', body)`
+  are dispatches). The registration side has to prove its second argument is a
+  handler, because `app.post('/add', addTodo)` on a server and
+  `app.post('/add', payload)` on a client instance that happens to be called
+  `app` are the same syntax: the name must be an inline function, a callable the
+  file declares (a `const h = (req, res) => …` counts; the grammar records it as
+  a variable, its head still says `=>`), a router (`app.use('/x', usersRouter)`),
+  or a name an import clause brings in. A parameter, a member chain (`req.body`)
+  or a value the file declares is a payload. Measured on this repository, the one
+  false route the first rule produced (`app.post('/add', payload)` in a client)
+  is refused by it.
+
+The handler a registration names is resolved the way a call in that file would
+be: the file's own declaration first, then — only when exactly one CALLABLE in
+the whole graph carries the name — that one (`resolveHandler`), so two files
+each declaring `getUser` do not make the route's handler ambiguous. A target that
+names a declaration the graph no longer holds is pulled back to the registering
+file's node before that resolution runs (`refineRegistrationTargets`), which is
+what happens when the handler's file is renamed or forgotten; a dispatch that
+reaches it afterwards is rebuilt against what the name means now, never against
+a retired id.
+
+An inline handler has no declaration to point at, so one is synthesized — kind
+`handler`, the extent of the registering call, so `codegraph_context` on it reads
+the whole function; a route gets one too (`GET /x`), so `impact` on a named
+handler lists the route among its callers and a `fetch` of the path has a target.
+On this repository that makes 47 inline handlers findable (`tools/result` in
+this plugin, `before-quit` and `will-quit` in the shell's main) that were
+previously invisible lines inside other functions.
+
+**A synthesized edge is a claim about a convention, not a fact the file states.**
+It carries `provenance` (`edges.provenance`), `narrowed` is 0, and the row prints
+`⇢ ipc` / `⇢ event` / `⇢ route` after the place — in `impact`'s reference list, in
+its `depth` tree, and in `context`'s `calls` / `called by` rows, whose nodes
+carry the same field — with a legend printed once per answer:
+"(⇢ = a SYNTHESIZED edge: that call names the key of a registration elsewhere —
+an IPC channel, an event on the same receiver, a route path — which no parse saw
+meet; the key is a convention, not a resolved name.)" A reader who took such a
+row for a resolved name would trust it more than it deserves.
+
+A synthesized declaration is a second-class symbol on purpose: `find` lists it and
+an id resolves it, but no NAME lookup does (`NAME_RESOLVABLE` in `store.ts`, and
+`isResolvableKind` for the lookups that filter in JavaScript — the documents
+pass's name table, the hub's same-name count, the ambiguity candidates). A
+`handler`'s name is an IPC key, a `route`'s is `GET /x`; neither is a name code
+calls, and letting `open()` link to `ipcMain.handle('open', …)` — or making a real
+function `open` "ambiguous", or letting a document's `open` mean the channel — was
+the first thing the review caught. Its name and signature are cleaned like a head
+(comments out, whitespace folded, control and format characters replaced, 200
+characters; a KEY is data and is never stripped as code — `//` inside one is the
+channel's name), because both reach the model under the USER's role in the
+request pack and the search note; and its id is made unique against the ids the
+file already declares (`~1`, `~2`…), because the symbols INSERT is a bare INSERT
+and two routes to one path in one file would otherwise fail the whole pass.
+
+**What the incremental pass cannot do here.** A registration that appears, moves
+or disappears after the dispatching file was last parsed reaches that file's edges
+only when the file is parsed again (or when the target it named retires). This is
+the pass's standing property for every parsed edge too — a callee added later
+does not appear in an unchanged caller — and it is why a rebuild makes the graph
+exact. A dispatch row table that recomputes edges by key when the registration set
+changes is the fix, and it is deferred.
+
 ## 9. Freshness
 
 Every tool answer carries it, and the three values mean different things to a
@@ -1194,6 +1302,17 @@ Three layers, each blind to something:
 - **Nothing automated** covers the settings page inside a real client. That needs
   a packaged runtime (`scripts/probe-settings-nav.cjs` is the shape) and is the
   manual step before a release.
+- **The synthesized edges are proven on shapes, and measured on one repository.**
+  `tests/synthesis.test.ts` pins every pairing and every refusal on hand-built
+  calls, `tests/answers.test.ts` runs the three pairings through the real grammar
+  and indexer, and the measurement on this repository (five IPC channels joined,
+  53 event registrations with no dispatch pair, one false route caught by the
+  payload rule) is in the plan. What none of it proves is the pairings' reach on
+  other codebases: a project that spells its channel keys through an import
+  alias, or dispatches events through a wrapper the parser cannot see through,
+  joins nothing — and nothing reports that it joined nothing. The settings page
+  does not show registration counts; until it does, the only instrument is
+  `scratch/`'s measure script against a project.
 
 **A fourth, narrower gap worth knowing.** `tests/parse.test.ts` has one case per
 extraction-table row, and each runs a REAL grammar: a node name the grammar does

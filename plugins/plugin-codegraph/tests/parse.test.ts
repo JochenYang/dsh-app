@@ -153,6 +153,160 @@ describe('extractSymbols — TypeScript', () => {
   })
 })
 
+describe('extractSymbols — call arguments', () => {
+  // The argument fields exist for an edge no declaration links: the two halves of a
+  // key written in two files (`ipcMain.handle(K, h)` and `ipcRenderer.invoke(K)`;
+  // `app.get(p, h)` and `fetch(p)`). A key is matched by TEXT across files, so the
+  // rules are narrow on purpose: a shape whose text is not stable (a call, an
+  // optional chain, a template string) answers undefined rather than something
+  // that happens to look matchable.
+
+  /** The one call to `name` in a source, with its argument fields. */
+  async function callTo(source: string, name: string, languageId = 'typescript') {
+    const parsed = await parse(source, languageId, 'src/a.ts')
+    const call = parsed.calls.find(candidate => candidate.name === name)
+    assert.ok(call !== undefined, `no call to ${name}; got ${parsed.calls.map(candidate => candidate.name).join(',')}`)
+    return call
+  }
+
+  it('reads the receiver, the key and the handler of a registration call', async () => {
+    const call = await callTo('ipcMain.handle(PLATFORM_IPC.open, onOpen)', 'handle')
+    assert.equal(call.name, 'handle', 'the edge name is the member, as it was before')
+    assert.equal(call.receiver, 'ipcMain')
+    assert.equal(call.key, 'PLATFORM_IPC.open')
+    assert.equal(call.handler, 'onOpen')
+    assert.equal(call.line, 1)
+    assert.equal(call.endLine, 1)
+    assert.equal(call.owner, undefined, 'a call at file scope belongs to no symbol')
+  })
+
+  it('decodes a string key and marks a handler written in place as (inline)', async () => {
+    const inline = await callTo("ipcMain.handle('sync', async (e) => {})", 'handle')
+    assert.equal(inline.key, 'sync')
+    assert.equal(inline.handler, '(inline)')
+
+    const expression = await callTo("ipcMain.handle('sync', function (e) { return e })", 'handle')
+    assert.equal(expression.handler, '(inline)', 'a function expression is inline too')
+
+    const route = await callTo("app.get('/users/:id', handler)", 'get')
+    assert.equal(route.receiver, 'app')
+    assert.equal(route.key, '/users/:id')
+    assert.equal(route.handler, 'handler')
+  })
+
+  it('reads a dispatch call, which has a key and no handler', async () => {
+    const call = await callTo('ipcRenderer.invoke(PLATFORM_IPC.close)', 'invoke')
+    assert.equal(call.receiver, 'ipcRenderer')
+    assert.equal(call.key, 'PLATFORM_IPC.close')
+    assert.equal(call.handler, undefined)
+  })
+
+  it('reads a bare call, which has no receiver', async () => {
+    // The quotes go; the slash is content.
+    const call = await callTo('fetch("/a b")', 'fetch')
+    assert.equal(call.receiver, undefined)
+    assert.equal(call.key, '/a b')
+    assert.equal(call.handler, undefined)
+  })
+
+  it('reads a member handler by its text', async () => {
+    const call = await callTo('bus.on(Events.user.created, this.onCreated)', 'on')
+    assert.equal(call.key, 'Events.user.created')
+    assert.equal(call.handler, 'this.onCreated')
+  })
+
+  it('decodes the four escapes a key can carry and leaves every other one as written', async () => {
+    const decoded = await callTo("foo('a\\'b\\\"c\\\\d\\ne', h)", 'foo')
+    assert.equal(decoded.key, "a'b\"c\\d\ne")
+    assert.equal(decoded.handler, 'h')
+
+    const raw = await callTo("foo('\\t\\u0041\\x41')", 'foo')
+    assert.equal(raw.key, '\\t\\u0041\\x41')
+
+    const empty = await callTo("foo('', h)", 'foo')
+    assert.equal(empty.key, '')
+  })
+
+  it('answers no key for an argument that is neither a string literal nor an identifier chain', async () => {
+    for (const source of ['foo(bar())', 'foo(1)', 'foo(`x`)', 'foo({ path: 1 })', 'foo([K])', 'foo(obj.m?.n)', 'foo(a!.b)']) {
+      const call = await callTo(source, 'foo')
+      assert.equal(call.key, undefined, source)
+    }
+  })
+
+  it('tells an optional chain in the callee apart from one in the key position', async () => {
+    // `obj.m?.n(x)` is a member call whose receiver is the whole `obj.m`; its first
+    // argument is the bare identifier `x`, which the key rule reads as `x`. The
+    // optional chain that is NOT a key is the one standing as an argument.
+    const call = await callTo('obj.m?.n(x)', 'n')
+    assert.equal(call.receiver, 'obj.m')
+    assert.equal(call.key, 'x')
+  })
+
+  it('skips a type argument list: the key is the first POSITIONAL argument', async () => {
+    const call = await callTo('foo<T>(x)', 'foo')
+    assert.equal(call.key, 'x')
+    assert.equal(call.handler, undefined)
+  })
+
+  it('skips a comment between the arguments', async () => {
+    const call = await callTo("foo(/* the key */ 'k', h)", 'foo')
+    assert.equal(call.key, 'k')
+    assert.equal(call.handler, 'h')
+  })
+
+  it('does not read an import specifier as a call', async () => {
+    const parsed = await parse("import { A } from 'x'", 'typescript', 'src/a.ts')
+    assert.deepEqual(parsed.calls, [])
+  })
+
+  it('keeps one call record per call site, with the fields each one spells', async () => {
+    const parsed = await parse([
+      "ipcMain.handle('a', onA)",
+      'ipcRenderer.invoke(B.b)',
+      'fetch("/c")',
+    ].join('\n'), 'typescript', 'src/a.ts')
+    assert.equal(parsed.calls.length, 3)
+    assert.deepEqual(parsed.calls.map(call => [call.name, call.line, call.receiver, call.key, call.handler]), [
+      ['handle', 1, 'ipcMain', 'a', 'onA'],
+      ['invoke', 2, 'ipcRenderer', 'B.b', undefined],
+      ['fetch', 3, undefined, '/c', undefined],
+    ])
+  })
+
+  it('gives an inline handler the extent of its call', async () => {
+    // What a synthesized handler symbol takes for `line`..`endLine`: the call
+    // expression's own extent, so a body spanning lines lies inside it.
+    const parsed = await parse([
+      '// a leading line, so the extent is not measured from 1 by coincidence',
+      'ipcMain.handle(PLATFORM_IPC.open, async (e) => {',
+      '  await e',
+      '})',
+    ].join('\n'), 'typescript', 'src/a.ts')
+    assert.equal(parsed.calls.length, 1)
+    assert.equal(parsed.calls[0]?.line, 2)
+    assert.equal(parsed.calls[0]?.endLine, 4, 'the line the call expression closes on')
+    assert.equal(parsed.calls[0]?.handler, '(inline)')
+  })
+
+  it('reads the same fields from JavaScript', async () => {
+    const call = await callTo("ipcMain.handle('sync', function (e) { return e })", 'handle', 'javascript')
+    assert.equal(call.receiver, 'ipcMain')
+    assert.equal(call.key, 'sync')
+    assert.equal(call.handler, '(inline)')
+  })
+
+  it('leaves the argument fields unset for a grammar that names no arguments field', async () => {
+    // Kotlin's `call_expression` carries no fields at all — its arguments sit inside
+    // `call_suffix` — so the call is recorded as before, with only the extent added.
+    const call = await callTo('fun area(): Int { helper("x", h); return 1 }', 'helper', 'kotlin')
+    assert.equal(call.receiver, undefined)
+    assert.equal(call.key, undefined)
+    assert.equal(call.handler, undefined)
+    assert.equal(call.endLine, 1)
+  })
+})
+
 describe('extractSymbols — Python', () => {
   it('finds functions and classes, with methods nested under their class', async () => {
     const source = [
