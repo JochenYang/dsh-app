@@ -1,6 +1,13 @@
 /**
  * The source reader: a symbol's declared lines, read from the file at query time.
  *
+ * Two reads live here and nothing else in the plugin opens a file. The slice is
+ * one declaration, to edit from. The call sites are one line per reference in an
+ * `impact` answer, each caller's file read once under a file and byte bound, so
+ * that "who calls this" can be read without opening the callers' files. And one
+ * `stat` with no read at all answers whether a cited file moved since the index.
+ * All three admit a path the same way, below.
+ *
  * Why the bytes are read here rather than stored. The graph already knows a
  * declaration's extent (`line`..`end_line`), so the only question left is what
  * those bytes ARE — and a copy in the database would be a second version of the
@@ -22,10 +29,11 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { readFileSync, statSync } from 'node:fs'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { oneRow } from './store.ts'
+import { MAX_SOURCE_FILE_BYTES } from './budget.ts'
 import { SWITCH_ENV, switchIsOn } from './switches.ts'
 
 /** A requested slice: where it starts, where the declaration ends, and its bound. */
@@ -78,6 +86,12 @@ export type SourceRefusal =
    * permissions, and there is nothing wrong with a file that simply got shorter.
    */
   | 'shortened'
+  /**
+   * The file grew past `MAX_SOURCE_FILE_BYTES` after it was indexed. Distinct
+   * from `unreadable`: nothing is wrong with the file, it is simply too large
+   * to read whole on the kernel's event loop for the sake of one declaration.
+   */
+  | 'too-large'
 
 /** The answer: a slice, or the reason there is none. */
 export type SourceResult =
@@ -113,6 +127,12 @@ export function readSourceSlice(request: SourceRequest): SourceResult {
 
   let bytes: Buffer
   try {
+    // Bounded BEFORE it is read. The walk skips files past
+    // `MAX_SOURCE_FILE_BYTES`, but a file can grow after it was indexed — and the
+    // slice used to read whatever was there, whole, on the kernel's event loop,
+    // to hash it and take forty lines. The same bound, so a file the graph holds
+    // is one the reader will open.
+    if (statSync(absolute).size > MAX_SOURCE_FILE_BYTES) return { ok: false, reason: 'too-large' }
     bytes = readFileSync(absolute)
   } catch {
     // Indexed but not readable: deleted between the pass and this call, or a
@@ -194,6 +214,200 @@ function absoluteWithin(root: string, path: string): string | undefined {
   const base = resolve(root)
   const absolute = resolve(base, ...path.split('/'))
   const inside = relative(base, absolute)
-  if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) return undefined
+  // `..foo.ts` is a file in the root that happens to start with two dots; only
+  // `..` itself and `..` followed by a separator leave it.
+  if (inside === '' || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) return undefined
   return absolute
+}
+
+/** One call site's line, as the file reads now. */
+export interface SiteText {
+  /** The line, trimmed and folded to one line of at most `maxChars` characters. */
+  readonly text: string
+  /**
+   * The file no longer hashes to what the graph recorded. The text is still the
+   * file's current line `n`, but the graph's `n` may point elsewhere in the old
+   * bytes — the row says so instead of presenting the line as the indexed call.
+   */
+  readonly drift: boolean
+}
+
+/** What `readCallSites` may spend, and the sites to read. */
+export interface CallSitesRequest {
+  /** The project's open graph, for the recorded hashes. */
+  readonly db: DatabaseSync
+  /** The project root the graph was built under, absolute. */
+  readonly root: string
+  /** The sites, in the order the answer lists them: the budget serves the first ones first. */
+  readonly sites: readonly { readonly path: string, line: number }[]
+  /** How many files may be read. */
+  readonly maxFiles: number
+  /** How many bytes may be read in all. */
+  readonly maxBytes: number
+  /** The longest line of text one site may carry. */
+  readonly maxChars: number
+  /** The most text all sites together may carry. */
+  readonly maxTotalChars: number
+}
+
+/** The sites that got text, and what the reading cost. */
+export interface CallSites {
+  /** Keyed `${path}:${line}`. A site with no entry got no text: a blank line, a refused file, or past the budget. */
+  readonly sites: Map<string, SiteText>
+  /** Files actually read. Diagnostics: the bounds are behaviour, and a test reads them here. */
+  readonly filesRead: number
+  /** True when a bound stopped the walk: a file past the file or byte bound was not opened, a site past the text bound got no text. */
+  readonly truncated: boolean
+}
+
+/** The key one site is recorded under. */
+const siteKey = (path: string, line: number): string => `${path}:${String(line)}`
+
+/**
+ * The text of the lines a list of references points at, each file read once.
+ *
+ * `readSourceSlice` reads one declaration to edit from; this reads one line per
+ * site so that "who calls this" can be answered without opening the callers'
+ * files. Same three guards as the slice — the switch, the `files` row, the
+ * containment check — and the slice's size bound — because it is the same
+ * filesystem read. A file that no longer matches its recorded hash still yields
+ * its current line, flagged: the call the graph saw is the one the reader asked
+ * about, and a wrong line number is a smaller wrong than no line.
+ *
+ * The sites are walked in the order the answer lists them, and a file is read
+ * the first time one of its sites comes up: so the text budget is spent on the
+ * rows the reader meets first, whatever file they are in, and the moment it is
+ * spent the walk STOPS — a file past that point is not opened, hashed or read,
+ * since nothing from it could reach the answer.
+ *
+ * @param request - the graph, the root, the sites and the bounds.
+ * @returns the sites that got text, or undefined when source reading is off.
+ */
+export function readCallSites(request: CallSitesRequest): CallSites | undefined {
+  if (!sourceEnabled()) return undefined
+  const { db, root } = request
+  /** The lines of a file already read, or null for one that was refused or skipped. */
+  const files = new Map<string, readonly string[] | null>()
+  /** Files whose bytes no longer match the graph. */
+  const drifted = new Set<string>()
+  const sites = new Map<string, SiteText>()
+  let filesRead = 0
+  let bytes = 0
+  let chars = 0
+  let truncated = false
+  for (const site of request.sites) {
+    const key = siteKey(site.path, site.line)
+    if (sites.has(key)) continue
+    if (chars >= request.maxTotalChars) { truncated = true; break }
+    let lines = files.get(site.path)
+    if (lines === undefined) {
+      if (filesRead >= request.maxFiles) { truncated = true; break }
+      const recorded = oneRow<{ hash: string }>(db, 'SELECT hash FROM files WHERE path = ?', site.path)
+      // Not indexed, or not inside the root: the same two refusals the slice
+      // gives, and for the same reason — a path in an answer is a MODEL-produced
+      // string.
+      const absolute = recorded === undefined ? undefined : absoluteWithin(root, site.path)
+      const content = absolute === undefined ? undefined : readBounded(absolute, request.maxBytes - bytes)
+      if (content === undefined || content.bound) {
+        files.set(site.path, null)
+        if (content?.bound === true) truncated = true
+        continue
+      }
+      filesRead += 1
+      bytes += content.bytes.length
+      if (createHash('sha256').update(content.bytes).digest('hex') !== recorded?.hash) drifted.add(site.path)
+      lines = content.bytes.toString('utf8').split(/\r?\n/u)
+      files.set(site.path, lines)
+    }
+    if (lines === null) continue
+    const raw = lines[site.line - 1]
+    if (raw === undefined) continue
+    const text = foldLine(raw, request.maxChars)
+    if (text === '') continue
+    if (chars + text.length > request.maxTotalChars) { truncated = true; break }
+    chars += text.length
+    sites.set(key, { text, drift: drifted.has(site.path) })
+  }
+  return { sites, filesRead, truncated }
+}
+
+/**
+ * A file's bytes, or why there are none. The size is checked BEFORE the read, so
+ * a file that grew after it was indexed is never pulled into memory whole; one
+ * past what is left of the byte bound is `bound`, which the caller reports as a
+ * cut, while one that cannot be read at all is not a cut — nothing of it was
+ * ever going to be in the answer.
+ */
+function readBounded(absolute: string, remaining: number): { bytes: Buffer, bound?: false } | { bound: true } | undefined {
+  try {
+    if (statSync(absolute).size > remaining) return { bound: true }
+    return { bytes: readFileSync(absolute) }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * One line of source as a row of an answer carries it: trimmed, whitespace
+ * folded, backticks replaced (the row quotes the line between a pair of its
+ * own), control and format characters replaced, cut with an ellipsis that is
+ * part of the bound.
+ */
+function foldLine(raw: string, maxChars: number): string {
+  // Whitespace first: a tab or a line break is spacing, not a stray control
+  // character, and folding it before the replacement keeps it that way. Then every
+  // control and FORMAT character — the bidi overrides and zero-width marks among
+  // them, which would otherwise let a source line rearrange the row it sits in.
+  // Surrogates are left alone on purpose: `\p{C}` would turn each half of an
+  // emoji into a `?`.
+  const folded = raw.replace(/\s+/gu, ' ').trim().replace(/`/gu, "'").replace(/[\p{Cc}\p{Cf}]/gu, '?')
+  return folded.length > maxChars ? `${folded.slice(0, maxChars - 1)}…` : folded
+}
+
+/**
+ * Whether one indexed file differs from what the graph recorded — `mtime` and
+ * `size`, one `stat`, no read: the same comparison the pass makes before it
+ * decides to re-parse a file.
+ *
+ * @param db - the project's open graph.
+ * @param root - the project root, absolute.
+ * @param path - the project-relative POSIX path from a graph row.
+ * @returns true when the file changed, false when it matches, undefined when the
+ *   question cannot be answered (not indexed, outside the root, unreadable).
+ */
+export function fileChangedSinceIndex(db: DatabaseSync, root: string, path: string): boolean | undefined {
+  // The database read is inside the guard too: `pendingFiles` is an addition to
+  // an answer that is already valid, and a handle closed underneath it (a delete
+  // racing the call) must not turn that answer into an error.
+  let recorded: { mtime: number, size: number } | undefined
+  try {
+    recorded = oneRow<{ mtime: number, size: number }>(db, 'SELECT mtime, size FROM files WHERE path = ?', path)
+  } catch {
+    return undefined
+  }
+  const absolute = recorded === undefined ? undefined : absoluteWithin(root, path)
+  if (recorded === undefined || absolute === undefined) return undefined
+  try {
+    const stat = statSync(absolute)
+    return Math.floor(stat.mtimeMs) !== recorded.mtime || stat.size !== recorded.size
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The files among `paths` that changed since the index, in first-mention order.
+ *
+ * For an answer that already says it describes the previous state: naming the
+ * files it cites that moved is what lets the reader open those and trust the
+ * rest. A `current` answer never calls this — the check that made it current
+ * has just compared the tree.
+ */
+export function changedFilesSinceIndex(db: DatabaseSync, root: string, paths: readonly string[]): string[] {
+  const changed: string[] = []
+  for (const path of paths) {
+    if (changed.includes(path)) continue
+    if (fileChangedSinceIndex(db, root, path)) changed.push(path)
+  }
+  return changed
 }

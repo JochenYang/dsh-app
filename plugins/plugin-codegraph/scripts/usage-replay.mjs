@@ -7,7 +7,9 @@
  *
  *   --sessions   the sessions directory (default: <DSH home>/sessions; the DSH
  *                home is $DSH_HOME, else ~/.dsh)
- *   --since      count events from this date on (UTC midnight; default: the whole log)
+ *   --since      count events from this date on (UTC midnight; default: the whole
+ *                log). The resident context is the one exception: it is measured
+ *                over each session's whole log (see below).
  *   --json       the same data as one JSON object instead of the text report
  *
  * Exit codes: 0 (even when nothing was found to count), 2 for an argument it
@@ -34,15 +36,38 @@
  * classified by its head. A redirect of stdout stays free of this machine's
  * conversations.
  *
+ * ## Resident context
+ *
+ * Throughput is one half (what was appended and how often re-read); what the
+ * window still holds when a session ends is the other, and `resident` measures
+ * it. The prompt tokens of the LAST `assistant/message` usage (input plus every
+ * cache field) are the window's size at that moment, measured. The split by
+ * contributor is in characters over the surface nodes still standing — the
+ * kernel's own fold: an event with `surfaceOp: "append"` joins at its seq, a
+ * replace over `startSeq..endSeq` shadows those nodes and stands in their
+ * place (a compaction summary, a pruned tool result, a rewind) — and is
+ * converted to tokens at each session's own chars/token, an estimate. It is
+ * taken over each session's WHOLE log, whatever `--since` cut off before: the
+ * window at the end holds what the whole session put there. Two things are
+ * deliberately not on the surface. `tool/ptc-dispatch`: a run_code sub-call's
+ * answer is inside the run_code result the model sees (measured here: the two
+ * are about the same size), so counting both would double it. An assistant
+ * message's reasoning blocks: measured here, the chars-per-token spread
+ * collapses from a max of 19.5 to 4.1 once they are left out, so the window
+ * does not replay them.
+ *
  * ## What it relies on
  *
  * The kernel's session-log FORMAT, not anything this plugin owns: multi-frame
  * zstd, one JSON event per line, `tool/call` + `tool/result` paired by
  * `callId`, `tool/ptc-dispatch-start` + `tool/ptc-dispatch` paired by
  * `subCallId`, the runtime context as a `user/message` whose
- * `source.kind` is `runtime-context`. The reader is the repository root's
+ * `source.kind` is `runtime-context`, and — for the resident context — the
+ * surface marker on every message-producing event (`@deepseek-ai/dsh-session`
+ * `foldSurface`). The reader is the repository root's
  * `scripts/lib/session-log.mjs`; when the kernel changes the format, the
- * counts change silently — check `parsed` against `files` first.
+ * counts change silently — check `parsed` against `files` first, and the
+ * resident section's unmarked entries and unplaced replaces against zero.
  *
  * Needs Node 22.15+ (`node:zlib` zstd support). Writes nothing.
  */
@@ -55,6 +80,10 @@ const USAGE = 'usage: node plugins/plugin-codegraph/scripts/usage-replay.mjs [--
 
 /** The runtime-context contribution the overview arrives under (src/prompt.ts). */
 const OVERVIEW = 'dsh-app:codegraph:overview'
+/** The request pack's contribution (src/prompt.ts); no log on record carries it yet. */
+const REQUEST = 'dsh-app:codegraph:request'
+/** The runtime-context contributions this app's plugins add, named `dsh-app:<plugin>:<part>`. */
+const PLUGIN_PREFIX = 'dsh-app:'
 const GRAPH_TOOL = /^codegraph_/u
 /** The three tools this plugin registers; any other `codegraph_*` name is counted apart. */
 const GRAPH_TOOLS = ['codegraph_find', 'codegraph_impact', 'codegraph_context']
@@ -68,10 +97,19 @@ const RANGE_KEYS = ['offset', 'limit', 'start_line', 'end_line', 'startLine', 'e
 const SIZE_BANDS = [2000, 5000, 10000, 20000, 50000]
 /** The usage fields of an `assistant/message`. */
 const TOKEN_KEYS = ['inputTokens', 'cacheReadTokens', 'outputTokens', 'totalTokens']
+/** The usage fields that make up the prompt a step saw: the input plus every cache field (read, write, creation). */
+const PROMPT_TOKENS = /^(?:input|cache[A-Za-z]*)Tokens$/u
+/** The event types that join the kernel's model-visible surface (`SURFACE_EVENT_TYPES` in `@deepseek-ai/dsh-session`). */
+const SURFACE_TYPES = new Set(['system/message', 'developer/message', 'user/message', 'assistant/message', 'tool/result'])
+/** The `user/message` source kinds a compaction summary lands under: the node that stands for the shadowed range. */
+const CHECKPOINT_KINDS = new Set(['spine-checkpoint', 'compact-checkpoint'])
 /** The overview's line classes, in report order. Classified by the line's head (see `lineClass`). */
 const LINE_CLASSES = ['headline', 'status', 'note', 'scope', 'layout', 'entry', 'hub', 'other']
 /** A contribution name is a code identifier; anything else is counted as `other` and never printed. */
 const CONTRIBUTION_NAME = /^[\w.:-]+$/u
+
+/** What an image or offload block is counted as in the resident split (`residentSize`). */
+const PLACEHOLDER = '[image]'
 
 function fail(message) {
   process.stderr.write(`usage-replay: ${message}\n`)
@@ -157,6 +195,13 @@ function replay(files, sinceMs, sinceLabel) {
   const multipliers = []
   const lineClassVersions = Object.fromEntries(LINE_CLASSES.map(name => [name, 0]))
   const lineClassLines = Object.fromEntries(LINE_CLASSES.map(name => [name, 0]))
+  // Resident context: one sample per session that ended with a usage record.
+  const residentTokens = []
+  const residentWindowShares = []
+  const residentCompactions = []
+  const residentPrunes = []
+  const residentCharsPerToken = []
+  const residentContributors = new Map() // name -> { chars, tokens }
 
   for (const file of files) {
     report.scope.files += 1
@@ -182,6 +227,7 @@ function replay(files, sinceMs, sinceLabel) {
       graphSizes, answerSizes, snapshotChars, snapshotCharsWithOverview, overviewChars,
       repushesPerSession, repushesPerOverviewSession, partners, readSizes,
       perSessionRepeats, perSessionMaxReads, multipliers, lineClassVersions, lineClassLines,
+      residentTokens, residentWindowShares, residentCompactions, residentPrunes, residentCharsPerToken, residentContributors,
     })
   }
   if (report.scope.skipped > 0) process.stderr.write(`usage-replay: skipped ${String(report.scope.skipped)} log(s) that could not be decoded\n`)
@@ -224,6 +270,24 @@ function replay(files, sinceMs, sinceLabel) {
   }
   report.multiplier.perSession = stats(multipliers)
   report.multiplier.factor = report.multiplier.appendedChars === 0 ? 0 : report.multiplier.rereadChars / report.multiplier.appendedChars
+  const res = report.resident
+  res.tokens = stats(residentTokens)
+  res.windowShare = stats(residentWindowShares)
+  res.compactions = stats(residentCompactions)
+  res.prunes = stats(residentPrunes)
+  res.charsPerToken = stats(residentCharsPerToken)
+  // Largest share first, then by name, like changedPartners.
+  res.contributors = [...residentContributors.entries()]
+    .sort((a, b) => b[1].chars - a[1].chars || (a[0] < b[0] ? -1 : 1))
+    .map(([name, row]) => ({
+      name,
+      chars: row.chars,
+      sharePct: tenths(row.chars, res.chars),
+      tokensEstimate: Math.round(row.tokens),
+    }))
+  if (res.unmarkedEntries > 0 || res.unplacedReplaces > 0) {
+    process.stderr.write(`usage-replay: resident context: ${String(res.unmarkedEntries)} message event(s) without a surface marker, ${String(res.unplacedReplaces)} replace(s) could not be placed; the surface was read as far as it made sense\n`)
+  }
   return report
 }
 
@@ -259,6 +323,13 @@ function emptyReport(sinceLabel) {
     },
     multiplier: { appendedChars: 0, rereadChars: 0, factor: 0, sessionsAtLeast20Steps: 0, perSession: stats([]) },
     tokens: { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 },
+    // `windowShare` is in percent of the context window, one decimal; `charsPerToken` is
+    // the per-session calibration the contributors' token estimates are converted at.
+    resident: {
+      n: 0, withoutUsage: 0, unmarkedEntries: 0, unplacedReplaces: 0, sessionsWithMedia: 0,
+      tokens: stats([]), windowShare: stats([]), compactions: stats([]), prunes: stats([]),
+      chars: 0, charsPerToken: stats([]), contributors: [],
+    },
   }
 }
 
@@ -479,6 +550,242 @@ function countSession(report, events, sinceMs, c) {
     report.explore.sessionsWithToolCalls += 1
     if (sequence.length >= 6 && sequence.slice(0, 6).every(name => name === 'run_code')) report.explore.firstSixAllRunCode += 1
   }
+
+  // Whole-log, behind the window check at the top: a session with nothing in the
+  // window is in no section of this report.
+  addResident(report, events, c)
+}
+
+/**
+ * Measure what the window still held when the session ended: the prompt tokens
+ * of the last usage record, and the characters of the surface nodes still
+ * standing, by contributor. Over the WHOLE log — the last usage is the prompt at
+ * that moment whatever `--since` cut off before it, so the characters beside it
+ * are the whole session's too. A session without a usage record is counted and
+ * left out of every distribution; one whose last prompt was zero tokens is in
+ * the counts but calibrates nothing.
+ * @param {ReturnType<emptyReport>} report - the report to add to.
+ * @param {Record<string, unknown>[]} events - the whole log, header first.
+ * @param {object} c - the per-sample arrays the caller reduces afterwards.
+ */
+function addResident(report, events, c) {
+  const native = new Map() // callId -> tool name, over the whole log
+  let window
+  let compactions = 0
+  let prunes = 0
+  for (const event of events) {
+    const data = isRecord(event.data) ? event.data : {}
+    if (event.type === 'tool/call') {
+      if (data.callId !== undefined) native.set(String(data.callId), toolName(data))
+    } else if (event.type === 'request/context') {
+      if (typeof data.contextWindow === 'number') window = data.contextWindow
+    } else if (event.type === 'compaction/summary') {
+      compactions += 1
+    } else if (event.type === 'compaction/prune') {
+      prunes += 1
+    }
+  }
+  const surface = foldSurface(events, report)
+  // The last usage record still STANDING: a rewind replaces the messages it
+  // undoes, and a usage from a shadowed step would price a window the model no
+  // longer holds. The characters below come from the same surface.
+  let lastUsage
+  for (const node of surface) {
+    const data = isRecord(node.data) ? node.data : {}
+    if (node.type === 'assistant/message' && isRecord(data.usage)) lastUsage = data.usage
+  }
+  if (lastUsage === undefined) {
+    report.resident.withoutUsage += 1
+    return
+  }
+  const tokens = promptTokensOf(lastUsage)
+  const contributors = new Map() // name -> chars, this session
+  const media = { seen: false } // image or offload blocks, counted as a placeholder
+  let chars = 0
+  for (const node of surface) {
+    for (const { name, size } of contributionsOf(node, native, media)) {
+      chars += size
+      contributors.set(name, (contributors.get(name) ?? 0) + size)
+    }
+  }
+  report.resident.n += 1
+  report.resident.chars += chars
+  c.residentTokens.push(tokens)
+  if (media.seen) report.resident.sessionsWithMedia += 1
+  c.residentCompactions.push(compactions)
+  c.residentPrunes.push(prunes)
+  if (window !== undefined && window > 0) c.residentWindowShares.push(tenths(tokens, window))
+  if (tokens > 0) c.residentCharsPerToken.push(Math.round((chars / tokens) * 100) / 100)
+  // The split is in characters; converted at this session's own chars/token it
+  // is an estimate, and the report says so.
+  for (const [name, size] of contributors) {
+    const row = c.residentContributors.get(name) ?? { chars: 0, tokens: 0 }
+    row.chars += size
+    row.tokens += tokens > 0 && chars > 0 ? (size / chars) * tokens : 0
+    c.residentContributors.set(name, row)
+  }
+}
+
+/**
+ * The surface nodes still standing at the end of the log — the kernel's own
+ * fold (`foldSurface` in `@deepseek-ai/dsh-session`). Every message-producing
+ * event carries a `surfaceOp`: `append` joins at its own seq; a replace over
+ * `startSeq..endSeq` shadows those nodes and stands in their place (a compaction
+ * summary, a pruned tool result, a rewind). The compaction records' own
+ * `shadowedSeqs` list surface nodes only, never a contiguous run, so a
+ * seq-after-the-last-range rule would miscount; the fold is exact. An entry
+ * without a marker is not on the surface (the kernel refuses such a log); a
+ * replace this reader cannot place is counted and its nodes are left standing.
+ * @param {Record<string, unknown>[]} events - the whole log, header first.
+ * @param {ReturnType<emptyReport>} report - the report, for the two format counters.
+ * @returns {Record<string, unknown>[]} the nodes, in surface order.
+ */
+function foldSurface(events, report) {
+  const nodes = []
+  for (const event of events) {
+    const op = event.surfaceOp
+    if (op === undefined) {
+      if (SURFACE_TYPES.has(event.type)) report.resident.unmarkedEntries += 1
+      continue
+    }
+    if (op === 'append') {
+      nodes.push(event)
+      continue
+    }
+    const start = isRecord(op) && typeof op.startSeq === 'number' ? nodes.findIndex(node => node.seq === op.startSeq) : -1
+    const end = isRecord(op) && typeof op.endSeq === 'number' ? nodes.findIndex(node => node.seq === op.endSeq) : -1
+    if (start === -1 || end === -1 || start > end) {
+      report.resident.unplacedReplaces += 1
+      continue
+    }
+    nodes.splice(start, end - start + 1, event)
+  }
+  return nodes
+}
+
+/**
+ * What one surface node adds to the window, by contributor: zero or more
+ * `{ name, size }` (a runtime-context snapshot splits by section). The size is
+ * the model-visible text; an assistant message's reasoning blocks are left out
+ * (see the header).
+ * @param {Record<string, unknown>} node - one surface event.
+ * @param {Map<string, string>} native - callId -> tool name, over the whole log.
+ * @returns {{ name: string, size: number }[]} the contributions.
+ */
+function contributionsOf(node, native, media) {
+  const data = isRecord(node.data) ? node.data : {}
+  if (node.type === 'user/message') return userContributions(data, media)
+  if (node.type === 'tool/result') {
+    const message = isRecord(data.message) ? data.message : {}
+    const name = native.get(String(message.toolCallId))
+    return [{ name: name === undefined ? 'unpaired' : toolContribution(name), size: residentSize(message.content, media) }]
+  }
+  if (node.type === 'assistant/message') {
+    const message = isRecord(data.message) ? data.message : {}
+    const content = Array.isArray(message.content) ? message.content.filter(block => !isRecord(block) || block.type !== 'reasoning') : message.content
+    return [{ name: 'assistant', size: residentSize(content, media) }]
+  }
+  if (node.type === 'system/message' || node.type === 'developer/message') {
+    const message = isRecord(data.message) ? data.message : {}
+    return [{ name: node.type === 'system/message' ? 'system' : 'developer', size: residentSize(message.content, media) }]
+  }
+  return []
+}
+
+/**
+ * How many characters a content value adds to the window, for the resident split.
+ *
+ * Text is text. An image or offload block is a fixed placeholder, not its
+ * payload: the kernel projects those (`MESSAGE_PROJECTION_EVENT_TYPES`) and a
+ * base64 body would otherwise count as megabytes of "context" the model never
+ * saw as text. The session is flagged so the report can say how many it has.
+ * @param {unknown} content - the content blocks (or a string).
+ * @param {{ seen: boolean }} media - set once a session shows such a block.
+ * @returns {number} the characters.
+ */
+function residentSize(content, media) {
+  if (!Array.isArray(content)) return textOf(content).length
+  let size = 0
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    if (block.type === 'image' || block.type === 'offload') {
+      media.seen = true
+      size += PLACEHOLDER.length
+      continue
+    }
+    size += block.type === 'text' ? String(block.text ?? '').length : JSON.stringify(block).length
+  }
+  return size
+}
+
+/**
+ * A `user/message`'s contributions: the runtime context by section, a person's
+ * message as `human`, a compaction summary as itself, any other producer as
+ * `injected`.
+ * @param {Record<string, unknown>} data - the event's data.
+ * @returns {{ name: string, size: number }[]} the contributions.
+ */
+function userContributions(data, media) {
+  const source = isRecord(data.source) ? data.source : {}
+  const whole = name => [{ name, size: residentSize(data.content, media) }]
+  if (source.kind === 'runtime-context') {
+    const sections = Array.isArray(source.sections) ? source.sections.filter(isRecord) : []
+    // No sections to split by: the whole text, under the bucket for a name that is not one.
+    if (sections.length === 0) return whole('other')
+    return sections.map(section => ({
+      name: sectionContribution(typeof section.name === 'string' ? section.name : ''),
+      size: typeof section.text === 'string' ? section.text.length : 0,
+    }))
+  }
+  if (source.kind === 'user') return whole('human')
+  if (CHECKPOINT_KINDS.has(source.kind)) return whole('compaction summary')
+  return whole('injected')
+}
+
+/**
+ * The contributor a runtime-context section counts under: the graph's two by
+ * name, any other `dsh-app` plugin's by plugin, the kernel's by their own name.
+ * @param {string} name - the section name.
+ * @returns {string} the contributor.
+ */
+function sectionContribution(name) {
+  if (name === OVERVIEW) return 'codegraph overview'
+  if (name === REQUEST) return 'codegraph request pack'
+  if (name.startsWith(PLUGIN_PREFIX)) return contributionName(name.slice(PLUGIN_PREFIX.length).split(':')[0])
+  return contributionName(name)
+}
+
+/**
+ * The contributor a native tool answer counts under: the graph's tools by
+ * name, a file read as `read`, any other tool by its own name.
+ * @param {string} name - the tool name.
+ * @returns {string} the contributor.
+ */
+function toolContribution(name) {
+  if (GRAPH_TOOL.test(name)) return `codegraph ${contributionName(name.slice('codegraph_'.length))}`
+  if (READ_TOOLS.has(name)) return 'read'
+  return contributionName(name)
+}
+
+/** A code identifier as itself; anything else `other`, which is all that is ever printed. */
+function contributionName(name) {
+  return CONTRIBUTION_NAME.test(name) ? name : 'other'
+}
+
+/**
+ * The prompt one usage record says the model saw: the input plus every cache
+ * field; output and total are not prompt.
+ * @param {Record<string, unknown>} usage - an `assistant/message`'s `data.usage`.
+ * @returns {number} the tokens.
+ */
+function promptTokensOf(usage) {
+  let sum = 0
+  for (const [key, value] of Object.entries(usage)) {
+    if (!PROMPT_TOKENS.test(key)) continue
+    const count = Number(value)
+    if (Number.isFinite(count)) sum += count
+  }
+  return sum
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +882,11 @@ function pct(part, whole) {
   return whole === 0 ? 0 : Math.round((part / whole) * 100)
 }
 
+/** `part / whole` in percent to one decimal: a share small enough that whole percent would round it away. */
+function tenths(part, whole) {
+  return whole === 0 ? 0 : Math.round((part / whole) * 1000) / 10
+}
+
 // ---------------------------------------------------------------------------
 // The text report
 // ---------------------------------------------------------------------------
@@ -596,7 +908,7 @@ function ranked(entries) {
 
 /** The report as text: the same data as the JSON, one section per heading. */
 function renderText(report) {
-  const { scope, adoption, answers, snapshots: snap, explore, multiplier, tokens } = report
+  const { scope, adoption, answers, snapshots: snap, explore, multiplier, tokens, resident } = report
   const lines = [
     `usage-replay: kernel session logs (session.v4.jsonl.zstd)  since=${scope.since}`,
     `files=${String(scope.files)} parsed=${String(scope.parsed)} skipped=${String(scope.skipped)} truncated=${String(scope.truncated)} lines=${String(scope.lines)} unparsable=${String(scope.unparsable)}`,
@@ -642,6 +954,15 @@ function renderText(report) {
     '',
     '== tokens (assistant/message usage, summed)',
     `inputTokens=${String(tokens.inputTokens)} cacheReadTokens=${String(tokens.cacheReadTokens)} outputTokens=${String(tokens.outputTokens)} totalTokens=${String(tokens.totalTokens)}`,
+    '',
+    '== resident context at session end: the last usage record, and the surface nodes still standing (each session\'s whole log)',
+    `sessions with a usage record=${String(resident.n)} (without=${String(resident.withoutUsage)}); prompt tokens at the last usage (input + cache): ${dist(resident.tokens)}`,
+    `window share, percent of contextWindow (sessions with a window): ${dist(resident.windowShare)}`,
+    `compactions per session: ${dist(resident.compactions)}; pruned tool results per session: ${dist(resident.prunes)}`,
+    `resident chars=${big(resident.chars)} (user, assistant text and tool calls, tool results, system, developer; reasoning left out); chars per resident token, per session: ${dist(resident.charsPerToken)}`,
+    `format: message events without a surface marker=${String(resident.unmarkedEntries)}, replaces this reader could not place=${String(resident.unplacedReplaces)}, sessions with image or offload blocks (each counted as a placeholder)=${String(resident.sessionsWithMedia)}`,
+    'tokens are measured; the split is by characters and converted at each session\'s own chars/token',
+    `contributors by chars (share of resident chars, estimated tokens): ${resident.contributors.length === 0 ? '(none)' : resident.contributors.map(row => `${row.name} ${big(row.chars)} (${row.sharePct}%, ~${big(row.tokensEstimate)})`).join(', ')}`,
   )
   return lines.join('\n')
 }

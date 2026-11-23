@@ -19,7 +19,7 @@
 
 import { strict as assert } from 'node:assert'
 import { after, describe, it } from 'node:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { validateJsonSchemaValue, type JsonSchemaNode } from '@deepseek-ai/dsh-tools'
@@ -364,7 +364,7 @@ describe('the three answers on real files', () => {
       assert.match(plain.text, /^Tests that reference this \(2 file\(s\)\) — run these first:$/mu)
       assert.match(plain.text, /^- tests\/target\.test\.ts$/mu)
       assert.match(plain.text, /^- tests\/top\.test\.ts$/mu, 'a top-level call in a test file counts too')
-      assert.match(plain.text, /^- src\/caller\.ts:5 ✓$/mu, 'the import clause resolved this one')
+      assert.match(plain.text, /^- `caller` — `src\/caller\.ts:5` ✓: `return target\(x\) \+ target\(dup\(\)\)`$/mu, 'the import clause resolved this one, and the row carries the call')
       assert.match(plain.text, /^\(✓ = resolved by a same-file declaration or an import clause; unmarked rows are name matches\.\)$/mu)
 
       const deep = await answer(tools, 'codegraph_impact', { symbol: 'target', depth: 2 }, root)
@@ -381,6 +381,65 @@ describe('the three answers on real files', () => {
       // Past the ceiling: clamped, not refused.
       const clamped = await answer(tools, 'codegraph_impact', { symbol: 'target', depth: 99 }, root)
       assert.equal((clamped.value.callers as { depth: number }).depth, 3)
+    } finally {
+      await dispose()
+    }
+  })
+
+  it('impact answers the call in place: every site line, the target source, and the files that moved', async () => {
+    const { root } = fixture()
+    writeProject(root)
+    const { ctx, tools, emit, dispose } = fakeContext()
+    apply(ctx as never)
+    const agent = { session: { header: { cwd: root } } }
+    try {
+      emit('session/created', { header: { cwd: root } } as never)
+      await until(async () => {
+        const found = await tools.get('codegraph_find')!.execute({ query: 'target' }, { agent })
+        return found.freshness === 'current' && (found.symbols as unknown[]).length === 1
+      }, 'the first pass to settle')
+
+      // SUFFICIENT: the call lines come from the callers' files, the callee's
+      // own declaration rides along, and nothing is flagged on a current graph.
+      const { value, text } = await answer(tools, 'codegraph_impact', { symbol: 'target' }, root)
+      const rows = value.referencing as { path: string, line: number, name?: string, text?: string, drift?: boolean }[]
+      assert.ok(rows.length >= 2)
+      assert.equal(rows.every(row => row.text !== undefined && row.text !== ''), true, 'every row carries its line on a current graph')
+      assert.equal(rows.every(row => row.drift === undefined), true, 'and none is flagged')
+      assert.match(text, /^source — src\/target\.ts:2-4 \(verbatim, line-numbered/mu, 'the target is three lines, so it rides along')
+      assert.match(text, /^2\tfunction target\(x: number\): number \{$/mu)
+      assert.doesNotMatch(text, /⚠/u)
+      assert.equal(value.pendingFiles, undefined, 'a current answer names nothing')
+      assert.ok(text.length < 2_500, `the whole answer stays small: ${String(text.length)} characters`)
+
+      // STALE AND NAMED: a caller's file gains a line above the call. The next
+      // answer describes the previous state, names that file, and flags the
+      // row whose line number now counts the old bytes.
+      const callerFile = join(root, 'src', 'caller.ts')
+      writeFileSync(callerFile, `// inserted\n${readFileSync(callerFile, 'utf8')}`)
+      emit('tools/result', { name: 'write', agent } as never)
+      const stale = await answer(tools, 'codegraph_impact', { symbol: 'target' }, root)
+      assert.equal(stale.value.freshness, 'stale')
+      assert.deepEqual(stale.value.pendingFiles, ['src/caller.ts'], 'the one cited file that moved')
+      const first = stale.text.split('\n')[0] ?? ''
+      assert.match(first, /^⚠️ 1 file\(s\) this answer cites changed since it was indexed \(src\/caller\.ts\)/u)
+      const moved = (stale.value.referencing as { path: string, drift?: boolean }[]).find(row => row.path === 'src/caller.ts')
+      assert.equal(moved?.drift, true, 'the row says its line counts the old bytes')
+      assert.match(stale.text, /⚠ file changed since it was indexed/u)
+
+      // find and context say the same thing about the same file — the symbol
+      // branch through its callers, the overview through its hubs (the caller is
+      // one of the most-referenced symbols), and a deeper tree through its nodes.
+      const found = await answer(tools, 'codegraph_find', { query: 'caller' }, root)
+      assert.equal(found.value.freshness, 'stale')
+      assert.deepEqual(found.value.pendingFiles, ['src/caller.ts'])
+      const context = await answer(tools, 'codegraph_context', { symbol: 'target' }, root)
+      assert.deepEqual(context.value.pendingFiles, ['src/caller.ts'], 'the symbol branch cites its callers too')
+      const overview = await answer(tools, 'codegraph_context', {}, root)
+      assert.deepEqual(overview.value.pendingFiles, ['src/caller.ts'], 'the overview cites its hubs')
+      assert.match(overview.text, /^⚠️ 1 file\(s\) this answer cites changed since it was indexed \(src\/caller\.ts\)/u)
+      const tree = await answer(tools, 'codegraph_impact', { symbol: 'target', depth: 2 }, root)
+      assert.deepEqual(tree.value.pendingFiles, ['src/caller.ts'], 'the caller tree cites its nodes')
     } finally {
       await dispose()
     }

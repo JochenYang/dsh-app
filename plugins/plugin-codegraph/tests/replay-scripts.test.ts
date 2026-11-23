@@ -60,13 +60,17 @@ const PROSE = 'SENTINEL-prose-xq71'
 const QUERY = 'SENTINEL-query-xq71'
 const CONTEXT_SYMBOL = 'SENTINEL-context-symbol-xq71'
 const SOURCE_TEXT = 'SENTINEL-source-xq71-a'
-const SENTINELS = [OVERVIEW_SYMBOL, SHARED_NAME, UNKNOWN_NAME, FILE, PROSE, QUERY, CONTEXT_SYMBOL, SOURCE_TEXT]
+/** A compaction summary's text: on the surface as a node, measured by length only. */
+const SUMMARY_TEXT = 'SENTINEL-summary-xq71'
+const SENTINELS = [OVERVIEW_SYMBOL, SHARED_NAME, UNKNOWN_NAME, FILE, PROSE, QUERY, CONTEXT_SYMBOL, SOURCE_TEXT, SUMMARY_TEXT]
 
 /** The runtime-context contribution the overview arrives under (src/prompt.ts). */
 const OVERVIEW = 'dsh-app:codegraph:overview'
 
 const ALPHA = 'D:\\proj\\alpha'
 const BETA = 'D:\\proj\\beta'
+const LATE = 'D:\\proj\\late'
+const OLD = 'D:\\proj\\older'
 
 /** Two overview versions that differ in exactly two lines: the headline and one hub row. */
 function overviewText(files: string, callSites: string): string {
@@ -126,6 +130,37 @@ function human(time: number, text: string): string {
 
 const assistantUsage = (time: number, usage: Record<string, number>): string =>
   event(time, 'assistant/message', { message: { content: [{ type: 'text', text: 'ok' }] }, usage })
+
+/**
+ * One session's lines the way the kernel writes them for the SURFACE (what the
+ * model sees): the header without a seq, every later event with a contiguous
+ * `seq` from 0, and every message-producing event with its `surfaceOp` —
+ * `append` to join at its own seq, or a replace over `startSeq..endSeq` whose
+ * `sourceEventSeqs` cite the nodes it shadows. Each writer returns the seq it
+ * gave the event, for the ranges that cite it.
+ */
+class SessionLog {
+  readonly lines: string[] = []
+  seq = 0
+  constructor(cwd: string) {
+    this.lines.push(header(cwd))
+  }
+  /** A log-only event: no surface marker (a step, a call, a compaction record, a title). */
+  log(time: number, type: string, data: unknown): number {
+    this.lines.push(`${JSON.stringify({ type, time, seq: this.seq, data })}\n`)
+    return this.seq++
+  }
+  /** A message-producing event that joins the surface at its own seq. */
+  enter(time: number, type: string, data: unknown): number {
+    this.lines.push(`${JSON.stringify({ type, time, seq: this.seq, data, surfaceOp: 'append' })}\n`)
+    return this.seq++
+  }
+  /** A message-producing event that shadows `startSeq..endSeq` and stands in their place. */
+  replace(time: number, type: string, data: unknown, startSeq: number, endSeq: number, shadowed: number[]): number {
+    this.lines.push(`${JSON.stringify({ type, time, seq: this.seq, data, surfaceOp: { op: 'replace', startSeq, endSeq }, sourceEventSeqs: shadowed })}\n`)
+    return this.seq++
+  }
+}
 
 /** A long request that names a held file and a uniquely declared identifier, padded past 600 chars with prose. */
 const LONG_MESSAGE = `${`${PROSE} plain prose words here. `.repeat(20)}Please look at ${FILE} and ${OVERVIEW_SYMBOL} before you start.`
@@ -223,6 +258,106 @@ function sessionsFixture(): string {
   const broken = join(root, 'broken', 'session-broken')
   mkdirSync(broken, { recursive: true })
   writeFileSync(join(broken, 'session.v4.jsonl.zstd'), Buffer.from('not a zstd stream', 'utf8'))
+  return root
+}
+
+/** The text of session R's resident nodes, by contributor; the overview's is OVERVIEW_V2. */
+const R_SIZES = { system: 'sys'.length, summary: SUMMARY_TEXT.length, harness: 'h2'.length, runCode: 500, injected: 30, human: 20, found: 'pruned'.length, assistant: 'ok'.length }
+/** Session R's resident chars: its nodes at the end, the overview's text included. */
+const R_CHARS = Object.values(R_SIZES).reduce((total, size) => total + size, 0) + OVERVIEW_V2.length
+/** Session R's prompt at its last usage: input + cache read + cache write. */
+const R_TOKENS = 100 + 180 + 20
+/** Session U's resident chars (one human message, one assistant text) and prompt. */
+const U_CHARS = 40 + 'done'.length
+const U_TOKENS = 100 + 400
+
+/**
+ * Session R: the surface the resident measure is taken over. A system prompt,
+ * then an early stretch — a snapshot with the overview, a read, a human message,
+ * a step with usage — that a compaction shadows with a summary node; after it a
+ * second snapshot, a codegraph_find answer that a prune later shortens, a
+ * run_code whose sub-call answer must not count beside its result, an injected
+ * and a human message, and a last step whose usage is the resident prompt and
+ * whose reasoning must not count.
+ */
+function sessionResident(): string[] {
+  const s = new SessionLog(ALPHA)
+  s.enter(T + 1, 'system/message', { step: 1, turn: 1, message: { role: 'system', content: [{ type: 'text', text: 'sys' }] } })
+  s.log(T + 2, 'step/start', { step: 1, turn: 1 })
+  const snapshot1 = s.enter(T + 3, 'user/message', {
+    role: 'user',
+    content: [{ type: 'text', text: `${OVERVIEW_V1}\nctx-one\n${SOURCE_TEXT}` }],
+    source: { kind: 'runtime-context', form: 'sections', sections: [{ name: OVERVIEW, text: OVERVIEW_V1 }, { name: 'dsh-app:task-context:current', text: 'ctx-one' }, { name: 'harness:source', text: SOURCE_TEXT }] },
+  })
+  s.log(T + 4, 'tool/call', { name: 'read', callId: 'c1', arguments: JSON.stringify({ path: FILE }), step: 1, turn: 1 })
+  const read = s.enter(T + 5, 'tool/result', { step: 1, turn: 1, message: { toolCallId: 'c1', isError: false, role: 'tool', content: [{ type: 'text', text: 'L'.repeat(100) }] } })
+  const human1 = s.enter(T + 6, 'user/message', { role: 'user', content: [{ type: 'text', text: 'H'.repeat(40) }], source: { kind: 'user' } })
+  const early = s.enter(T + 7, 'assistant/message', { step: 1, turn: 1, usage: { inputTokens: 10, cacheReadTokens: 90, outputTokens: 5, totalTokens: 105 }, message: { role: 'assistant', content: [{ type: 'text', text: 'early' }] } })
+  // The compaction record, then the summary node that shadows the stretch: the kernel's order.
+  s.log(T + 8, 'compaction/summary', { compactionId: 'k1', model: 'm', provider: 'p', rawOutput: 'raw', shadowedRange: { start: snapshot1, end: early }, shadowedSeqs: [snapshot1, read, human1, early], shadowedTokenCount: 300, summary: [{ type: 'text', text: SUMMARY_TEXT }] })
+  s.replace(T + 9, 'user/message', { role: 'user', content: [{ type: 'text', text: SUMMARY_TEXT }], source: { kind: 'spine-checkpoint' } }, snapshot1, early, [snapshot1, read, human1, early])
+  s.enter(T + 10, 'user/message', {
+    role: 'user',
+    content: [{ type: 'text', text: `${OVERVIEW_V2}\nh2` }],
+    source: { kind: 'runtime-context', form: 'sections', sections: [{ name: OVERVIEW, text: OVERVIEW_V2 }, { name: 'harness:source', text: 'h2' }] },
+  })
+  s.log(T + 11, 'step/start', { step: 2, turn: 1 })
+  s.log(T + 12, 'tool/call', { name: 'codegraph_find', callId: 'c2', arguments: JSON.stringify({ query: QUERY }), step: 2, turn: 1 })
+  const found = s.enter(T + 13, 'tool/result', { step: 2, turn: 1, message: { toolCallId: 'c2', isError: false, role: 'tool', content: [{ type: 'text', text: 'x'.repeat(300) }] } })
+  s.log(T + 14, 'tool/call', { name: 'run_code', callId: 'c3', arguments: JSON.stringify({ code: 'x' }), step: 2, turn: 1 })
+  // The sub-call's answer is inside the run_code result below, not beside it.
+  s.log(T + 15, 'tool/ptc-dispatch-start', { name: 'read', subCallId: 'p1', arguments: { path: FILE } })
+  s.log(T + 16, 'tool/ptc-dispatch', { name: 'read', subCallId: 'p1', isError: false, content: [{ type: 'text', text: 'M'.repeat(80) }] })
+  s.enter(T + 17, 'tool/result', { step: 2, turn: 1, message: { toolCallId: 'c3', isError: false, role: 'tool', content: [{ type: 'text', text: 'R'.repeat(R_SIZES.runCode) }] } })
+  s.enter(T + 18, 'user/message', { role: 'user', content: [{ type: 'text', text: 'I'.repeat(R_SIZES.injected) }], source: { kind: 'time-context' } })
+  s.enter(T + 19, 'user/message', { role: 'user', content: [{ type: 'text', text: 'U'.repeat(R_SIZES.human) }], source: { kind: 'user' } })
+  // A prune: the find answer is rewritten in place, and only the rewrite is resident.
+  s.log(T + 20, 'compaction/prune', { shadowedRange: { start: found, end: found }, shadowedSeqs: [found], shadowedTokenCount: 80 })
+  s.replace(T + 21, 'tool/result', { step: 2, turn: 1, message: { toolCallId: 'c2', isError: false, role: 'tool', content: [{ type: 'text', text: 'pruned' }] } }, found, found, [found])
+  s.enter(T + 22, 'assistant/message', {
+    step: 2, turn: 1,
+    usage: { inputTokens: 100, cacheReadTokens: 180, cacheWriteTokens: 20, outputTokens: 20, totalTokens: 320 },
+    message: { role: 'assistant', content: [{ type: 'reasoning', text: 'r'.repeat(1000) }, { type: 'text', text: 'ok' }] },
+  })
+  s.log(T + 23, 'request/context', { contextWindow: 2000, model: 'm', provider: 'p' })
+  return s.lines
+}
+
+/** Session S: a human message and no assistant usage — nothing to measure the window against. */
+function sessionNoUsage(): string[] {
+  const s = new SessionLog(BETA)
+  s.log(T + 1, 'step/start', { step: 1, turn: 1 })
+  s.enter(T + 2, 'user/message', { role: 'user', content: [{ type: 'text', text: 'N'.repeat(10) }], source: { kind: 'user' } })
+  return s.lines
+}
+
+/** Session U: its usage predates --since; a title event after it keeps it in the window. */
+function sessionLate(): string[] {
+  const s = new SessionLog(LATE)
+  s.log(T - 3000, 'step/start', { step: 1, turn: 1 })
+  s.enter(T - 2500, 'user/message', { role: 'user', content: [{ type: 'text', text: 'K'.repeat(40) }], source: { kind: 'user' } })
+  s.enter(T - 2000, 'assistant/message', { step: 1, turn: 1, usage: { inputTokens: 100, cacheReadTokens: 400, outputTokens: 1, totalTokens: 501 }, message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } })
+  s.log(T + 500, 'session/title', { title: 't' })
+  return s.lines
+}
+
+/** Session OLD: a usage, but everything before --since — in no section. */
+function sessionOldWithUsage(): string[] {
+  const s = new SessionLog(OLD)
+  s.enter(T - 5000, 'assistant/message', { step: 1, turn: 1, usage: { inputTokens: 9999, outputTokens: 1, totalTokens: 10000 }, message: { role: 'assistant', content: [{ type: 'text', text: 'old' }] } })
+  return s.lines
+}
+
+/**
+ * The sessions for the resident measure: R, S, U and OLD, one log each.
+ * @returns the sessions root.
+ */
+function residentFixture(): string {
+  const root = scratchDir('dshcg-replay-resident-')
+  writeLog(root, 'resident', sessionResident(), 3)
+  writeLog(root, 'nousage', sessionNoUsage(), 1)
+  writeLog(root, 'late', sessionLate(), 2)
+  writeLog(root, 'older', sessionOldWithUsage(), 1)
   return root
 }
 
@@ -387,6 +522,121 @@ test('usage-replay prints the same data as text, honors --since, and exits 2 on 
   assert.equal(run('usage-replay.mjs', ['--sessions', root, '--bogus']).status, 2)
   assert.equal(run('usage-replay.mjs', ['--sessions', join(root, 'no-such-dir')]).status, 2)
   assert.equal(run('usage-replay.mjs', ['--sessions', join(root, 'alpha', 'session-alpha', 'session.v4.jsonl.zstd')]).status, 2)
+})
+
+test('usage-replay measures the resident context at session end: the last usage, and the surface nodes still standing', { skip }, () => {
+  const root = residentFixture()
+  const report = jsonOf(run('usage-replay.mjs', ['--sessions', root, '--since', SINCE, '--json']), 'usage-replay (resident)')
+  const resident = report.resident
+
+  // The section's shape.
+  assert.deepEqual(Object.keys(resident), [
+    'n', 'withoutUsage', 'unmarkedEntries', 'unplacedReplaces', 'sessionsWithMedia',
+    'tokens', 'windowShare', 'compactions', 'prunes', 'chars', 'charsPerToken', 'contributors',
+  ])
+
+  // Two sessions with a usage record: R, and U whose usage predates --since but
+  // whose title keeps it in the window — measured over its whole log. S has
+  // none; OLD is before the window. Every entry carried its marker.
+  assert.equal(resident.n, 2)
+  assert.equal(resident.withoutUsage, 1)
+  assert.equal(resident.unmarkedEntries, 0)
+  assert.equal(resident.unplacedReplaces, 0)
+
+  // The prompt at the LAST usage decides: input + cache read + cache write, so
+  // R holds 300 (not its earlier step's 100) and U 500.
+  assert.deepEqual(resident.tokens, { n: 2, p50: 500, p90: 500, max: 500, sum: 800 })
+  // Only R named a context window: 300 of 2000.
+  assert.deepEqual(resident.windowShare, { n: 1, p50: 15, p90: 15, max: 15, sum: 15 })
+  assert.deepEqual(resident.compactions, { n: 2, p50: 1, p90: 1, max: 1, sum: 1 })
+  assert.deepEqual(resident.prunes, { n: 2, p50: 1, p90: 1, max: 1, sum: 1 })
+
+  // The calibration, per session then as a distribution: R's resident chars over
+  // its 300 tokens, U's 44 over 500. U's 500 tokens are why it is not the p50.
+  const rRatio = Math.round((R_CHARS / R_TOKENS) * 100) / 100
+  const uRatio = Math.round((U_CHARS / U_TOKENS) * 100) / 100
+  assert.equal(resident.chars, R_CHARS + U_CHARS)
+  assert.deepEqual({ n: resident.charsPerToken.n, p50: resident.charsPerToken.p50, p90: resident.charsPerToken.p90, max: resident.charsPerToken.max }, { n: 2, p50: rRatio, p90: rRatio, max: rRatio })
+  assert.ok(Math.abs(resident.charsPerToken.sum - (rRatio + uRatio)) < 1e-9)
+
+  // The split, largest first: only what stood at the end. The shadowed stretch
+  // (the first overview, the read, the first human message) and the 300-char
+  // find answer its prune rewrote are gone; the run_code result stands alone,
+  // its sub-call answer not beside it; the reasoning block is not in `assistant`.
+  const total = R_CHARS + U_CHARS
+  const share = (chars: number): number => Math.round((chars / total) * 1000) / 10
+  const est = (inR: number, inU: number): number => Math.round((inR / R_CHARS) * R_TOKENS + (inU / U_CHARS) * U_TOKENS)
+  assert.deepEqual(resident.contributors, [
+    { name: 'run_code', chars: R_SIZES.runCode, sharePct: share(R_SIZES.runCode), tokensEstimate: est(R_SIZES.runCode, 0) },
+    { name: 'codegraph overview', chars: OVERVIEW_V2.length, sharePct: share(OVERVIEW_V2.length), tokensEstimate: est(OVERVIEW_V2.length, 0) },
+    { name: 'human', chars: R_SIZES.human + 40, sharePct: share(R_SIZES.human + 40), tokensEstimate: est(R_SIZES.human, 40) },
+    { name: 'injected', chars: R_SIZES.injected, sharePct: share(R_SIZES.injected), tokensEstimate: est(R_SIZES.injected, 0) },
+    { name: 'compaction summary', chars: R_SIZES.summary, sharePct: share(R_SIZES.summary), tokensEstimate: est(R_SIZES.summary, 0) },
+    { name: 'assistant', chars: R_SIZES.assistant + 'done'.length, sharePct: share(R_SIZES.assistant + 'done'.length), tokensEstimate: est(R_SIZES.assistant, 'done'.length) },
+    { name: 'codegraph find', chars: R_SIZES.found, sharePct: share(R_SIZES.found), tokensEstimate: est(R_SIZES.found, 0) },
+    { name: 'system', chars: R_SIZES.system, sharePct: share(R_SIZES.system), tokensEstimate: est(R_SIZES.system, 0) },
+    { name: 'harness:source', chars: R_SIZES.harness, sharePct: share(R_SIZES.harness), tokensEstimate: est(R_SIZES.harness, 0) },
+  ])
+  const names = resident.contributors.map((row: { name: string }) => row.name)
+  for (const gone of ['read', 'task-context', 'unpaired', 'other']) assert.equal(names.includes(gone), false, `${gone} is shadowed and must not be resident`)
+  assert.equal(names.some((name: string) => name.startsWith('ptc')), false, 'a run_code sub-call answer is inside the run_code result')
+  // The estimates add up to the measured prompts, give or take the rounding.
+  const estimated = resident.contributors.reduce((sum: number, row: { tokensEstimate: number }) => sum + row.tokensEstimate, 0)
+  assert.ok(Math.abs(estimated - 800) <= resident.contributors.length)
+
+  // The text report carries the same section, says the split is an estimate, and no sentinel.
+  const text = run('usage-replay.mjs', ['--sessions', root, '--since', SINCE])
+  assert.equal(text.status, 0, text.stderr)
+  assert.match(text.stdout, /== resident context at session end:/u)
+  assert.match(text.stdout, /sessions with a usage record=2 \(without=1\); prompt tokens at the last usage \(input \+ cache\): n=2 p50=500 p90=500 max=500/u)
+  assert.match(text.stdout, /window share, percent of contextWindow \(sessions with a window\): n=1 p50=15 p90=15 max=15/u)
+  assert.match(text.stdout, /compactions per session: n=2 p50=1 p90=1 max=1; pruned tool results per session: n=2 p50=1 p90=1 max=1/u)
+  assert.match(text.stdout, new RegExp(`chars per resident token, per session: n=2 p50=${String(rRatio)} p90=${String(rRatio)} max=${String(rRatio)}`, 'u'))
+  assert.match(text.stdout, /without a surface marker=0, replaces this reader could not place=0/u)
+  assert.match(text.stdout, /tokens are measured; the split is by characters and converted at each session's own chars\/token/u)
+  assert.match(text.stdout, new RegExp(`contributors by chars \\(share of resident chars, estimated tokens\\): run_code ${String(R_SIZES.runCode)} \\(${String(share(R_SIZES.runCode))}%, ~${String(est(R_SIZES.runCode, 0))}\\)`, 'u'))
+  for (const sentinel of SENTINELS) {
+    assert.equal(text.stdout.includes(sentinel), false, `the text report echoes ${sentinel}`)
+  }
+})
+
+/**
+ * Session W: a read whose result holds an image, a first answer, a second answer
+ * that a rewind then undoes. The window at the end is the first answer's, the
+ * image is a placeholder, and the undone answer is not resident.
+ */
+function sessionRewound(): string[] {
+  const s = new SessionLog(ALPHA)
+  s.log(T + 1, 'step/start', { step: 1, turn: 1 })
+  s.enter(T + 2, 'user/message', { role: 'user', content: [{ type: 'text', text: 'H'.repeat(40) }], source: { kind: 'user' } })
+  s.log(T + 3, 'tool/call', { name: 'read_image', callId: 'c1', arguments: '{}', step: 1, turn: 1 })
+  s.enter(T + 4, 'tool/result', { step: 1, turn: 1, message: { toolCallId: 'c1', isError: false, role: 'tool', content: [{ type: 'text', text: 'shot' }, { type: 'image', data: 'A'.repeat(5000) }] } })
+  s.enter(T + 5, 'assistant/message', { step: 1, turn: 1, usage: { inputTokens: 100, cacheReadTokens: 200, outputTokens: 1, totalTokens: 301 }, message: { role: 'assistant', content: [{ type: 'text', text: 'first' }] } })
+  const later = s.enter(T + 6, 'assistant/message', { step: 2, turn: 1, usage: { inputTokens: 900, cacheReadTokens: 0, outputTokens: 1, totalTokens: 901 }, message: { role: 'assistant', content: [{ type: 'text', text: 'later' }] } })
+  // The rewind: the second answer is replaced by the record of its undoing.
+  s.replace(T + 7, 'user/message', { role: 'user', content: [{ type: 'text', text: 'undone' }], source: { kind: 'rewind' } }, later, later, [later])
+  return s.lines
+}
+
+test('usage-replay prices the window the model still holds after a rewind, and counts an image as a placeholder', { skip }, () => {
+  const root = scratchDir('dshcg-replay-rewound-')
+  writeLog(root, 'rewound', sessionRewound(), 2)
+  const ran = run('usage-replay.mjs', ['--sessions', root, '--since', SINCE, '--json'])
+  assert.equal(ran.status, 0, `${ran.stderr}\n--- stdout ---\n${ran.stdout.slice(0, 600)}`)
+  const resident = JSON.parse(ran.stdout).resident
+
+  // The undone answer's usage (901) is not the window; the standing one's is.
+  assert.deepEqual(resident.tokens, { n: 1, p50: 300, p90: 300, max: 300, sum: 300 })
+  // Resident: the human message, the read (its text plus a 7-character
+  // placeholder for the image, never the 5,000-character payload), the first
+  // answer, and the rewind record; not `later`.
+  assert.equal(resident.chars, 40 + 'shot'.length + '[image]'.length + 'first'.length + 'undone'.length)
+  assert.equal(resident.sessionsWithMedia, 1)
+  const byName = Object.fromEntries(resident.contributors.map((row: { name: string, chars: number }) => [row.name, row.chars]))
+  assert.deepEqual(byName, { human: 40, 'read_image': 'shot'.length + '[image]'.length, assistant: 'first'.length, injected: 'undone'.length })
+  const text = run('usage-replay.mjs', ['--sessions', root, '--since', SINCE])
+  assert.match(text.stdout, /sessions with image or offload blocks \(each counted as a placeholder\)=1/u)
+  assert.equal(text.stdout.includes('A'.repeat(50)), false, 'the image payload never reaches the report')
 })
 
 test('prefetch-replay resolves tokens against a constructed graph and reports the gate', { skip }, () => {

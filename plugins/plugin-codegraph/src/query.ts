@@ -39,6 +39,14 @@ export interface ToolEnvelope {
   readonly freshness: Freshness
   /** One sentence the model can act on when `freshness` is not `current`. */
   readonly note: string | undefined
+  /**
+   * The files this answer cites that changed since the index, present only on a
+   * `stale` answer. "This answer describes the previous state" names a state;
+   * these name the files in it that moved, so the reader can open exactly those
+   * and trust the rest. A `current` answer never carries it: the check that made
+   * it current has just compared the tree.
+   */
+  readonly pendingFiles?: readonly string[] | undefined
 }
 
 /** One symbol row as a tool reports it. */
@@ -145,6 +153,12 @@ export interface ImpactResult extends ToolEnvelope {
    * tool that fails on its most common input.
    */
   readonly referencing: readonly Referrer[]
+  /**
+   * The target's own declaration, line-numbered, when it is short enough to ride
+   * along (`IMPACT_SOURCE_LINES`) and source reading is on. The list names the
+   * callers; this is what they call — a reader who has both has no file to open.
+   */
+  readonly source?: SourceView | undefined
   /** Files the target's file imports (the forward direction, for orientation). */
   readonly imports: readonly string[]
   /**
@@ -761,6 +775,18 @@ export interface Referrer {
    * the key the `depth` tree deduplicates callers by.
    */
   readonly callerId?: string | undefined
+  /**
+   * The text of the reference line itself, read from the file at answer time
+   * (`source.ts`'s `readCallSites`). Absent when source reading is off, when the
+   * file could not be read within the answer's bounds, or when the site's budget
+   * was spent on earlier rows — a row without it is still a complete location.
+   */
+  readonly text?: string | undefined
+  /**
+   * True when the referring file no longer hashes to what the graph recorded:
+   * `line` counts the old bytes, so `text` may not be the call the graph saw.
+   */
+  readonly drift?: boolean | undefined
 }
 
 /**

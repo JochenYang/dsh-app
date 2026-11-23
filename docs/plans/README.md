@@ -10,6 +10,7 @@
 | [codegraph-development-freshness.md](codegraph-development-freshness.md) | CodeGraph 开发期新鲜度与模型输出的真实性 |
 | [codegraph-retrieval-upgrade.md](codegraph-retrieval-upgrade.md) | CodeGraph 检索升级：源码切片、分段召回、走查范围 |
 | [codegraph-understanding-and-cost.md](codegraph-understanding-and-cost.md) | CodeGraph：少读文件也能读懂项目——概览稳态、签名与摘要、请求预取、影响面 |
+| [codegraph-answer-sufficiency.md](codegraph-answer-sufficiency.md) | CodeGraph：答案要够用——调用点行文本、陈旧性点名、常驻上下文度量 |
 | [kernel-0.2.1-pre-adaptation.md](kernel-0.2.1-pre-adaptation.md) | 0.2.1 预适配：alpha.3 变更映射与可先行项（superseded） |
 | [kernel-0.2.2-alpha.2-preflight.md](kernel-0.2.2-alpha.2-preflight.md) | 0.2.2 预适配结论；rc.1 已在 §9 执行完毕，执行记录在归档（superseded） |
 | [kernel-0.2.2-rc.2-upgrade.md](kernel-0.2.2-rc.2-upgrade.md) | 0.2.2-rc.2 换线：办公服务改名、技能名单 7→4、新内核 peer |

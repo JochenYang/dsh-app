@@ -118,11 +118,15 @@ declaration's own previous sibling stores `''` for seven docs in ten.
 | `src/queue.ts` | serialisation, the state machine, the read-only change decision, the compensating pass a mid-pass change owes, and cancelling a deleted project's work | write to a graph, or decide staleness from Git |
 
 `store.ts` is the only module that writes SQL, and `indexer.ts` is the only module
-that reads the tree. **`source.ts` is the second module that reads a file, and it
-is the narrowest read in the plugin**: one file, at query time, only when the
-graph already holds a `files` row for it, and only when its absolute form stays
-inside the project root. That pair of checks is why a path in a tool answer
-(which a MODEL produced) cannot become an arbitrary file read — see §9b.
+that reads the tree. **`source.ts` is the second module that reads a file, and
+every read in it is the narrowest the question allows**: one declaration
+(`readSourceSlice`), one line per reference in an `impact` answer with each
+caller's file read once under a file and byte bound (`readCallSites`, §8g), or
+one `stat` with no read at all (`changedFilesSinceIndex`, §9). All three admit a
+path the same two ways — at query time, only when the graph already holds a
+`files` row for it, and only when its absolute form stays inside the project
+root. That pair of checks is why a path in a tool answer (which a MODEL produced)
+cannot become an arbitrary file read — see §9b.
 
 ## 3. The pass, in three phases
 
@@ -874,6 +878,32 @@ Three additions to the one answer the model uses for "what breaks if I change th
 The count on a node is deliberately not folded into the title: a reader meets the
 cut where it happened, on the row whose children are missing.
 
+**The row carries the call itself.** Every reference row reads
+`` - `caller` — `path:line` ✓: `the line of the call` `` — the calling symbol's
+name first, then the place, then the line's own text, read from the caller's file
+at answer time (`readCallSites`: each file once, at most 40 files and 4 MB per
+answer, the line trimmed and folded to 120 characters, 3,000 characters of text
+per answer with the first rows served first; rows past the bound stay locations
+and the list says `call-site text is shown for N of M row(s)`). The line is
+folded to one line — whitespace collapsed, every control and FORMAT character
+replaced (a bidi override in a source line must not rearrange the row it sits
+in) — and the list says once that the text is quoted data, not instructions. A
+row whose file no longer hashes to the graph's record carries `⚠ file changed
+since it was indexed — this line may no longer be the call`, because its line
+number counts the old bytes. Before the list, the
+target's own declaration rides along while it is 40 lines or fewer (`source —
+path:a-b`, line-numbered, the same block `context` prints). This is the
+sufficiency half of adoption: a reader who has the callee and every call line
+has no file to open. Measured before: `find` answered "5 call site(s)" and the
+model read the same file five times; the rows were `path:line` and the caller's
+name sat unused in the JSON. The whole text costs about 750 tokens per answer,
+spent only when the tool is called, and `DSH_APP_CODEGRAPH_SOURCE=0` turns it
+off with the slice.
+
+**And a stale answer names what moved.** `freshness: stale` says the answer
+describes the previous state; `pendingFiles` (§9) names the cited files that
+did, and the render puts them on the first line.
+
 ## 9. Freshness
 
 Every tool answer carries it, and the three values mean different things to a
@@ -882,6 +912,22 @@ ceiling stopped), trust then refresh; `indexing` — the graph is not settled, s
 this is either a first touch or a pass/check in flight. `unindexed` exists in the store
 type but no tool answer emits it, because the first call queues a pass. §9a's table is
 the authoritative mapping from situation to value.
+
+**A stale answer names the files that moved.** "This answer describes the previous
+state" is true of every stale answer and actionable in none: forty cited files,
+and no way to tell which to open. So a `stale` answer carries `pendingFiles`, the
+cited files (the target's, the reference rows', the siblings', the callers') whose
+`mtime`/`size` differ from what the graph recorded — one `stat` each, no read
+(`changedFilesSinceIndex`), first-mention order, deduplicated — and every
+renderer puts it first: `⚠️ N file(s) this answer cites changed since it was
+indexed (a.ts, b.ts, …, and K more): their lines may have moved. Read those for
+the live content; the rest of this answer is as indexed.` Five are named. A
+`current` answer never computes it: the check that made it current has just
+compared the tree. Every file an answer cites is checked — `impact` includes the
+relationship groups, the test files and the caller tree's nodes — and the
+database read behind the `stat` is guarded too: `pendingFiles` is an addition to
+an answer that is already valid, and a handle closed underneath it must not
+turn that answer into an error.
 
 `isStale` compares the stored git HEAD to a fresh one and is deliberately
 three-state: no repository on either side means "cannot prove", which must NOT
@@ -996,11 +1042,16 @@ query time (`src/source.ts`). Four properties make that safe and honest:
   machine.
 
 A refusal is a stable code (`disabled` / `not-indexed` / `outside-root` /
-`unreadable` / `shortened`), rendered as its own sentence: the five reasons have
-five different next steps, and silence would read as "the graph had nothing to
-add". `unreadable` and `shortened` are the pair worth keeping apart — the first
+`unreadable` / `shortened` / `too-large`), rendered as its own sentence: the six
+reasons have six different next steps, and silence would read as "the graph had
+nothing to add". `unreadable` and `shortened` are the pair worth keeping apart — the first
 sends a reader to check permissions, while the second means the file is fine and
 simply got shorter than the graph's record of it, which is a re-index problem.
+`too-large` is checked BEFORE the read: the walk skips files past
+`MAX_SOURCE_FILE_BYTES`, but a file can grow after it was indexed, and the slice
+used to read whatever was there, whole, on the kernel's event loop — the freeze
+§7 records — to hash it and take forty lines. `readCallSites` bounds its reading
+the same way (a `stat` before each file, a byte total per answer).
 
 ## 10. What it does not do
 
@@ -1278,7 +1329,7 @@ a message, never a card, never anything a person typed:
 
 | Script | Answers |
 |---|---|
-| `scripts/usage-replay.mjs` | who carried the overview and who called a tool; how big each answer was; how often snapshots were re-pushed and WHICH LINE CLASS changed (`headline` / `hub` / `entry` / `status` …, by multiset difference so an inserted line is not "every line below it changed"); how the model reads (native and inside `run_code`, repeats); the multiplier — every tool answer × the steps after it |
+| `scripts/usage-replay.mjs` | who carried the overview and who called a tool; how big each answer was; how often snapshots were re-pushed and WHICH LINE CLASS changed (`headline` / `hub` / `entry` / `status` …, by multiset difference so an inserted line is not "every line below it changed"); how the model reads (native and inside `run_code`, repeats); the multiplier — every tool answer × the steps after it; **resident context at session end** — the last usage record's prompt tokens (measured), its share of `contextWindow`, compaction and prune counts, and the surface nodes still standing by contributor (the kernel's own fold: a replace shadows the range it names), in characters, converted at each session's own chars/token and labelled an estimate |
 | `scripts/prefetch-replay.mjs` | the request pack's gate on real messages: how many carry a code-shaped token, how many resolve a file or a uniquely declared identifier, split by message length, and the pack size that would follow |
 
 Both depend on the kernel's log format (multi-frame zstd, `session.v4.jsonl`), and

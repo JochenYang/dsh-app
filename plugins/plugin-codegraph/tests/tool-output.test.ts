@@ -276,6 +276,40 @@ describe('every field the v5 columns add is declared by its schema', () => {
     }), [])
   })
 
+  it('impact: a reference may carry its line text and a drift flag; the answer the target source and the moved files', () => {
+    const base = {
+      freshness: 'stale', note: 'older',
+      pendingFiles: ['b.ts'],
+      target: { id: 'a.ts#function:f', name: 'f', kind: 'function', path: 'a.ts', line: 1, parent: undefined },
+      source: { path: 'a.ts', startLine: 1, endLine: 3, text: '1\tfunction f() {\n2\t}\n3\t', truncated: false, drift: false },
+      imports: [], truncated: false, total: 2, candidates: [], related: [],
+    }
+    assert.deepEqual(problems('codegraph_impact', {
+      ...base,
+      referencing: [
+        { path: 'b.ts', line: 4, kind: 'references', name: 'caller', narrowed: true, callerId: 'b.ts#function:caller', text: 'f(1)', drift: true },
+        { path: 'c.ts', line: 2, kind: 'references', name: undefined, text: '  f()  ' },
+      ],
+    }), [])
+    // A text that is not a string is still refused: the field is declared, the
+    // shape of it is not negotiable.
+    assert.notEqual(problems('codegraph_impact', {
+      ...base,
+      referencing: [{ path: 'b.ts', line: 4, kind: 'references', name: 'caller', text: 7 }],
+    }).length, 0)
+  })
+
+  it('find and context: the moved files, on the envelope', () => {
+    assert.deepEqual(problems('codegraph_find', {
+      freshness: 'stale', note: undefined, pendingFiles: ['a.ts'], truncated: false,
+      symbols: [{ id: 'a.ts#function:f', name: 'f', kind: 'function', path: 'a.ts', line: 1, parent: undefined, references: 1 }],
+    }), [])
+    assert.deepEqual(problems('codegraph_context', {
+      freshness: 'stale', note: undefined, pendingFiles: [],
+      symbol: undefined, siblings: [], calls: [], calledBy: [], imports: [], documents: [], truncated: false,
+    }), [])
+  })
+
   it('impact: the caller tree, three levels deep, with every optional node field', () => {
     const leaf = { id: 'd.ts#function:leaf', name: 'leaf', kind: 'function', path: 'd.ts', line: 1, children: [], repeated: true }
     const mid = { id: 'c.ts#function:mid', name: 'mid', kind: 'method', path: 'c.ts', line: 3, children: [leaf], callers: 40 }

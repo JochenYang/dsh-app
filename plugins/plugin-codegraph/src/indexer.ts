@@ -35,6 +35,7 @@ import { execFile } from 'node:child_process'
 import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { MAX_SOURCE_FILE_BYTES } from './budget.ts'
 import { languageForPath } from './languages.ts'
 import { DOCUMENT_EXTENSIONS, documentMentions, knownNames } from './docs.ts'
 import {
@@ -88,7 +89,7 @@ const SKIP_DIRS = new Set([
 ])
 
 /** A file that is large enough to be generated rather than written. */
-const MAX_FILE_BYTES = 1_500_000
+const MAX_FILE_BYTES = MAX_SOURCE_FILE_BYTES
 
 /** What one pass did. */
 export interface IndexOutcome {

@@ -30,7 +30,10 @@ export interface PluginSwitches {
   readonly prefetch: boolean
   /** Append where a searched identifier is declared, after any search call (a `run_code` sub-dispatch included). */
   readonly grepNote: boolean
-  /** Include a declaration's source in `codegraph_context`. */
+  /**
+   * Include source in answers: a declaration's lines in `codegraph_context`, the
+   * call-site line on each `codegraph_impact` row and the target's declaration.
+   */
   readonly source: boolean
 }
 

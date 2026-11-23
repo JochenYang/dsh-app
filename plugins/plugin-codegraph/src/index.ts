@@ -148,8 +148,18 @@ import {
   type Freshness,
   type ImpactResult,
 } from './query.ts'
-import { MAX_OUTLINE_ROWS, planOutline, sourceBudget } from './budget.ts'
-import { readSourceSlice } from './source.ts'
+import {
+  IMPACT_SITES_MAX_BYTES,
+  IMPACT_SITES_MAX_FILES,
+  IMPACT_SITES_TOTAL_CHARS,
+  IMPACT_SITE_LINE_CHARS,
+  IMPACT_SOURCE_CHARS,
+  IMPACT_SOURCE_LINES,
+  MAX_OUTLINE_ROWS,
+  planOutline,
+  sourceBudget,
+} from './budget.ts'
+import { changedFilesSinceIndex, readCallSites, readSourceSlice } from './source.ts'
 import { createIndexQueue, type IndexQueue } from './queue.ts'
 import { overviewContextText } from './prompt.ts'
 import { createRefreshScheduler } from './refresh.ts'
@@ -197,6 +207,27 @@ function listMetaSchema() {
       truncated: { type: 'boolean' as const, required: true as const },
     },
   }
+}
+
+/** A declaration's source as `context` and `impact` both carry it (`SourceView`). */
+function sourceViewSchema() {
+  return {
+    type: 'object' as const,
+    additionalProperties: false as const,
+    properties: {
+      path: { type: 'string' as const, required: true as const },
+      startLine: { type: 'number' as const, required: true as const },
+      endLine: { type: 'number' as const, required: true as const },
+      text: { type: 'string' as const, required: true as const },
+      truncated: { type: 'boolean' as const, required: true as const },
+      drift: { type: 'boolean' as const, required: true as const },
+    },
+  }
+}
+
+/** The files a stale answer cites that moved (`ToolEnvelope.pendingFiles`). */
+function pendingFilesSchema() {
+  return { type: 'array' as const, items: { type: 'string' as const } }
 }
 
 /**
@@ -598,6 +629,27 @@ export function apply(ctx: Context): void {
     }
   }), 'plugin-codegraph: the search note')
 
+  /**
+   * The files a `stale` answer cites that moved since the index, or undefined for
+   * any other freshness. One `stat` per distinct file and no read
+   * (`source.ts`); a `current` answer never asks, because the check that made it
+   * current has just compared the tree.
+   */
+  const pendingFilesOf = (graph: Graph, cwd: string, freshness: Freshness, paths: readonly string[]): string[] | undefined =>
+    freshness === 'stale' ? changedFilesSinceIndex(graph.db, cwd, paths) : undefined
+
+  /**
+   * The file a `calledBy` row names. Its `path` is the other end of the edge as
+   * the graph stores it — a symbol id (`<path>#<kind>:<name>`) when the caller is
+   * a declaration, a `file:` path stripped of its prefix when it is file scope.
+   * The cut is made only at the id's `#<kind>:` mark, so a file whose own name
+   * holds a `#` keeps it.
+   */
+  const fileOfEdge = (path: string): string => {
+    const mark = /#[a-z]+:[^#]*$/u.exec(path)
+    return mark === null ? path : path.slice(0, mark.index)
+  }
+
   /** The freshness of one project's graph, as every tool answer reports it. */
   const freshnessOf = async (cwd: string): Promise<{ freshness: Freshness, note: string | undefined }> => {
     const status = queue.status(cwd)
@@ -736,6 +788,7 @@ export function apply(ctx: Context): void {
         properties: {
           freshness: { type: 'string', required: true, enum: ['current', 'stale', 'indexing'] },
           note: { type: 'string' },
+          pendingFiles: pendingFilesSchema(),
           truncated: { type: 'boolean', required: true },
           symbols: {
             type: 'array',
@@ -765,8 +818,15 @@ export function apply(ctx: Context): void {
       const cwd = requireCwd(exec.agent)
       usage.bump(cwd, 'find')
       const { freshness, note } = await freshnessOf(cwd)
-      const found = findSymbols(graphFor(cwd), args.query, clampLimit(args.limit))
-      return dropUndefined({ freshness, note, symbols: found.symbols, truncated: found.truncated }) satisfies FindResult
+      const graph = graphFor(cwd)
+      const found = findSymbols(graph, args.query, clampLimit(args.limit))
+      return dropUndefined({
+        freshness,
+        note,
+        pendingFiles: pendingFilesOf(graph, cwd, freshness, found.symbols.map(symbol => symbol.path)),
+        symbols: found.symbols,
+        truncated: found.truncated,
+      }) satisfies FindResult
     },
   })))
 
@@ -836,13 +896,25 @@ export function apply(ctx: Context): void {
                 narrowed: { type: 'boolean' },
                 // The calling symbol's id, absent for a reference at file scope.
                 callerId: { type: 'string' },
+                // The reference line's own text, read from the caller's file at
+                // answer time; absent when source reading is off, the file could
+                // not be read within the answer's bounds, or the text budget was
+                // spent on earlier rows. A row without it is still a location.
+                text: { type: 'string' },
+                // The caller's file no longer matches its recorded hash, so the
+                // line number counts the old bytes. Printed as a warning on the row.
+                drift: { type: 'boolean' },
               },
             },
           },
+          // The target's own declaration when it is short enough to ride along:
+          // the list names the callers, this is what they call.
+          source: sourceViewSchema(),
           imports: { type: 'array', required: true, items: { type: 'string' } },
           truncated: { type: 'boolean', required: true },
           total: { type: 'number', required: true },
           ambiguity: { type: 'number' },
+          pendingFiles: pendingFilesSchema(),
           // The test files among the references, deduplicated. Absent when no
           // test file references the target: the group would be a heading with
           // no rows under it.
@@ -1005,6 +1077,7 @@ export function apply(ctx: Context): void {
         return dropUndefined({
           freshness,
           note,
+          pendingFiles: pendingFilesOf(graph, cwd, freshness, shared.candidates.map(candidate => candidate.path)),
           target: undefined,
           referencing: [],
           imports: [],
@@ -1037,11 +1110,62 @@ export function apply(ctx: Context): void {
       // same edges further; neither is another question about the graph.
       const tests = testFilesReferencing(graph, target.id)
       const callers = depth > 1 ? callerTree(graph, target.id, depth) : undefined
+      /** Every file a caller tree node sits in, so a stale answer names them too. */
+      const filesOfTree = (tree: typeof callers): string[] => (tree?.roots ?? []).flatMap(function walk(node): string[] {
+        return [node.path, ...(node.children ?? []).flatMap(walk)]
+      })
+      // THE ROWS CARRY THE CALL ITSELF. A row that says only where a call sits
+      // sends the reader to the file to see what it is — measured in a real
+      // session, five reads after "5 call site(s)". Each caller's file is read
+      // once, under a bound (`budget.ts`), and the target rides along when its
+      // declaration is short: the list names the callers, the source is what
+      // they call, and a reader holding both has no file to open.
+      const sites = readCallSites({
+        db: graph.db,
+        root: cwd,
+        sites: referencing.rows.map(row => ({ path: row.path, line: row.line })),
+        maxFiles: IMPACT_SITES_MAX_FILES,
+        maxBytes: IMPACT_SITES_MAX_BYTES,
+        maxChars: IMPACT_SITE_LINE_CHARS,
+        maxTotalChars: IMPACT_SITES_TOTAL_CHARS,
+      })
+      const span = symbolSpan(graph, target.id)
+      const read = span === undefined || span.endLine - span.line + 1 > IMPACT_SOURCE_LINES
+        ? undefined
+        : readSourceSlice({
+          db: graph.db,
+          root: cwd,
+          path: target.path,
+          startLine: span.line,
+          endLine: span.endLine,
+          maxLines: IMPACT_SOURCE_LINES,
+          maxChars: IMPACT_SOURCE_CHARS,
+        })
       return dropUndefined({
         freshness,
         note,
+        pendingFiles: pendingFilesOf(graph, cwd, freshness, [
+          target.path,
+          ...referencing.rows.map(row => row.path),
+          ...related.groups.flatMap(group => group.rows.map(row => row.path)),
+          ...(tests.files),
+          ...filesOfTree(callers),
+        ]),
         target,
-        referencing: referencing.rows,
+        referencing: referencing.rows.map((row) => {
+          const site = sites?.sites.get(`${row.path}:${String(row.line)}`)
+          return site === undefined ? row : { ...row, text: site.text, ...(site.drift ? { drift: true } : {}) }
+        }),
+        source: read?.ok
+          ? {
+            path: target.path,
+            startLine: read.slice.startLine,
+            endLine: read.slice.endLine,
+            text: read.slice.text,
+            truncated: read.slice.truncated,
+            drift: read.slice.drift,
+          }
+          : undefined,
         imports: imports.rows,
         // Each group carries its own cut. The rows are rebuilt as mutable arrays
         // because the output schema describes what a JSON snapshot carries; the
@@ -1108,6 +1232,7 @@ export function apply(ctx: Context): void {
         properties: {
           freshness: { type: 'string', required: true, enum: ['current', 'stale', 'indexing'] },
           note: { type: 'string' },
+          pendingFiles: pendingFilesSchema(),
           symbol: {
             type: 'object',
             additionalProperties: false,
@@ -1120,19 +1245,8 @@ export function apply(ctx: Context): void {
               parent: { type: 'string' },
             },
           },
-          source: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              path: { type: 'string', required: true },
-              startLine: { type: 'number', required: true },
-              endLine: { type: 'number', required: true },
-              text: { type: 'string', required: true },
-              truncated: { type: 'boolean', required: true },
-              drift: { type: 'boolean', required: true },
-            },
-          },
-          sourceRefused: { type: 'string', enum: ['disabled', 'not-indexed', 'outside-root', 'unreadable', 'shortened'] },
+          source: sourceViewSchema(),
+          sourceRefused: { type: 'string', enum: ['disabled', 'not-indexed', 'outside-root', 'unreadable', 'shortened', 'too-large'] },
           siblings: {
             type: 'array',
             required: true,
@@ -1316,6 +1430,12 @@ export function apply(ctx: Context): void {
         return dropUndefined({
           freshness,
           note,
+          // The overview names more files than any other answer — every entry
+          // candidate, every hub's file — so a stale one says which of them moved.
+          pendingFiles: pendingFilesOf(graph, cwd, freshness, [
+            ...shape.entryCandidates.map(entry => entry.path),
+            ...shape.hubs.map(hub => hub.symbol.path),
+          ]),
           siblings: [],
           calls: [],
           calledBy: [],
@@ -1360,6 +1480,7 @@ export function apply(ctx: Context): void {
         return dropUndefined({
           freshness,
           note,
+          pendingFiles: pendingFilesOf(graph, cwd, freshness, [asFile.path]),
           siblings: [],
           calls: [],
           calledBy: [],
@@ -1404,9 +1525,20 @@ export function apply(ctx: Context): void {
           maxLines: budget.maxLines,
           maxChars: budget.maxChars,
         })
+      // Asked once: the siblings are both a list in the answer and a set of files
+      // a stale answer names, and two reads could straddle a pass.
+      const siblings = symbolsInFile(graph, symbol.path, MAX_ROWS)
       return dropUndefined({
         freshness,
         note,
+        // The files this answer cites: the symbol's own, its siblings', and its
+        // callers' — named when the answer is stale, so the reader opens the ones
+        // that moved and trusts the rest.
+        pendingFiles: pendingFilesOf(graph, cwd, freshness, [
+          symbol.path,
+          ...siblings.flatMap(row => row.path === undefined ? [] : [row.path]),
+          ...called.rows.flatMap(row => row.path === undefined ? [] : [fileOfEdge(row.path)]),
+        ]),
         symbol,
         source: read.ok
           ? {
@@ -1419,7 +1551,7 @@ export function apply(ctx: Context): void {
           }
           : undefined,
         sourceRefused: read.ok ? undefined : read.reason,
-        siblings: symbolsInFile(graph, symbol.path, MAX_ROWS),
+        siblings,
         // The symbol's OWN calls, plus whatever its file calls at file scope.
         // Before W11b this was the file's calls for every symbol in it, so a
         // 40-function file answered with the same 40-entry list 40 times.

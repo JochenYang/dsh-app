@@ -14,11 +14,12 @@
 import { strict as assert } from 'node:assert'
 import { after, describe, it } from 'node:test'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openGraph, replaceFile, type FileRecord, type Graph } from '../src/store.ts'
-import { readSourceSlice } from '../src/source.ts'
+import { MAX_SOURCE_FILE_BYTES } from '../src/budget.ts'
+import { changedFilesSinceIndex, readCallSites, readSourceSlice } from '../src/source.ts'
 
 const scratch: string[] = []
 const graphs: Graph[] = []
@@ -221,5 +222,154 @@ describe('readSourceSlice — the four refusals', () => {
       delete process.env.DSH_APP_CODEGRAPH_SOURCE
     }
     assert.equal(read(graph, root, 'src/z.ts', { startLine: 1, endLine: 1 }).ok, true)
+  })
+})
+
+/** `readCallSites` with generous bounds; a test narrows what it needs. */
+function sites(root: string, graph: Graph, list: { path: string, line: number }[], over: Partial<Parameters<typeof readCallSites>[0]> = {}): ReturnType<typeof readCallSites> {
+  return readCallSites({ db: graph.db, root, sites: list, maxFiles: 40, maxBytes: 1_000_000, maxChars: 120, maxTotalChars: 3_000, ...over })
+}
+
+describe('readCallSites — the line of each call', () => {
+  it('walks the sites in list order, reads each file once, and keys every site by its path and line', () => {
+    const { root, graph, record } = fixture()
+    const source = 'const x = 1\nfoo(\n  1,\n)\nbar()\n'
+    writeFileSync(join(root, 'src', 'a.ts'), source)
+    record('src/a.ts', source)
+    const result = sites(root, graph, [{ path: 'src/a.ts', line: 5 }, { path: 'src/a.ts', line: 2 }, { path: 'src/a.ts', line: 2 }])
+    assert.ok(result !== undefined)
+    assert.equal(result.filesRead, 1, 'two sites in one file are one read, and a repeat is not another')
+    assert.equal(result.sites.get('src/a.ts:2')?.text, 'foo(')
+    assert.equal(result.sites.get('src/a.ts:5')?.text, 'bar()')
+    assert.equal(result.sites.get('src/a.ts:2')?.drift, false, 'the bytes match the record')
+    assert.equal(result.truncated, false)
+  })
+
+  it('folds the line to one line of text: trimmed, whitespace collapsed, backticks and control characters replaced, long lines cut inside the bound', () => {
+    const { root, graph, record } = fixture()
+    const source = '\t foo(  1,\u0001\u202E   2 )  \n   \nconst s = `tick ${x}`\nconst long = "' + 'x'.repeat(200) + '"\n'
+    writeFileSync(join(root, 'src', 'a.ts'), source)
+    record('src/a.ts', source)
+    const result = sites(root, graph, [{ path: 'src/a.ts', line: 1 }, { path: 'src/a.ts', line: 2 }, { path: 'src/a.ts', line: 3 }, { path: 'src/a.ts', line: 4 }], { maxChars: 40 })
+    assert.ok(result !== undefined)
+    assert.equal(result.sites.get('src/a.ts:1')?.text, 'foo( 1,?? 2 )', 'a control character and a bidi override both become a placeholder')
+    assert.equal(result.sites.has('src/a.ts:2'), false, 'a blank line is no text')
+    assert.equal(result.sites.get('src/a.ts:3')?.text, "const s = 'tick ${x}'", 'a backtick would end the code span the row quotes the line in')
+    const cut = result.sites.get('src/a.ts:4')?.text ?? ''
+    assert.ok(cut.endsWith('…') && cut.length === 40, `cut inside the bound with an ellipsis: ${String(cut.length)} characters`)
+    assert.ok(cut.startsWith('const long = "xxxx'), cut)
+  })
+
+  it('refuses a file that grew past the size bound after it was indexed, before reading it', () => {
+    const { root, graph, record } = fixture()
+    record('src/huge.ts', 'small()\n')
+    writeFileSync(join(root, 'src', 'huge.ts'), 'x'.repeat(MAX_SOURCE_FILE_BYTES + 1))
+    assert.deepEqual(read(graph, root, 'src/huge.ts', { startLine: 1, endLine: 1 }), { ok: false, reason: 'too-large' })
+  })
+
+  it('reads a file in the root whose name starts with two dots', () => {
+    // `..notes.md` is a file, not a parent directory; the containment check must
+    // not read a prefix as a traversal.
+    const { root, graph, record } = fixture()
+    record('src/..notes.md', 'one()\n')
+    writeFileSync(join(root, 'src', '..notes.md'), 'one()\n')
+    assert.equal(read(graph, root, 'src/..notes.md', { startLine: 1, endLine: 1 }).ok, true)
+  })
+
+  it('flags a file whose bytes no longer match the graph, and still gives its current line', () => {
+    const { root, graph, record } = fixture()
+    record('src/a.ts', 'one()\ntwo()\n')
+    writeFileSync(join(root, 'src', 'a.ts'), 'zero()\none()\ntwo()\n')
+    const result = sites(root, graph, [{ path: 'src/a.ts', line: 2 }])
+    assert.ok(result !== undefined)
+    assert.equal(result.sites.get('src/a.ts:2')?.text, 'one()', 'the file as it is now')
+    assert.equal(result.sites.get('src/a.ts:2')?.drift, true, 'and the graph meant another line')
+  })
+
+  it('stops at the file, byte and text bounds, and says so', () => {
+    const { root, graph, record } = fixture()
+    for (const name of ['a', 'b']) {
+      writeFileSync(join(root, 'src', `${name}.ts`), 'one()\ntwo()\n')
+      record(`src/${name}.ts`, 'one()\ntwo()\n')
+    }
+    const list = [{ path: 'src/a.ts', line: 1 }, { path: 'src/b.ts', line: 1 }]
+    const oneFile = sites(root, graph, list, { maxFiles: 1 })
+    assert.ok(oneFile !== undefined)
+    assert.equal(oneFile.sites.has('src/b.ts:1'), false, 'the second file was not opened')
+    assert.equal(oneFile.truncated, true)
+    const noBytes = sites(root, graph, list, { maxBytes: 10 })
+    assert.ok(noBytes !== undefined)
+    assert.equal(noBytes.filesRead, 0, 'a file larger than the byte bound is not read')
+    assert.equal(noBytes.truncated, true, 'and that is a cut, not a refusal')
+    // The text bound is spent in LIST order, and once it is spent nothing more is
+    // read: the first file's line is in, the second file is never opened.
+    const littleText = sites(root, graph, list, { maxTotalChars: 5 })
+    assert.ok(littleText !== undefined)
+    assert.equal(littleText.sites.get('src/a.ts:1')?.text, 'one()')
+    assert.equal(littleText.filesRead, 1, 'the walk stopped at the bound')
+    assert.equal(littleText.sites.has('src/b.ts:1'), false)
+    assert.equal(littleText.truncated, true)
+  })
+
+  it('serves the text budget by list order, not by file', () => {
+    // Two calls in a.ts and one in b.ts, listed a, b, a: the budget covers the
+    // first two rows whatever file they are in, and the third is a location.
+    const { root, graph, record } = fixture()
+    writeFileSync(join(root, 'src', 'a.ts'), 'one()\ntwo()\n')
+    record('src/a.ts', 'one()\ntwo()\n')
+    writeFileSync(join(root, 'src', 'b.ts'), 'three()\n')
+    record('src/b.ts', 'three()\n')
+    // `one()` and `three()` are 12 characters together; the third row would be 17.
+    const result = sites(root, graph, [{ path: 'src/a.ts', line: 1 }, { path: 'src/b.ts', line: 1 }, { path: 'src/a.ts', line: 2 }], { maxTotalChars: 12 })
+    assert.ok(result !== undefined)
+    assert.deepEqual([...result.sites.keys()], ['src/a.ts:1', 'src/b.ts:1'])
+    assert.equal(result.truncated, true)
+  })
+
+  it('answers nothing when source reading is off, and nothing for a path the graph does not hold', () => {
+    const { root, graph, record } = fixture()
+    writeFileSync(join(root, 'src', 'a.ts'), 'one()\n')
+    record('src/a.ts', 'one()\n')
+    writeFileSync(join(root, 'src', 'b.ts'), 'two()\n')
+    process.env.DSH_APP_CODEGRAPH_SOURCE = '0'
+    try {
+      assert.equal(sites(root, graph, [{ path: 'src/a.ts', line: 1 }]), undefined)
+    } finally {
+      delete process.env.DSH_APP_CODEGRAPH_SOURCE
+    }
+    const result = sites(root, graph, [{ path: 'src/b.ts', line: 1 }, { path: '../outside.ts', line: 1 }])
+    assert.ok(result !== undefined)
+    assert.equal(result.sites.size, 0, 'not indexed, so not read — the same two refusals as the slice')
+    assert.equal(result.filesRead, 0)
+    assert.equal(result.truncated, false, 'a refusal is not a cut')
+  })
+})
+
+describe('changedFilesSinceIndex — one stat, no read', () => {
+  /** Record a file as the indexer would, from the bytes on disk right now. */
+  function recordAsIndexed(root: string, graph: Graph, path: string, content: string): void {
+    const file = join(root, ...path.split('/'))
+    writeFileSync(file, content)
+    const stat = statSync(file)
+    replaceFile(graph.db, { path, mtime: Math.floor(stat.mtimeMs), size: stat.size, hash: createHash('sha256').update(content).digest('hex'), lang: 'typescript' }, [], [])
+  }
+
+  it('names the files that moved since the index, in first-mention order, once each', () => {
+    const { root, graph } = fixture()
+    recordAsIndexed(root, graph, 'src/same.ts', 'a()\n')
+    recordAsIndexed(root, graph, 'src/moved.ts', 'b()\n')
+    writeFileSync(join(root, 'src', 'moved.ts'), 'b(1)\n')
+    assert.deepEqual(changedFilesSinceIndex(graph.db, root, ['src/same.ts', 'src/moved.ts', 'src/same.ts']), ['src/moved.ts'])
+    assert.deepEqual(changedFilesSinceIndex(graph.db, root, ['src/same.ts']), [], 'an unchanged file is not named')
+  })
+
+  it('names nothing for a path that is not indexed or leaves the root', () => {
+    const { root, graph } = fixture()
+    recordAsIndexed(root, graph, 'src/a.ts', 'a()\n')
+    assert.deepEqual(changedFilesSinceIndex(graph.db, root, ['src/never.ts', '../elsewhere.ts', 'D:/abs.ts']), [])
+    // Even with a row — which the walker never writes — an absolute path stays
+    // outside the root, so it is neither stat'ed nor named.
+    replaceFile(graph.db, { path: 'D:/abs.ts', mtime: 1, size: 1, hash: 'h', lang: 'typescript' }, [], [])
+    assert.deepEqual(changedFilesSinceIndex(graph.db, root, ['D:/abs.ts']), [])
   })
 })

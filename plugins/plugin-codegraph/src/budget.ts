@@ -89,6 +89,40 @@ export const ANSWER_LIST_TOKENS = 1_200
 export const MAX_OUTLINE_ROWS = 200
 
 /**
+ * What one `codegraph_impact` answer may spend on the call sites themselves.
+ *
+ * A reference row used to be `path:line`, and the model opened the file to see
+ * the call — measured in a real session, five reads after "5 call site(s)". The
+ * line's own text is what makes the row sufficient: 120 characters is a trimmed,
+ * folded line of source; 3,000 across the answer is about 750 tokens, spent only
+ * when the tool is called, and the first rows are served first. The file and byte
+ * bounds cap the reading: a symbol with 664 call sites across 110 files must not
+ * read the project to annotate forty of them.
+ */
+export const IMPACT_SITE_LINE_CHARS = 120
+export const IMPACT_SITES_TOTAL_CHARS = 3_000
+export const IMPACT_SITES_MAX_FILES = 40
+export const IMPACT_SITES_MAX_BYTES = 4 * 1024 * 1024
+
+/**
+ * The target's own source rides along with an `impact` answer while its
+ * declaration is this short. Longer declarations are what `codegraph_context`
+ * is for (it has the tiered budget); a class of four hundred lines does not
+ * belong in a list of its callers.
+ */
+export const IMPACT_SOURCE_LINES = 40
+export const IMPACT_SOURCE_CHARS = 4_000
+
+/**
+ * A file that is large enough to be generated rather than written.
+ *
+ * The bound the walk uses to skip a file, and the bound `source.ts` uses to
+ * refuse reading one that grew after it was indexed: the same number in both
+ * places, so a file the graph holds is one the reader will open.
+ */
+export const MAX_SOURCE_FILE_BYTES = 1_500_000
+
+/**
  * Tokens for a character count, at the ~4 characters per token the budget assumes.
  *
  * Rounded UP so a list that is exactly at the budget reads as the budget, never
