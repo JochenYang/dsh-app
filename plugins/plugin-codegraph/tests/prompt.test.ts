@@ -36,17 +36,17 @@ function overview(over: Partial<ProjectOverview> = {}): ProjectOverview {
       { path: 'src/index.ts', symbols: 1, symbol: undefined },
     ],
     hubs: [
-      { symbol: { id: 'src/util.ts#function:shared', name: 'shared', kind: 'function', path: 'src/util.ts', line: 3, parent: undefined }, references: 40 },
+      { symbol: { id: 'src/util.ts#function:shared', name: 'shared', kind: 'function', path: 'src/util.ts', line: 3, parent: undefined }, references: 40, sourceReferences: 40 },
     ],
     ...over,
   }
 }
 
-/** A hub row as `projectOverview` hands it over: the symbol plus its edge count. */
-function hub(id: string, references: number): ProjectOverview['hubs'][number] {
+/** A hub row as `projectOverview` hands it over: the symbol plus its two edge counts (source defaults to the total). */
+function hub(id: string, references: number, source = references): ProjectOverview['hubs'][number] {
   const [path, rest] = id.split('#') as [string, string]
   const [kind, name] = rest.split(':') as [string, string]
-  return { symbol: { id, name, kind, path, line: 1, parent: undefined }, references }
+  return { symbol: { id, name, kind, path, line: 1, parent: undefined }, references, sourceReferences: source }
 }
 
 /** The hub rows of a rendered block: the `- ` rows that carry a symbol id. */
@@ -114,6 +114,7 @@ describe('renderOverviewContext', () => {
       hubs: Array.from({ length: 40 }, (_, i) => ({
         symbol: { id: `src/h${String(i)}.ts#function:h`, name: `h${String(i)}`, kind: 'function', path: `src/h${String(i)}.ts`, line: 1, parent: undefined },
         references: 100 - i,
+        sourceReferences: 100 - i,
       })),
       byLanguage: Array.from({ length: 12 }, (_, i) => ({ lang: `lang${String(i)}`, files: 10 - i })),
     })
@@ -149,13 +150,27 @@ describe('renderOverviewContext', () => {
     // only excludes more than two), so the instruction was unfollowable exactly on
     // the rows it pointed at.
     const text = renderOverviewContext(overview(), 'current', undefined)
-    assert.match(text, /^- src\/util\.ts#function:shared — ~50 call site\(s\)$/mu,
+    assert.match(text, /^- src\/util\.ts#function:shared — ~50 source call site\(s\)$/mu,
       'the hub row leads with the full symbol id, which is what the tool accepts')
     assert.doesNotMatch(text, /pass any id above/iu, 'the instruction now matches what the rows carry')
     // And the entry rows stay queryable by path — no id needed, because a path is
     // itself a valid `codegraph_context` selector (it answers the file's outline).
     assert.match(text, /^- src\/cli\.ts/mu)
     assert.match(text, /codegraph_context\("<path>"\)/u, 'the entry heading names how to query its own column')
+  })
+
+  it('prints a hub nothing in source references with its total, said to be tests only', () => {
+    // "0 source call site(s)" on a row under "most referenced" contradicts itself,
+    // and in a project made of tests every row would say it.
+    const mixed = renderOverviewContext(overview({
+      hubs: [hub('src/env.ts#function:getOrThrow', 282, 15), hub('src/faux.ts#function:fauxMessage', 664, 0)],
+    }), 'current', undefined)
+    assert.match(mixed, /^Most-referenced symbols in source files/mu)
+    assert.match(mixed, /^- src\/env\.ts#function:getOrThrow — ~20 source call site\(s\)$/mu)
+    assert.match(mixed, /^- src\/faux\.ts#function:fauxMessage — ~500 call site\(s\), tests only$/mu, 'ranked below the one source does reference')
+    const testsOnly = renderOverviewContext(overview({ hubs: [hub('src/faux.ts#function:fauxMessage', 664, 0)] }), 'current', undefined)
+    assert.match(testsOnly, /^Most-referenced symbols, referenced from tests only/mu)
+    assert.doesNotMatch(testsOnly, /source call site/u)
   })
 
   it('states what the counts cover and where static name resolution stops', () => {
@@ -322,8 +337,8 @@ describe('the block is stable across an edit that did not change the shape', () 
     const before = render({ hubs: [hub('src/x.ts#function:a', 34), hub('src/y.ts#function:b', 35)] })
     const swapped = render({ hubs: [hub('src/x.ts#function:a', 35), hub('src/y.ts#function:b', 34)] })
     assert.equal(swapped, before, 'both are ~50; the order is the id, not the count')
-    assert.match(before, /^- src\/x\.ts#function:a — ~50 call site\(s\)$/mu)
-    assert.match(before, /^- src\/y\.ts#function:b — ~50 call site\(s\)$/mu)
+    assert.match(before, /^- src\/x\.ts#function:a — ~50 source call site\(s\)$/mu)
+    assert.match(before, /^- src\/y\.ts#function:b — ~50 source call site\(s\)$/mu)
   })
 
   it('orders hubs by rung then id, so a count inside a rung cannot reorder them', () => {
@@ -332,11 +347,11 @@ describe('the block is stable across an edit that did not change the shape', () 
     // counts say. A hub row is the one carrying a `#`: the entry rows above it share
     // the `- src/` prefix.
     const text = render({ hubs: [hub('src/z.ts#function:late', 120), hub('src/a.ts#function:early', 90)] })
-    assert.deepEqual(hubRows(text), ['- src/a.ts#function:early — ~100 call site(s)', '- src/z.ts#function:late — ~100 call site(s)'])
+    assert.deepEqual(hubRows(text), ['- src/a.ts#function:early — ~100 source call site(s)', '- src/z.ts#function:late — ~100 source call site(s)'])
     // Below 5 every value is its own rung and prints exactly, so the larger one
     // still leads and neither is rounded up to `~5`.
     const small = render({ hubs: [hub('src/b.ts#function:three', 3), hub('src/a.ts#function:four', 4)] })
-    assert.deepEqual(hubRows(small), ['- src/a.ts#function:four — 4 call site(s)', '- src/b.ts#function:three — 3 call site(s)'])
+    assert.deepEqual(hubRows(small), ['- src/a.ts#function:four — 4 source call site(s)', '- src/b.ts#function:three — 3 source call site(s)'])
   })
 
   it('changes only the hub list when the next candidate crosses a rung into the budget', () => {
@@ -350,12 +365,12 @@ describe('the block is stable across an edit that did not change the shape', () 
       hub('src/p.ts#function:h4', 100), hub('src/q.ts#function:h5', 100), hub('src/r.ts#function:h6', 100),
     ]
     const before = render({ hubs: [...base, hub('src/a.ts#function:h7', 60)] })
-    assert.deepEqual(hubRows(before), base.map(row => `- ${row.symbol.id} — ~100 call site(s)`),
+    assert.deepEqual(hubRows(before), base.map(row => `- ${row.symbol.id} — ~100 source call site(s)`),
       'a 50-rung symbol stays below six 100-rung ones')
     const after = render({ hubs: [...base, hub('src/a.ts#function:h7', 90)] })
     assert.deepEqual(hubRows(after), [
-      '- src/a.ts#function:h7 — ~100 call site(s)',
-      ...base.slice(0, 5).map(row => `- ${row.symbol.id} — ~100 call site(s)`),
+      '- src/a.ts#function:h7 — ~100 source call site(s)',
+      ...base.slice(0, 5).map(row => `- ${row.symbol.id} — ~100 source call site(s)`),
     ], 'the newcomer leads its rung by id, and the last row is the one displaced')
     assert.equal(withoutHubRows(after), withoutHubRows(before), 'every other line of the block is unchanged')
   })

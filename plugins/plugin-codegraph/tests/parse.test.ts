@@ -1636,6 +1636,80 @@ describe('callEdges — import-guided resolution', () => {
   })
 })
 
+describe('a name the file binds to a module outside the project', () => {
+  // The import layer's fourth outcome (`ImportBindings.outside` in parse.ts). A
+  // clause that names a module the project does not contain says where the name
+  // lives; the project-wide fallback would contradict it. Measured on a real
+  // project, that contradiction drew 20,161 false edges — a test framework's
+  // `describe` onto a project function of that name, 1,184 times — and ranked
+  // that function the project's most-referenced symbol.
+  const symbols = [
+    { id: 'src/codemode.ts#function:describe', path: 'src/codemode.ts', name: 'describe', kind: 'function', line: 1, endLine: 1, parent: undefined },
+  ]
+  const resolve = (name: string): readonly string[] => symbols.filter(symbol => symbol.name === name).map(symbol => symbol.id)
+  const external = (specifier: string): boolean => specifier === 'vitest'
+  const parsedWith = (
+    imports: readonly { specifier: string, line: number, names: readonly string[] }[],
+    local: readonly typeof symbols = [],
+  ) => ({ symbols: local, calls: [{ name: 'describe', line: 5 }], imports, heritage: [], typeRefs: [], exports: [], hasError: false })
+
+  it('draws no edge for a call to a name the file imports from an external module', () => {
+    const parsed = parsedWith([{ specifier: 'vitest', line: 1, names: ['describe'] }])
+    assert.deepEqual(callEdges(parsed, 'file:app.test.ts', resolve, undefined, external), [])
+  })
+
+  it('keeps the project-wide match when nothing says the module is external', () => {
+    // No predicate (a caller that cannot say) and a predicate that answers "not
+    // external" (a workspace package) are the same case: the clause falls through
+    // exactly as it did before, because dropping a real caller is the worse failure.
+    const parsed = parsedWith([{ specifier: '@acme/ui', line: 1, names: ['describe'] }])
+    const expected = [['src/codemode.ts#function:describe', false]]
+    assert.deepEqual(callEdges(parsed, 'file:app.test.ts', resolve).map(edge => [edge.to, edge.narrowed]), expected)
+    assert.deepEqual(callEdges(parsed, 'file:app.test.ts', resolve, undefined, () => false).map(edge => [edge.to, edge.narrowed]), expected)
+  })
+
+  it('lets a same-file declaration outrank the external clause', () => {
+    // A declaration beside the call can only mean itself; the clause is about the
+    // imported binding, which the local one shadows.
+    const local = [{ id: 'app.test.ts#function:describe', path: 'app.test.ts', name: 'describe', kind: 'function', line: 2, endLine: 2, parent: undefined }]
+    const parsed = parsedWith([{ specifier: 'vitest', line: 1, names: ['describe'] }], local)
+    // The real resolver knows every declaration, the file's own included.
+    const resolveAll = (name: string): readonly string[] => [...symbols, ...local].filter(symbol => symbol.name === name).map(symbol => symbol.id)
+    assert.deepEqual(callEdges(parsed, 'file:app.test.ts', resolveAll, undefined, external).map(edge => [edge.to, edge.narrowed]),
+      [['app.test.ts#function:describe', true]])
+  })
+
+  it('draws no edge for a member call on a module bound outside, whatever the property is named', () => {
+    // `import path from 'node:path'; path.join()` binds `path`, not `join`; without
+    // the receiver rule the call fell through to a project `join` — the gap the
+    // review found behind the clause rule.
+    const parsed = {
+      symbols: [],
+      calls: [
+        { name: 'join', line: 5, receiver: 'path' },
+        { name: 'join', line: 6, receiver: 'fs.promises' },
+        { name: 'join', line: 7, receiver: 'helpers' },
+      ],
+      imports: [
+        { specifier: 'node:path', line: 1, names: ['path'] },
+        { specifier: 'node:fs', line: 2, names: ['fs'] },
+      ],
+      heritage: [], typeRefs: [], exports: [], hasError: false,
+    }
+    const external = (specifier: string): boolean => specifier.startsWith('node:')
+    assert.deepEqual(callEdges(parsed, 'file:app.ts', () => ['src/util.ts#function:join'], undefined, external).map(edge => edge.line), [7],
+      'only the call on a receiver the file did not bind outside is linked')
+    assert.deepEqual(callEdges(parsed, 'file:app.ts', () => ['src/util.ts#function:join'], undefined, external).map(edge => edge.to), ['src/util.ts#function:join'])
+  })
+
+  it('applies the same rule to type references, which resolve through the same layers', () => {
+    const base = { symbols: [], calls: [], heritage: [], exports: [], hasError: false, typeRefs: [{ name: 'describe', line: 7, owner: 'app.ts#function:f' }] }
+    const imported = { ...base, imports: [{ specifier: 'vitest', line: 1, names: ['describe'] }] }
+    assert.deepEqual(relationEdges(imported, 'file:app.ts', resolve, undefined, external), [])
+    assert.deepEqual(relationEdges({ ...base, imports: [] }, 'file:app.ts', resolve).map(edge => edge.to), ['src/codemode.ts#function:describe'])
+  })
+})
+
 describe('narrowed — which layer chose the target', () => {
   // The three layers of `linkFor`, told apart on the stored edge. The first two are
   // statements the referring file makes (a declaration beside the call, an import

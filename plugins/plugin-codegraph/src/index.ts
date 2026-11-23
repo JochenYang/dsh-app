@@ -1404,6 +1404,7 @@ export function apply(ctx: Context): void {
                   additionalProperties: false,
                   properties: {
                     references: { type: 'number', required: true },
+                    sourceReferences: { type: 'number', required: true },
                     symbol: {
                       type: 'object',
                       additionalProperties: false,

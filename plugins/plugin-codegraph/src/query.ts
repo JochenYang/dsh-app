@@ -1010,6 +1010,32 @@ function countEdgesFrom(graph: Graph, src: string, kind: string): number {
 export const TEST_PATH: RegExp = /(?:^|\/)(?:tests?|__tests__|spec)\/|\.(?:test|spec|e2e)\.|_test\.go$|(?:^|\/)test_[^/]*\.py$|(?:^|\/)[^/]*Tests?\.(?:cs|java|kt|kts|swift)$/u
 
 /**
+ * {@link TEST_PATH}'s directory and suffix shapes as a SQL predicate over a path
+ * column, for the queries that must decide inside SQLite (the hub ranking groups
+ * 165,000 edges on a real project; pulling them out to test in JavaScript is the
+ * costlier way to the same answer). The column must hold a `/`-prefixed path, so
+ * `%/test/%` covers a top-level `test/` as well as a nested one.
+ *
+ * Deliberately NOT `%test%`: measured on a real project, the loose pattern read
+ * `src/inspect/` and `latest.ts` as tests. `fixtures/` is included here and not
+ * in `TEST_PATH` because the overview has always demoted fixture paths with the
+ * hub's own location; a fixture is test material by another name.
+ *
+ * @param column - the SQL expression holding the path.
+ * @returns a predicate that is true for a test path.
+ */
+const testPathSql = (column: string): string => [
+  `${column} LIKE '%/test/%'`,
+  `${column} LIKE '%/tests/%'`,
+  `${column} LIKE '%/__tests__/%'`,
+  `${column} LIKE '%/spec/%'`,
+  `${column} LIKE '%/fixtures/%'`,
+  `${column} LIKE '%.test.%'`,
+  `${column} LIKE '%.spec.%'`,
+  `${column} LIKE '%.e2e.%'`,
+].join(' OR ')
+
+/**
  * The test files that reference a symbol, deduplicated.
  *
  * Both kinds of reference count: a call inside a declaration (the edge's `src`
@@ -1415,13 +1441,27 @@ export interface EntryCandidate {
 export interface HubSymbol {
   readonly symbol: SymbolView
   /**
-   * How many reference edges point at it.
+   * How many reference edges point at it, from every file: the number
+   * `codegraph_impact` reports and the number its row limit applies to.
    *
-   * Edge count, not distinct sources: this is the number `codegraph_impact`
-   * reports and the number its row limit applies to, so one symbol has one count
-   * whether the model reads it from the overview or from the tool.
+   * Edge count, not distinct sources — the distinct-source count was measured at
+   * 203 for a symbol whose impact answer carries 664 rows, and a reader with no
+   * way to tell which is real trusts neither.
    */
   readonly references: number
+  /**
+   * How many of those come from files outside test paths ({@link TEST_PATH}'s
+   * shapes, plus `fixtures/`).
+   *
+   * The number the hubs are ORDERED by and the one the overview rows print, under
+   * its own noun (`source call site(s)`): measured on a real 1728-file project,
+   * eight of the twelve most-referenced symbols were referenced from tests 95% of
+   * the time or more, so the total ranked what the tests exercise, not what the
+   * project's own code depends on (`projectOverview`). Never greater than
+   * `references`. Two nouns for two quantities, each countable from the same
+   * table — not two numbers for one concept.
+   */
+  readonly sourceReferences: number
 }
 
 /**
@@ -1461,13 +1501,31 @@ export interface ProjectOverview {
 }
 
 /**
+ * The last overview computed on one open database, and the change count it was
+ * computed at. Weakly keyed: a closed graph's entry goes with its handle.
+ */
+const overviewCache = new WeakMap<Graph['db'], { changes: number, limit: number, value: ProjectOverview }>()
+
+/**
  * Answer "what is this project" from the graph alone.
+ *
+ * Cached per graph change. The pushed-overview context recomputes this on EVERY
+ * prompt assembly, to see whether the text it last sent still holds (index.ts),
+ * and measured on a real 1728-file project the hub query alone costs 350–390 ms
+ * — a third of a second per turn for an answer that changes only when a pass
+ * writes. `total_changes()` counts the rows THIS connection has written, and the
+ * kernel is the graph's only writer, so an unchanged count means an unchanged
+ * graph; a rolled-back write bumps it too, which costs one recompute and is the
+ * safe direction. The value is shared between calls: read it, never mutate it.
  *
  * @param graph - the open graph.
  * @param limit - how many rows each of the three lists may carry.
  * @returns the bounded overview.
  */
 export function projectOverview(graph: Graph, limit: number): ProjectOverview {
+  const changes = (graph.db.prepare('SELECT total_changes() AS n').get() as { n: number }).n
+  const cached = overviewCache.get(graph.db)
+  if (cached !== undefined && cached.changes === changes && cached.limit === limit) return cached.value
   const counts = oneRow<{ files: number, symbols: number, edges: number }>(
     graph.db,
     `SELECT (SELECT COUNT(*) FROM files) AS files,
@@ -1535,7 +1593,7 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
     limit + 1,
   )
 
-  const hubRows = allRows<{ id: string, n: number }>(
+  const hubRows = allRows<{ id: string, n: number, source: number }>(
     graph.db,
     // Top-level declarations only, and never a `variable`.
     //
@@ -1556,9 +1614,9 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
     // The distinct-source count was measured at 203 for a symbol whose edge count
     // is 664, and `codegraph_impact` reports the edge count — so the overview named
     // a number a third of what the tool the model is being invited to call would
-    // say. Two numbers for one concept is worse than either number alone: the model
-    // cannot tell which to trust. This count also matches what the row limit is
-    // applied to, so "664 call site(s)" and "TRUNCATED at 40" describe one list.
+    // say, and the model could not tell which to trust. This count still matches
+    // what the row limit is applied to, so "664" and "TRUNCATED at 40" describe
+    // one list.
     //
     // AND the name is not shared by several declarations.
     //
@@ -1566,18 +1624,50 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
     // (554 / 554 / 553) and `ok` eight. The reference count of a SHARED NAME is the
     // sum over every unrelated declaration of it, so the number says how common the
     // word is, not how important any one symbol is. A hub list exists to teach the
-    // vocabulary of THIS project, and `startsWith` is not part of it.
-    `SELECT e.dst AS id, COUNT(*) AS n
-     FROM edges e JOIN symbols s ON s.id = e.dst
-     WHERE e.kind = 'references'
-       AND s.parent IS NULL
-       AND s.kind IN ('function', 'class', 'interface', 'type', 'enum')
-       AND (SELECT COUNT(*) FROM symbols s2 WHERE s2.name = s.name AND ${NAME_RESOLVABLE}) <= 2
-     GROUP BY e.dst
+    // vocabulary of THIS project, and `startsWith` is not part of it. The check runs
+    // per GROUP (HAVING), not per edge: it was per edge while it sat in the WHERE
+    // clause, 165,000 times on the project below for a few thousand groups.
+    //
+    // ORDERED BY THE REFERENCES FROM SOURCE FILES, not by the total.
+    //
+    // Measured on a real 1728-file project once the false edges were gone
+    // (parse.ts `ImportBindings`): eight of the twelve most-referenced symbols were
+    // referenced from test files 95% of the time or more — a fake-message builder
+    // 664 of 664, `fauxToolCall` 154 of 154, a storage class 228 of 229. The list
+    // was answering "what do the tests exercise most", which is a fact about
+    // testability and not about the code a reader should learn first. The path rule
+    // below could not catch them: a fake that lives under `src/providers/` is not
+    // in a test directory, only its callers are. So `source` — the edges whose
+    // referrer is outside test paths — decides the order, and the total stays on
+    // the row as `references`: it is still the number impact reports. A symbol
+    // nothing in source references sinks to the end rather than being dropped, so
+    // a project made mostly of tests still gets a list.
+    //
+    // A referrer's path is read off its own id (`file:<path>` or `<path>#kind:name`),
+    // not joined from `symbols`: the join was one primary-key lookup per edge —
+    // measured, +38 ms per query on that project — for a fact the id already
+    // states. The paths are prefixed with `/` so one `%/test/%` pattern covers a
+    // top-level `test/` directory as well as a nested one, and the patterns are
+    // `TEST_PATH`'s shapes in SQL (`testPathSql`), not `%test%`: measured on the
+    // same project, the loose pattern read `src/inspect/` and `latest.ts` as tests.
+    `WITH ref AS (
+       SELECT e.dst AS dst, s.name AS sname, '/' || s.path AS spath,
+              '/' || CASE WHEN e.src LIKE 'file:%' THEN substr(e.src, 6)
+                          ELSE substr(e.src, 1, instr(e.src, '#') - 1) END AS referrer
+       FROM edges e
+       JOIN symbols s ON s.id = e.dst
+       WHERE e.kind = 'references'
+         AND s.parent IS NULL
+         AND s.kind IN ('function', 'class', 'interface', 'type', 'enum')
+     )
+     SELECT dst AS id, COUNT(*) AS n,
+            SUM(CASE WHEN ${testPathSql('referrer')} THEN 0 ELSE 1 END) AS source
+     FROM ref
+     GROUP BY dst
+     HAVING (SELECT COUNT(*) FROM symbols s2 WHERE s2.name = ref.sname AND ${NAME_RESOLVABLE}) <= 2
      ORDER BY
-       CASE WHEN s.path LIKE '%test%' OR s.path LIKE '%spec%'
-                  OR s.path LIKE '%fixture%' THEN 1 ELSE 0 END ASC,
-       n DESC, e.dst ASC
+       CASE WHEN ${testPathSql('spath')} THEN 1 ELSE 0 END ASC,
+       source DESC, n DESC, dst ASC
      LIMIT ?`,
     limit + 1,
   )
@@ -1607,10 +1697,10 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
 
   const hubs = hubRows.slice(0, limit).flatMap(row => {
     const symbol = readSymbol(graph, row.id)
-    return symbol === undefined ? [] : [{ symbol, references: row.n }]
+    return symbol === undefined ? [] : [{ symbol, references: row.n, sourceReferences: row.source }]
   })
 
-  return {
+  const value: ProjectOverview = {
     files: counts.files,
     symbols: counts.symbols,
     edges: counts.edges,
@@ -1619,6 +1709,8 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
     hubs,
     truncated: entryRows.length > limit || hubRows.length > limit,
   }
+  overviewCache.set(graph.db, { changes, limit, value })
+  return value
 }
 
 /**

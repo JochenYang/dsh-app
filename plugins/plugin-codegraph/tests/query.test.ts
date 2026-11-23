@@ -513,9 +513,68 @@ describe('projectOverview', () => {
     const overview = projectOverview(g, 10)
     assert.equal(overview.hubs[0]?.symbol.name, 'shared')
     assert.equal(overview.hubs[0]?.references, 3, 'the edge count, the same number impact reports')
+    assert.equal(overview.hubs[0]?.sourceReferences, 3, 'and all three are from source files here')
     // The cross-check that makes the rule enforceable: both numbers come from the
     // same table under the same predicate.
     assert.equal(referencesTo(g, hub.id, 10).rows.length, 3, 'impact sees the same three call sites')
+  })
+
+  it('ranks hubs by what source files reference, not by what the tests exercise', () => {
+    // Measured on a real 1728-file project: eight of the twelve most-referenced
+    // symbols were referenced from tests 95% of the time or more — a fake-message
+    // builder 664 of 664 — and the list answered "what do the tests exercise most",
+    // which is not the vocabulary a reader should learn first. The path rule cannot
+    // see it: the fake lives under src/, only its callers are in test files.
+    const g = graph()
+    const fake = sym('src/faux.ts', 'fauxMessage')
+    const real = sym('src/env.ts', 'getOrThrow')
+    const testCaller = sym('src/faux.test.ts', 'buildFixture')
+    const sourceCaller = sym('src/runner.ts', 'run')
+    replaceFile(g.db, file('src/faux.ts'), [fake], [])
+    replaceFile(g.db, file('src/env.ts'), [real], [])
+    replaceFile(g.db, file('src/faux.test.ts'), [testCaller], [
+      { from: testCaller.id, to: fake.id, kind: 'references', line: 1 },
+      { from: testCaller.id, to: fake.id, kind: 'references', line: 2 },
+      { from: testCaller.id, to: real.id, kind: 'references', line: 3 },
+    ])
+    replaceFile(g.db, file('src/runner.ts'), [sourceCaller], [
+      { from: sourceCaller.id, to: real.id, kind: 'references', line: 1 },
+    ])
+    const overview = projectOverview(g, 10)
+    assert.deepEqual(overview.hubs.map(hub => [hub.symbol.name, hub.references, hub.sourceReferences]), [
+      ['getOrThrow', 2, 1],
+      ['fauxMessage', 2, 0],
+    ], 'the totals tie at two; the source count decides, and the total stays on the row')
+  })
+
+  it('reads a referrer as a test only by a test path, not by the word', () => {
+    // Measured on a real project: `%test%` read `src/inspect/` and `latest.ts` as
+    // tests, which pushed real source hubs down the list.
+    const g = graph()
+    const hub = sym('src/env.ts', 'getOrThrow')
+    replaceFile(g.db, file('src/env.ts'), [hub], [])
+    for (const path of ['src/inspect/report.ts', 'src/latest.ts', 'src/env.test.ts']) {
+      const caller = sym(path, 'caller')
+      replaceFile(g.db, file(path), [caller], [{ from: caller.id, to: hub.id, kind: 'references', line: 1 }])
+    }
+    const overview = projectOverview(g, 10)
+    assert.deepEqual(overview.hubs.map(row => [row.symbol.name, row.references, row.sourceReferences]), [['getOrThrow', 3, 2]])
+  })
+
+  it('answers from the cache until the graph changes', () => {
+    // The pushed-overview context recomputes this on every prompt assembly; the
+    // hub query alone was measured at 350 ms on a real project.
+    const g = graph()
+    const hub = sym('hub.ts', 'shared')
+    replaceFile(g.db, file('hub.ts'), [hub], [])
+    const first = projectOverview(g, 10)
+    assert.equal(projectOverview(g, 10), first, 'same change count, same object')
+    assert.notEqual(projectOverview(g, 5), first, 'a different limit is a different overview')
+    const caller = sym('a.ts', 'one')
+    replaceFile(g.db, file('a.ts'), [caller], [{ from: caller.id, to: hub.id, kind: 'references', line: 1 }])
+    const second = projectOverview(g, 10)
+    assert.notEqual(second, first, 'a write recomputes')
+    assert.equal(second.hubs[0]?.references, 1)
   })
 
   it('excludes documents from the entry candidates and reports the language split', () => {

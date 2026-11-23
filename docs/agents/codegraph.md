@@ -73,7 +73,7 @@ rather than where it is:
 |---|---|---|
 | `symbols.signature` | the declaration's head on one line — what it takes and returns, without its body (`normalizeSignature` in `parse.ts`); `''` when nothing survives | the outline and `find` rows, the request pack |
 | `symbols.doc` | the first sentence of the comment block directly above (`docComment`); a Python docstring when there is no comment | the outline rows at the finest detail |
-| `edges.narrowed` | `1` when the reference was resolved by a same-file declaration or by an import clause, `0` when only the name matched project-wide (`linkFor`'s three layers) | the `✓` on an `impact` row |
+| `edges.narrowed` | `1` when the reference was resolved by a same-file declaration or by an import clause, `0` when only the name matched project-wide (`linkFor`'s three layers); a name the file imports from a module outside the project gets no edge at all (§4) | the `✓` on an `impact` row |
 
 They are deliberately OUTSIDE `symbolColumns()`: `toSymbolView` spreads a row
 whole and every tool's output schema is `additionalProperties: false`, so a
@@ -103,13 +103,19 @@ phase 2 (`refineRegistrationTargets`, a UNIQUE name only) — because a handler 
 file imports is only findable once the sibling's symbols are written, which may
 be after this file in the same pass.
 
+Schema 7 adds no table: it changes what a `references` edge MEANS — a name the
+file imports from a module outside the project draws none, and a project-wide
+name match stops at its language family (§4) — and a version-6 graph holds the
+edges it drew until every file happens to change. The rebuild is the migration,
+as for every version before it.
+
 ## 2. Which module decides what
 
 | Module | Owns | Never does |
 |---|---|---|
 | `src/store.ts` | the schema, and `replaceFile` / `forgetFile` as the only writers | read the disk |
 | `src/languages.ts` | which extensions map to which grammar, the download + sha512 check, and which three grammars the plugin builds itself (§11) | parse |
-| `src/parse.ts` | the per-language extraction tables (`GRAMMAR_SHAPES`) and the three-layer name resolution (`linkFor`) | touch the disk |
+| `src/parse.ts` | the per-language extraction tables (`GRAMMAR_SHAPES`) and the name resolution (`linkFor`): three layers that choose a target, and the clause that binds a name outside the project and so chooses none (§4) | touch the disk |
 | `src/search.ts` | how a query string becomes filters, and which words a multi-word query is made of | query a database, or index anything |
 | `src/ignore.ts` | `.gitignore` matching and the generated-file verdict — by name, by banner, or by the SHAPE of the head's lines — as pure functions over strings | walk a tree |
 | `src/sfc.ts` | the code region of a Vue/Svelte/Astro component (a `<script>` block, or Astro's `---` frontmatter), masked into its own line positions | parse anything |
@@ -119,7 +125,7 @@ be after this file in the same pass.
 | `src/source.ts` | the ONE read of source bytes at query time: path containment, hash comparison, line budget | write anything |
 | `src/budget.ts` | how much source one answer may carry, per project size | know what a symbol is |
 | `src/docs.ts` | which symbols a document NAMES | parse markdown |
-| `src/indexer.ts` | the walk, the incremental comparison, the three phases, `projectChanged` (the read-only "did anything move" answer), and the pass's cancellation checkpoints | write SQL |
+| `src/indexer.ts` | the walk, the incremental comparison, the three phases, `projectChanged` (the read-only "did anything move" answer), the pass's cancellation checkpoints, what an import specifier certainly places OUTSIDE the project (`isExternalSpecifier`: a Node built-in, or an installed package no manifest under the root names — §4), and the language family a project-wide name match is bounded by (`languageFamily`, §4) | write SQL |
 | `src/query.ts` | every read the three tools perform | own state |
 | `src/routes.ts` | the settings page's and the pages' HTTP surface | compute index state |
 | `src/client/page.tsx` | the sidebar page: every project, then one project's graph | own a second copy of the graph surface (it reuses `GraphPanel`) |
@@ -260,6 +266,78 @@ Two smaller versions of the same principle: one document line naming a symbol
 three times is ONE edge (three would inflate counts without adding a place to
 read), and a document mentions only names the graph already declares (otherwise
 every English word is an edge).
+
+**A test framework's global linked to a project function of the same name.** Found
+by verifying the plugin on a real 1728-file TypeScript monorepo. The import layer
+falls back to a project-wide name match when a clause cannot name the declaring
+file — right for a barrel, wrong for a module the project does not contain.
+`import { describe } from 'vitest'` says where `describe` lives, and the fallback
+contradicted it: **20,161 calls — 12% of all calls in the project — became edges to
+unrelated project declarations**, `expect` (vitest) 15,216, `join` (node:path)
+2,874, `describe` 1,182. Every row was unmarked (a name match, honestly labelled),
+and the count was still a lie: `describe` in `codemode.ts` was ranked the
+project's most-referenced symbol on the strength of 1,182 false edges, and the
+pushed overview told the model to read it first.
+
+The rule now (`isExternalSpecifier` in `indexer.ts`, `ImportBindings.outside` in
+`parse.ts`): a name the file imports from a module that is **certainly** outside
+the project draws no edge — and so does a member call on such a module
+(`path.join()` after `import path from 'node:path'`: the clause bound `path`, not
+`join`, and without the receiver rule the call fell through to a project `join`).
+Certain means a Node built-in (`isBuiltin`), or a package the importer can
+resolve from a `node_modules` on the way up to the root that no `package.json`
+under the root names AND whose real path is not a source directory of the
+project — pnpm, yarn and npm all link workspace packages into `node_modules`,
+and the link is what keeps the project's references to a package whose manifest
+the walk did not read. Everything else keeps the fallback: a tsconfig path alias,
+a `#subpath` import, a dependency that is not installed. The bias is deliberate —
+a dropped real caller is the worst answer the graph can give, and a false edge is
+a row the reader can discount — and its price is two known gaps (§10b). Measured
+after the change on the same project: reference edges 187,414 → 165,745, the
+narrowed layer untouched at 49,341, `describe` 1,189 → 7.
+
+The same verification exposed a second ranking fault behind the first. With the
+false edges gone, eight of the twelve most-referenced symbols were referenced
+from test files 95% of the time or more — a fake-message builder 664 of 664,
+`fauxToolCall` 154 of 154 — and the hub list answered "what do the tests exercise
+most", which is a fact about testability, not about the code a reader should learn
+first. The existing rule (a symbol declared under a test path is demoted) could
+not see it: the fake lives under `src/providers/`, only its callers are in tests.
+Hubs are therefore **ordered by the references from files outside test, spec and
+fixture paths** (`HubSymbol.sourceReferences`), which is also the count the
+overview rows print, under its own noun; the total stays on the row as
+`references`, the number `codegraph_impact` reports. On the same project the list
+went from `describe`, `fauxAssistantMessage`, `fauxToolCall`, … to `Text`,
+`Spacer`, `visibleWidth`, `ChordError`, `matchesKey` — the components and
+utilities the project's own code depends on.
+
+Two cost facts came out of reviewing that change, both measured on the same
+project. The hub query runs on EVERY prompt assembly — the pushed-overview
+context recomputes the overview to see whether the text it sent still holds
+(§8b-2) — and it already cost 353 ms per turn before this change. So
+`projectOverview` is now cached per graph change (`total_changes()` on the
+connection the kernel writes through; a different row limit is a different
+entry): 294 ms cold, 0 ms warm, with the same-name guard moved from the WHERE
+clause to HAVING (per group, not per edge) and the referrer's path read off its
+own id instead of a join. And a referrer counts as a test only by
+`TEST_PATH`'s shapes in SQL (`testPathSql`), not by `%test%`, which read
+`src/inspect/` and `latest.ts` as tests and pushed real source hubs down.
+
+**A TypeScript call linked to a Swift declaration.** The second real project
+verified — 17,112 files, TypeScript and TSX beside Swift, Python and Kotlin — put
+a Python `class Error` from a credentials helper at the top of the hub list with
+23,556 references, 12,015 of them from source files. Only five were from Python:
+the rest were `new Error(` across the TypeScript code, matched to the one
+declaration of that name the project holds, because the language's own `Error`
+is a global and leaves no declaration to share the name. Measured on that graph,
+**321,990 of 4,154,811 reference edges — 7.7% — crossed a language family**
+(288,223 TypeScript onto Swift, 25,741 onto Python). No parsed call crosses a
+language: the two sides talk through strings and bindings, never by name. So the
+project-wide match is now bounded by family (`languageFamily` in `indexer.ts`,
+applied to the resolver all three layers share, since the same-file and
+import-clause layers are one module and so one family by construction): `js`
+(ts/tsx/js/vue/svelte/astro), `c` (c/cpp/objc — a `.cpp` calls a header's
+function, a `.m` file too), and every other language its own.
 
 ## 5. Restoring the project list
 
@@ -475,13 +553,20 @@ Two ordering rules in that overview were paid for by looking at real output on a
 - **Hubs are top-level declarations only, and never a `variable`.** The unguarded
   query answered `.filter` (975 referrers), `.trim` (512) and `.includes` (476):
   built-in method names matching variables the parser recorded.
-- **One count per symbol.** The hub row names the **edge** count, not
+- **One count per symbol.** The hub row names an **edge** count, never
   `COUNT(DISTINCT src)`. Measured: the distinct-source count was 203 for a symbol
   whose `codegraph_impact` answer carries 664 rows, so the overview named a number
   a third of what the tool it invites the model to call would say — and the model
-  cannot tell which to trust. The edge count is what the tool reports and what its
-  row limit applies to, so "664 call site(s)" and "TRUNCATED at 40" describe one
-  list. Two numbers for one concept is worse than either number alone.
+  cannot tell which to trust. Two numbers for one concept is worse than either
+  number alone. Since the ranking moved to source references (§4) the hub row
+  prints THAT edge count under its own noun — `N source call site(s)` — and
+  `codegraph_impact` prints the total as `reference(s)`: two concepts, two nouns,
+  each countable from the same table.
+- **Ordered by what source files reference, not by the total.** Eight of the
+  twelve most-referenced symbols on a real project were referenced from tests
+  95% of the time or more; a fake-message builder that nothing in source calls
+  ranked first. The path rule above cannot see such a helper, because it lives
+  under `src/` and only its callers are in tests.
 
 ### 8a. Why the overview is pushed, not offered
 
@@ -1189,6 +1274,7 @@ than an unfinished one. Listed so a reader knows where an answer stops.
 | `extends` / `implements` have shapes for the TypeScript/JavaScript family only | a Python, Go, Java, C# or Rust project answers these queries with nothing | each language needs its own node table; the grammars differ more here than for calls |
 | A module's public surface stops at file → symbol | `export * from './x'` is a file→file edge, so "is this symbol part of the package API" is one hop away, not answered directly | deriving symbol-level publication across a re-export chain means re-scanning every exporting file whenever one changes — the W11b shape that lost edges before |
 | A shared name's re-export resolves inside the named module only — for the EXPORT surface | an `export { x } from './y'` where `y` re-exports `x` from `z` links to nothing at the second hop | one hop is what the `from` clause states; following the chain needs import resolution for every step. Calls and signature references are NOT bounded this way: when the clause names a module that declares none of the name (a barrel), the import layer falls back to the project-wide rule, so the cost of a re-export is precision rather than a missing caller |
+| A name imported from a module is unlinked only when the module is CERTAINLY outside the project: a Node built-in, or a package resolvable from a `node_modules` whose real path is not a source directory of the project and that no manifest under the root names | a module a runtime injects without installing it (`bun:test`) keeps the project-wide fallback, so a project function named `describe` still collects the test edges in a Bun project; so does a tsconfig path alias whose package is not installed; and a workspace package that is neither linked into `node_modules` nor named by a manifest the walk read (unreadable, or beyond a truncated walk's cut) is placed outside by an installed package of the same name | the alternative is guessing: `@/lib/ui` and `bun:test` look exactly like an installed package until something says otherwise, and a wrong guess here deletes a real caller — the one failure that changes code silently. `isBuiltin` is the runtime's list, `node_modules` is what the importer itself can resolve, and a workspace link's real path is where it points; all three are facts, and nothing cheaper is one |
 | The graph is rebuilt from scratch on a schema bump | the first launch after an upgrade shows `indexing` for ~30s | a derived graph is only as good as the pass that filled it; an interrupted rebuild leaves an empty graph that the next open repairs |
 | A constructor call is recorded only where the extraction table names its node type — the TypeScript/JavaScript family (`new_expression`), Java and C# (`object_creation_expression`) and Scala (`instance_expression`) | `Dart`'s `Widget()` is a `selector` on the identifier, not a call node, so a Dart class still answers "0 call sites" | measured in a real session: before these rows existed, the most-used class in a TypeScript monorepo answered `0 call site(s)` and the model read twenty files by hand. The four rows above close the case that showed up; Dart's shape needs selector-chain resolution, which is a different piece of work |
 

@@ -337,12 +337,37 @@ describe('renderContext', () => {
         truncated: false,
         byLanguage: [{ lang: 'typescript', files: 3 }],
         entryCandidates: [{ path: 'src/cli.ts', symbols: 1, symbol: undefined }],
-        hubs: [{ symbol: { id: 'src/util.ts#function:shared', name: 'shared', kind: 'function', path: 'src/util.ts', line: 9, parent: undefined }, references: 40 }],
+        hubs: [{ symbol: { id: 'src/util.ts#function:shared', name: 'shared', kind: 'function', path: 'src/util.ts', line: 9, parent: undefined }, references: 40, sourceReferences: 30 }],
       },
     }
     const rendered = text(renderContext(answer, 40))
-    assert.match(rendered, /^- src\/util\.ts#function:shared — 40 call site\(s\)$/mu)
+    assert.match(rendered, /^- src\/util\.ts#function:shared — 30 source call site\(s\)$/mu)
     assert.match(rendered, /Pass one of those ids as `symbol`/u)
+  })
+
+  it('says a hub referenced only from tests is exactly that, with its total', () => {
+    const answer: ContextResult = {
+      freshness: 'current',
+      note: undefined,
+      siblings: [],
+      calls: [],
+      calledBy: [],
+      imports: [],
+      documents: [],
+      truncated: false,
+      overview: {
+        files: 3,
+        symbols: 5,
+        edges: 2,
+        truncated: false,
+        byLanguage: [{ lang: 'typescript', files: 3 }],
+        entryCandidates: [{ path: 'src/cli.ts', symbols: 1, symbol: undefined }],
+        hubs: [{ symbol: { id: 'src/faux.ts#function:fauxMessage', name: 'fauxMessage', kind: 'function', path: 'src/faux.ts', line: 9, parent: undefined }, references: 664, sourceReferences: 0 }],
+      },
+    }
+    const rendered = text(renderContext(answer, 40))
+    assert.match(rendered, /^most referenced \(1\) — every reference to these comes from tests:$/mu, 'no "in source files" when nothing in source references a hub')
+    assert.match(rendered, /^- src\/faux\.ts#function:fauxMessage — 664 call site\(s\), tests only$/mu)
   })
 
   it('says a symbol answer is a sample when any list was cut', () => {

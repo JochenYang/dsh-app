@@ -537,10 +537,17 @@ export function renderContext(result: ContextResult, maxRows: number): TextBlock
       `languages: ${o.byLanguage.map(entry => `${entry.lang} ${String(entry.files)}`).join(', ')}`,
       `entry candidates (${String(o.entryCandidates.length)}) — nothing imports these:`,
       ...o.entryCandidates.map(entry => `- ${entry.path} (${String(entry.symbols)} symbol(s))${entry.symbol === undefined ? '' : ` starts at ${entry.symbol.kind} ${entry.symbol.name}:${String(entry.symbol.line)}`}`),
-      `most referenced (${String(o.hubs.length)}):`,
       // The ID, not just the name: this line is the invitation to expand a hub, and a
-      // name is not always a selector (`resolveSymbol` refuses a shared one).
-      ...o.hubs.map(hub => `- ${hub.symbol.id} — ${String(hub.references)} call site(s)`),
+      // name is not always a selector (`resolveSymbol` refuses a shared one). The
+      // count is the source one, labelled; `codegraph_impact` on the id reports the
+      // total, tests included. A hub nothing in source references prints its total,
+      // said to be tests only — "0 source call site(s)" contradicts the heading.
+      o.hubs.some(hub => hub.sourceReferences > 0)
+        ? `most referenced in source files (${String(o.hubs.length)}) — ranked by what code outside tests uses:`
+        : `most referenced (${String(o.hubs.length)}) — every reference to these comes from tests:`,
+      ...o.hubs.map(hub => (hub.sourceReferences > 0
+        ? `- ${hub.symbol.id} — ${String(hub.sourceReferences)} source call site(s)`
+        : `- ${hub.symbol.id} — ${String(hub.references)} call site(s), tests only`)),
       'Pass one of those ids as `symbol` to expand it, or a file path for its outline.',
     ]
     return block(lines)

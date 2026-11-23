@@ -32,8 +32,9 @@
 
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { isBuiltin } from 'node:module'
+import { dirname, isAbsolute, join, relative } from 'node:path'
 import { promisify } from 'node:util'
 import { MAX_SOURCE_FILE_BYTES } from './budget.ts'
 import { languageForPath } from './languages.ts'
@@ -101,6 +102,42 @@ const SKIP_DIRS = new Set([
 
 /** A file that is large enough to be generated rather than written. */
 const MAX_FILE_BYTES = MAX_SOURCE_FILE_BYTES
+
+/**
+ * The languages whose imports are JS module specifiers — the only ones
+ * {@link isExternalSpecifier} makes a statement about. A Python `import json` is a
+ * bare specifier too, but it names neither a Node built-in nor a `node_modules`
+ * package, and a rule about one module system must not be applied to another.
+ */
+const JS_MODULE_LANGUAGES = new Set(['typescript', 'tsx', 'javascript', 'vue', 'svelte', 'astro'])
+
+/**
+ * The C family: a `.cpp` or `.m` file calls what a `.h` header declares, and the
+ * graph must not read that as a cross-language match.
+ */
+const C_FAMILY_LANGUAGES = new Set(['c', 'cpp', 'objc'])
+
+/**
+ * Which languages may name each other's declarations by a bare name — the unit the
+ * project-wide name match is allowed inside. A TypeScript file cannot call a Swift
+ * or Python declaration by name (the two talk through strings and bindings), so a
+ * same-named declaration there is never its target; a `.cpp` file calls a header's
+ * function all the time. Measured on a real 17,112-file project: 321,990 of its
+ * 4,154,811 reference edges — 7.7% — crossed a family, 288,223 of them TypeScript
+ * onto Swift declarations, and a Python `class Error` was the project's
+ * most-referenced symbol on 23,556 of them.
+ *
+ * @param languageId - a language id as `languages.ts` spells it.
+ * @returns the family: `js`, `c`, or the id itself for a language that is its own.
+ */
+export function languageFamily(languageId: string): string {
+  if (JS_MODULE_LANGUAGES.has(languageId)) return 'js'
+  if (C_FAMILY_LANGUAGES.has(languageId)) return 'c'
+  return languageId
+}
+
+/** A manifest larger than this is not one anyone reads by hand; its name is not read. */
+const MAX_PACKAGE_JSON_BYTES = 1_000_000
 
 /** What one pass did. */
 export interface IndexOutcome {
@@ -244,6 +281,37 @@ export interface ScanResult {
    * treat its empty result as "everything is gone".
    */
   readonly rootUnreadable: boolean
+  /**
+   * The package names the project's own `package.json` files declare, in walk order.
+   *
+   * What tells a workspace package (`@acme/ui`, whose sources are in the walk) from
+   * an installed one (`react`, under `node_modules`) when a file imports by bare
+   * specifier — see {@link isExternalSpecifier}. Empty for a project without
+   * manifests, which is every non-JS project and a plain single-package app that
+   * imports nothing of its own by name.
+   */
+  readonly packages: readonly string[]
+}
+
+/**
+ * The `name` a package.json declares, or `undefined` when the file is not a
+ * readable manifest that has one.
+ *
+ * A manifest that fails here is not an error to raise: the walk is deciding what
+ * to index, and a package it cannot name is simply not known as a project module
+ * (`isExternalSpecifier` then falls back to the installed-package test, which is
+ * the pre-manifest behaviour). Nothing is indexed from the file either way.
+ */
+function readPackageName(file: string): string | undefined {
+  try {
+    if (statSync(file).size > MAX_PACKAGE_JSON_BYTES) return undefined
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const name = (parsed as { name?: unknown }).name
+    return typeof name === 'string' && name !== '' ? name : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** The first bytes of a file decoded as UTF-8, or '' when it cannot be read. */
@@ -334,6 +402,7 @@ export function scanProject(root: string, limit = MAX_FILES, indexed?: ReadonlyS
   const tooLarge: string[] = []
   const ignored: string[] = []
   const generated: string[] = []
+  const packages = new Set<string>()
   let truncated = false
 
   /**
@@ -373,6 +442,18 @@ export function scanProject(root: string, limit = MAX_FILES, indexed?: ReadonlyS
         continue
       }
       if (!entry.isFile()) continue
+      // The project's own package names, read where the walk's refusals (an ignored
+      // or generated path) already apply, so a package whose sources are not in the
+      // graph is not known as a project module. Before the candidate test, because
+      // the manifest itself is never parsed: only its name is used, by the import
+      // layer (`isExternalSpecifier`).
+      if (entry.name === 'package.json') {
+        if (!isIgnored(rules, relativePath, false)) {
+          const name = readPackageName(join(dir, entry.name))
+          if (name !== undefined) packages.add(name)
+        }
+        continue
+      }
       // A document is walked for its own sake, not parsed. It carries no symbols
       // and no imports; what it contributes is the list of symbols it NAMES
       // (`docs.ts`), which the second phase turns into `documents` edges.
@@ -438,7 +519,7 @@ export function scanProject(root: string, limit = MAX_FILES, indexed?: ReadonlyS
     rootUnreadable = true
   }
   if (!rootUnreadable) walk(root, '', [])
-  return { files, truncated, tooLarge, ignored, generated, rootUnreadable }
+  return { files, truncated, tooLarge, ignored, generated, packages: [...packages], rootUnreadable }
 }
 
 /**
@@ -480,6 +561,134 @@ export function resolveImport(
     `${joined}/index.ts`, `${joined}/index.tsx`, `${joined}/index.js`,
   ]
   return candidates.find(candidate => exists(candidate))
+}
+
+/** The package a bare specifier names: `@scope/name/sub` and `name/sub` both name the package, not the subpath. */
+function packageOf(specifier: string): string {
+  return specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0] ?? ''
+}
+
+/**
+ * Is this import specifier a module OUTSIDE the project? Only what is certain.
+ *
+ * The import layer (`linkFor` in parse.ts) falls back to a project-wide name match
+ * when a clause cannot say which project file declares a name. That is right for a
+ * barrel and wrong for a module the project does not contain: the clause then says
+ * exactly where the name lives, and the fallback contradicts it. Measured on a real
+ * 1728-file TypeScript project, 20,161 calls — 12% of all calls — named a symbol the
+ * file had imported from an external module while some project file declared the same
+ * name, and each became a reference to that unrelated declaration: `expect` (vitest)
+ * 15,216, `join` (node:path) 2,874, `describe` 1,182. The overview ranked `describe`
+ * the project's most-referenced symbol on the strength of 1,184 false edges.
+ *
+ * So the answer is `true` only for a specifier the project cannot contain:
+ *   - a Node built-in (`node:*`, `fs`, `path`, …) — `isBuiltin` is the runtime's own
+ *     list, not one maintained here;
+ *   - a package the importer can resolve from a `node_modules` on the way up to the
+ *     root ({@link installedPackages}), and that no `package.json` in the walk names —
+ *     a workspace package is linked into `node_modules` too, and its sources ARE the
+ *     project, which is why `installedPackages` also asks where the link POINTS.
+ *
+ * Everything else answers `false`, and the name keeps its project-wide match: a
+ * tsconfig path alias, a `#subpath` import, a dependency that is not installed. An
+ * uncertain clause MUST fall through — dropping a real caller is the worst answer
+ * the graph can give, and a false edge is only a row the reader can discount. The
+ * price of that bias is two known gaps (§10b of docs/agents/codegraph.md): a
+ * module the runtime injects without installing it (`bun:test`) is never placed
+ * outside, and a workspace package that is neither linked into `node_modules` nor
+ * named by a manifest the walk read — an unreadable `package.json`, or one beyond
+ * a truncated walk's cut — is placed outside by a package of the same name that
+ * happens to be installed.
+ *
+ * @param specifier - the raw import specifier.
+ * @param from - the importing file's project-relative path.
+ * @param workspace - the package names the project's own manifests declare.
+ * @param installed - whether this importer can resolve a package from a `node_modules`.
+ * @returns true only when the specifier is certainly outside the project.
+ */
+export function isExternalSpecifier(
+  specifier: string,
+  from: string,
+  workspace: ReadonlySet<string>,
+  installed: (from: string, name: string) => boolean,
+): boolean {
+  if (specifier === '' || specifier.startsWith('.') || specifier.startsWith('#')) return false
+  if (isBuiltin(specifier)) return true
+  const name = packageOf(specifier)
+  if (name === '' || workspace.has(name)) return false
+  return installed(from, name)
+}
+
+/**
+ * Whether an importing file can resolve a package from a `node_modules`, the way
+ * Node resolves it: the importer's own directory first, then each ancestor up to the
+ * project root.
+ *
+ * One lookup per (directory, package) per pass: the answer is the same for every
+ * file in a directory, and a 1700-file pass would otherwise repeat it per file.
+ * A project without a `node_modules` answers `false` for everything, which leaves
+ * every name in the project-wide fallback — the behaviour before this existed.
+ *
+ * A `node_modules/<name>` that LINKS to a source directory of the project is not
+ * an installed package ({@link linksIntoProject}): pnpm, yarn and npm all link
+ * workspace packages this way, and treating one as installed would drop every
+ * reference to it by name exactly when its manifest was not read.
+ *
+ * @param root - the absolute project root.
+ * @returns (project-relative importer path, package name) → installed.
+ */
+export function installedPackages(root: string): (from: string, name: string) => boolean {
+  const cache = new Map<string, boolean>()
+  // Both sides of the comparison below go through the real path: a root spelled
+  // with an 8.3 short name or through a link would otherwise never equal the real
+  // path of the manifest it contains (measured in a temp-dir test: the link was
+  // read as installed for exactly that reason).
+  let realRoot = root
+  try {
+    realRoot = realpathSync.native(root)
+  } catch { /* an unreadable root names nothing; the comparison keeps the spelling it was given */ }
+  return (from, name) => {
+    const start = dirname(from)
+    const key = `${start}\u0000${name}`
+    const hit = cache.get(key)
+    if (hit !== undefined) return hit
+    let found = false
+    let dir = start
+    for (;;) {
+      const manifest = join(root, dir, 'node_modules', name, 'package.json')
+      if (existsSync(manifest) && !linksIntoProject(realRoot, manifest)) {
+        found = true
+        break
+      }
+      if (dir === '' || dir === '.') break
+      dir = dirname(dir)
+    }
+    cache.set(key, found)
+    return found
+  }
+}
+
+/**
+ * Is this `node_modules/<name>/package.json` the project's own source rather than
+ * an installed copy? The real path tells: a workspace link resolves to a source
+ * directory under the root (`packages/ui`), an installed package's real path keeps
+ * a `node_modules` segment (pnpm's `.pnpm/<name>/node_modules/<name>` store) or
+ * leaves the root altogether. A real path that cannot be read answers "inside" —
+ * the side that keeps the edge.
+ *
+ * @param realRoot - the project root's own real path.
+ * @param manifest - the manifest path as resolved from the importer.
+ * @returns true when the manifest's real location is a source directory of the project.
+ */
+function linksIntoProject(realRoot: string, manifest: string): boolean {
+  let real: string
+  try {
+    real = realpathSync.native(manifest)
+  } catch {
+    return true
+  }
+  const within = relative(realRoot, real)
+  return within !== '' && !isAbsolute(within) && !within.startsWith('..') && !within.split(/[\\/]/u).includes('node_modules')
 }
 
 /**
@@ -834,6 +1043,24 @@ export async function indexProject(
     // "new session" did nothing until it finished. The table is a few thousand rows,
     // so reading it once costs milliseconds and turns N queries into 1.
     const resolveOnce = namesIndex(graph)
+    // The project-wide name match is bounded by LANGUAGE FAMILY (`languageFamily`):
+    // a name resolves, for one file, only to declarations in files of its own
+    // family. The same-file and import-clause layers are inside one module and so
+    // one family by construction, which is why the bound can sit on the resolver
+    // they all share. Path → family, read once: a lookup per candidate id is a
+    // slice to the `#` and a map read, against the 165,000 times per pass the
+    // resolver runs on a real project.
+    const familyByPath = new Map<string, string>()
+    for (const row of allRows<{ path: string, lang: string }>(graph.db, 'SELECT path, lang FROM files')) {
+      familyByPath.set(row.path, languageFamily(row.lang))
+    }
+    const familyOfId = (id: string): string => familyByPath.get(id.slice(0, id.indexOf('#'))) ?? ''
+    /** The name resolver as one file may use it: every declaration of the name in its own family. */
+    const resolveIn = (path: string): ((name: string) => readonly string[]) => {
+      const family = familyByPath.get(path)
+      if (family === undefined) return resolveOnce
+      return name => resolveOnce(name).filter(id => familyOfId(id) === family)
+    }
     // Every changed file's symbols are in the graph now, so a handler a file
     // imports can be pointed at its declaration (synthesis.ts). Before the
     // dispatch edges, which read the registrations these targets belong to.
@@ -849,32 +1076,34 @@ export async function indexProject(
      */
     const FILES_PER_COMMIT = 50
     let inBatch = 0
+    // What the import layer may call a module OUTSIDE the project: the walk's own
+    // package names against the packages this tree has installed (isExternalSpecifier).
+    const workspace = new Set(scan.packages)
+    const installed = installedPackages(root)
     graph.db.exec('BEGIN')
     try {
       for (const entry of pending) {
-        for (const edge of callEdges(
-          entry.parsed,
-          entry.fileId,
-          resolveOnce,
-          // The import layer, so a call to a name declared in several files links to
-          // the one this file actually imports.
-          specifier => resolveImport(entry.path, specifier, path => knownPaths.has(path)),
-        )) {
+        // The import layer: a call to a name declared in several files links to the
+        // one this file actually imports. The same resolver serves `imports` and the
+        // re-export edges below — a re-export and an import name a path in exactly the
+        // same way, so a star edge points at the node the rest of the graph uses
+        // instead of at a `./`-relative string that joins to nothing.
+        const modulePath = (specifier: string): string | undefined => resolveImport(entry.path, specifier, path => knownPaths.has(path))
+        // A name this file imports from a module outside the project is not linked
+        // to a same-named project declaration. Only for the languages whose imports
+        // are JS module specifiers.
+        const isExternal = JS_MODULE_LANGUAGES.has(languageForPath(entry.path)?.id ?? '')
+          ? (specifier: string): boolean => isExternalSpecifier(specifier, entry.path, workspace, installed)
+          : undefined
+        const resolveHere = resolveIn(entry.path)
+        for (const edge of callEdges(entry.parsed, entry.fileId, resolveHere, modulePath, isExternal)) {
           insertResolved(edge)
         }
         // Heritage and type references, resolved the same way calls are. These are
         // the edges that let `impact` answer "who implements this interface" and
         // "which signatures name this type" — neither is a call, so `callEdges`
         // could never produce them.
-        for (const edge of relationEdges(
-          entry.parsed,
-          entry.fileId,
-          resolveOnce,
-          // The same resolver `imports` uses: a re-export and an import name a path
-          // in exactly the same way, so a star edge points at the node the rest of the
-          // graph uses instead of at a `./`-relative string that joins to nothing.
-          specifier => resolveImport(entry.path, specifier, path => knownPaths.has(path)),
-        )) {
+        for (const edge of relationEdges(entry.parsed, entry.fileId, resolveHere, modulePath, isExternal)) {
           insertResolved(edge)
         }
         // The synthesized edges (synthesis.ts): this file's dispatches against the
@@ -884,7 +1113,7 @@ export async function indexProject(
         for (const edge of dispatchEdges(entry.parsed.calls, entry.fileId, registrationsOf)) insertResolved(edge)
         for (const edge of routeEdges(entry.registrations, (handler, path) => resolveHandler(graph.db, handler, path))) insertResolved(edge)
         for (const specifier of entry.parsed.imports) {
-          const target = resolveImport(entry.path, specifier.specifier, path => knownPaths.has(path))
+          const target = modulePath(specifier.specifier)
           if (target === undefined) continue
           insert.run(entry.fileId, fileNodeId(target), 'imports', specifier.line, 0, 'parse')
         }

@@ -79,8 +79,8 @@ function overviewText(files: string, callSites: string): string {
     'Covers the project\u2019s indexed files: imports, calls, extends/implements.',
     'Files nothing else imports \u2014 where a project starts (query one with `codegraph_context("<path>")`):',
     `- ${FILE} (starts at function ${OVERVIEW_SYMBOL}:1)`,
-    'Most-referenced symbols \u2014 read these first to learn the vocabulary (each id is directly queryable):',
-    `- ${FILE}#function:${OVERVIEW_SYMBOL} \u2014 ${callSites} call site(s)`,
+    'Most-referenced symbols in source files \u2014 read these first to learn the vocabulary (each id is directly queryable):',
+    `- ${FILE}#function:${OVERVIEW_SYMBOL} \u2014 ${callSites} source call site(s)`,
   ].join('\n')
 }
 const OVERVIEW_V1 = overviewText('~100', '~5')
@@ -567,8 +567,10 @@ test('usage-replay measures the resident context at session end: the last usage,
   const share = (chars: number): number => Math.round((chars / total) * 1000) / 10
   const est = (inR: number, inU: number): number => Math.round((inR / R_CHARS) * R_TOKENS + (inU / U_CHARS) * U_TOKENS)
   assert.deepEqual(resident.contributors, [
-    { name: 'run_code', chars: R_SIZES.runCode, sharePct: share(R_SIZES.runCode), tokensEstimate: est(R_SIZES.runCode, 0) },
+    // The overview fixture (512 chars) now outsizes the run_code result (500): its
+    // hub heading and row label both grew when the count became the source one.
     { name: 'codegraph overview', chars: OVERVIEW_V2.length, sharePct: share(OVERVIEW_V2.length), tokensEstimate: est(OVERVIEW_V2.length, 0) },
+    { name: 'run_code', chars: R_SIZES.runCode, sharePct: share(R_SIZES.runCode), tokensEstimate: est(R_SIZES.runCode, 0) },
     { name: 'human', chars: R_SIZES.human + 40, sharePct: share(R_SIZES.human + 40), tokensEstimate: est(R_SIZES.human, 40) },
     { name: 'injected', chars: R_SIZES.injected, sharePct: share(R_SIZES.injected), tokensEstimate: est(R_SIZES.injected, 0) },
     { name: 'compaction summary', chars: R_SIZES.summary, sharePct: share(R_SIZES.summary), tokensEstimate: est(R_SIZES.summary, 0) },
@@ -594,7 +596,7 @@ test('usage-replay measures the resident context at session end: the last usage,
   assert.match(text.stdout, new RegExp(`chars per resident token, per session: n=2 p50=${String(rRatio)} p90=${String(rRatio)} max=${String(rRatio)}`, 'u'))
   assert.match(text.stdout, /without a surface marker=0, replaces this reader could not place=0/u)
   assert.match(text.stdout, /tokens are measured; the split is by characters and converted at each session's own chars\/token/u)
-  assert.match(text.stdout, new RegExp(`contributors by chars \\(share of resident chars, estimated tokens\\): run_code ${String(R_SIZES.runCode)} \\(${String(share(R_SIZES.runCode))}%, ~${String(est(R_SIZES.runCode, 0))}\\)`, 'u'))
+  assert.match(text.stdout, new RegExp(`contributors by chars \\(share of resident chars, estimated tokens\\): codegraph overview ${String(OVERVIEW_V2.length)} \\(${String(share(OVERVIEW_V2.length))}%, ~${String(est(OVERVIEW_V2.length, 0))}\\), run_code ${String(R_SIZES.runCode)} \\(${String(share(R_SIZES.runCode))}%, ~${String(est(R_SIZES.runCode, 0))}\\)`, 'u'))
   for (const sentinel of SENTINELS) {
     assert.equal(text.stdout.includes(sentinel), false, `the text report echoes ${sentinel}`)
   }

@@ -13,12 +13,12 @@
 
 import { strict as assert } from 'node:assert'
 import { after, describe, it } from 'node:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { indexProject, isStale, projectChanged, scanProject } from '../src/indexer.ts'
+import { indexProject, installedPackages, isExternalSpecifier, isStale, languageFamily, projectChanged, scanProject } from '../src/indexer.ts'
 import { openGraph, readProjectMeta, graphStats, type ProjectMeta } from '../src/store.ts'
-import { importsOf } from '../src/query.ts'
+import { importsOf, projectOverview } from '../src/query.ts'
 import type { ParsedFile } from '../src/parse.ts'
 
 const scratch: string[] = []
@@ -964,5 +964,171 @@ describe('what the walk refuses, seen from the pass', () => {
 
     await indexProject(graph, root, stubParse)
     assert.equal(projectChanged(graph, root), false, 'and the check converges instead of looping')
+  })
+})
+
+describe('a name imported from a module outside the project', () => {
+  // The import layer falls back to a project-wide name match when a clause cannot
+  // name the declaring file. For a module the project does not contain — a test
+  // framework, a Node built-in — that fallback contradicts the clause: measured on a
+  // real 1728-file project, 20,161 calls became false edges, and `describe` was
+  // ranked the most-referenced symbol on 1,184 of them. The indexer decides what is
+  // CERTAINLY outside; parse.ts drops the edge. Everything uncertain keeps the
+  // fallback, because a dropped real caller is the worse failure.
+  const manifest = (name: string): string => JSON.stringify({ name })
+
+  /**
+   * The suite's stub plus one line kind: `IMPORT a,b FROM <specifier>` declares the
+   * file's import clause, which is what this rule is about.
+   */
+  function bindingParse(source: string, path: string): ParsedFile {
+    const parsed = stubParse(source, path)
+    const imports: ParsedFile['imports'] = []
+    source.split('\n').forEach((line, index) => {
+      const clause = /^IMPORT ([\w,]+) FROM (\S+)$/u.exec(line)
+      if (clause !== null) imports.push({ specifier: clause[2]!, line: index + 1, names: clause[1]!.split(',') })
+    })
+    return { ...parsed, imports }
+  }
+
+  /** Reference-edge counts into each declaration: name → "narrowed=<0|1>: <n>, …". */
+  function referencesInto(graph: ReturnType<typeof openGraph>): Map<string, string> {
+    const counts = new Map<string, string>()
+    for (const row of graph.db.prepare(
+      "SELECT s.name AS name, e.narrowed AS narrowed, COUNT(*) AS n FROM edges e JOIN symbols s ON s.id = e.dst WHERE e.kind = 'references' GROUP BY s.name, e.narrowed ORDER BY e.narrowed",
+    ).all() as { name: string, narrowed: number, n: number }[]) {
+      counts.set(row.name, `${counts.get(row.name) === undefined ? '' : `${counts.get(row.name)}, `}narrowed=${String(row.narrowed)}: ${String(row.n)}`)
+    }
+    return counts
+  }
+
+  it('scanProject lists the package names the project declares, and only what the walk admits', () => {
+    const { root } = project()
+    write(root, 'package.json', manifest('root-app'))
+    write(root, 'packages/ui/package.json', manifest('@acme/ui'))
+    write(root, 'packages/ui/src/index.ts', 'SYM ui')
+    write(root, 'node_modules/react/package.json', manifest('react'))
+    write(root, 'ignored/pkg/package.json', manifest('ignored-pkg'))
+    write(root, '.gitignore', 'ignored/\n')
+    write(root, 'broken/package.json', '{ not json')
+    write(root, 'nameless/package.json', JSON.stringify({ version: '1.0.0' }))
+    const scan = scanProject(root)
+    assert.deepEqual([...scan.packages].sort(), ['@acme/ui', 'root-app'])
+  })
+
+  it('isExternalSpecifier answers true only for what is certainly outside', () => {
+    const { root } = project()
+    write(root, 'package.json', manifest('app'))
+    write(root, 'packages/ui/package.json', manifest('@acme/ui'))
+    write(root, 'node_modules/vitest/package.json', manifest('vitest'))
+    write(root, 'packages/app/node_modules/@scope/lib/package.json', manifest('@scope/lib'))
+    const workspace = new Set(scanProject(root).packages)
+    const installed = installedPackages(root)
+    const external = (specifier: string, from = 'src/a.ts'): boolean => isExternalSpecifier(specifier, from, workspace, installed)
+    assert.equal(external('node:path'), true, 'a built-in by prefix')
+    assert.equal(external('fs'), true, 'a built-in by bare name')
+    assert.equal(external('fs/promises'), true, 'a built-in subpath')
+    assert.equal(external('vitest'), true, 'an installed package at the root')
+    assert.equal(external('vitest/expect'), true, 'a subpath of one')
+    assert.equal(external('@scope/lib', 'packages/app/src/x.ts'), true, 'installed where the sub-package can resolve it')
+    assert.equal(external('@scope/lib', 'src/x.ts'), false, 'but not from outside that package')
+    assert.equal(external('@acme/ui'), false, 'a workspace package is in the project, though it is linked into node_modules too')
+    assert.equal(external('./rel'), false, 'relative: the import layer resolves it')
+    assert.equal(external('#imports'), false, 'a subpath import of the package itself')
+    assert.equal(external('@/lib/ui'), false, 'a path alias is not placed')
+    assert.equal(external('not-installed'), false, 'not installed is not proof of anything')
+    assert.equal(external(''), false)
+    assert.equal(external('vitest', 'a.ts'), true, 'a file at the root resolves the root node_modules')
+  })
+
+  it('a node_modules link to a source directory is the project, not an installed package', () => {
+    // pnpm, yarn and npm all link workspace packages into node_modules. When the
+    // manifest that would have named the package was unreadable, the link is what
+    // keeps the project's own references to it: the real path is a source
+    // directory, with no node_modules segment on the way.
+    const { root } = project()
+    write(root, 'package.json', manifest('app'))
+    write(root, 'packages/ui/package.json', '{ not json')
+    write(root, 'packages/ui/src/index.ts', 'SYM other')
+    mkdirSync(join(root, 'node_modules', '@acme'), { recursive: true })
+    symlinkSync(join(root, 'packages', 'ui'), join(root, 'node_modules', '@acme', 'ui'), 'junction')
+    write(root, 'node_modules/vitest/package.json', manifest('vitest'))
+    const workspace = new Set(scanProject(root).packages)
+    assert.deepEqual([...workspace], ['app'], 'the broken manifest names nothing')
+    const installed = installedPackages(root)
+    assert.equal(isExternalSpecifier('@acme/ui', 'src/a.ts', workspace, installed), false, 'linked into the project')
+    assert.equal(isExternalSpecifier('vitest', 'src/a.ts', workspace, installed), true, 'a plain installed package')
+  })
+
+  it('a project without a node_modules places nothing outside', () => {
+    const { root } = project()
+    write(root, 'package.json', manifest('app'))
+    const installed = installedPackages(root)
+    assert.equal(installed('src/a.ts', 'react'), false)
+    assert.equal(isExternalSpecifier('react', 'src/a.ts', new Set(), installed), false)
+  })
+
+  it('drops the edge for a name bound outside, and leaves every other layer as it was', async () => {
+    const { root, graph } = project()
+    write(root, 'package.json', manifest('app'))
+    write(root, 'packages/ui/package.json', manifest('@acme/ui'))
+    write(root, 'packages/ui/src/index.ts', 'SYM other')
+    write(root, 'src/util.ts', 'SYM describe\nSYM expect\nSYM join')
+    write(root, 'node_modules/vitest/package.json', manifest('vitest'))
+    write(root, 'node_modules/json/package.json', manifest('json'))
+    write(root, 'src/a.test.ts', [
+      'IMPORT describe FROM vitest',
+      'IMPORT expect FROM @acme/ui',
+      'CALL describe',
+      'CALL expect',
+      'CALL join',
+    ].join('\n'))
+    write(root, 'src/b.ts', 'IMPORT join FROM node:path\nCALL join')
+    write(root, 'src/c.ts', 'IMPORT join FROM not-installed\nCALL join')
+    write(root, 'src/d.ts', 'IMPORT describe FROM vitest\nSYM describe\nCALL describe')
+    write(root, 'src/e.py', 'IMPORT json FROM json\nCALL json')
+    write(root, 'src/util2.py', 'SYM json')
+    await indexProject(graph, root, bindingParse)
+    const into = referencesInto(graph)
+    // `describe`: a.test.ts's call is bound to vitest → no edge; d.ts declares its own →
+    // its edge goes to that declaration, narrowed. Nothing reaches util.ts's.
+    assert.equal(into.get('describe'), 'narrowed=1: 1', 'only the same-file edge, to the file-local declaration')
+    const describeRows = graph.db.prepare("SELECT e.src AS src, e.dst AS dst FROM edges e JOIN symbols s ON s.id = e.dst WHERE e.kind = 'references' AND s.name = 'describe'").all() as { src: string, dst: string }[]
+    // The stub's calls have no enclosing declaration, so the edge starts at the file.
+    assert.deepEqual(describeRows.map(row => [row.src, row.dst]), [['file:src/d.ts', 'src/d.ts#function:describe']])
+    // `expect`: a workspace package is not placed outside → the project-wide match stays.
+    assert.equal(into.get('expect'), 'narrowed=0: 1')
+    // `join`: no clause (a.test.ts) and an uninstalled package (c.ts) fall through;
+    // node:path (b.ts) is dropped.
+    assert.equal(into.get('join'), 'narrowed=0: 2')
+    // The rule is about JS module specifiers: a Python `import json` keeps its
+    // fallback even though an npm package of that name is installed.
+    assert.equal(into.get('json'), 'narrowed=0: 1')
+    // And the overview no longer learns its vocabulary from a test framework's
+    // globals: util.ts's `describe` has no reference left to be ranked on (d.ts's
+    // own, really referenced once, is a hub of this fixture).
+    assert.equal(projectOverview(graph, 10).hubs.some(hub => hub.symbol.id === 'src/util.ts#function:describe'), false)
+  })
+
+  it('matches a name project-wide only inside its language family', async () => {
+    // Measured on a real 17,112-file project: 321,990 of its 4,154,811 reference
+    // edges crossed a family, 288,223 of them TypeScript onto Swift declarations,
+    // and a Python `class Error` was the most-referenced symbol on 23,556 of them.
+    // A `.cpp` calling a header's function is the case the family must keep.
+    const { root, graph } = project()
+    write(root, 'channel.py', 'SYM Error')
+    write(root, 'channel2.py', 'CALL Error')
+    write(root, 'util.h', 'SYM join')
+    write(root, 'main.cpp', 'CALL join')
+    write(root, 'app.ts', 'CALL Error\nCALL join')
+    await indexProject(graph, root, stubParse)
+    const into = referencesInto(graph)
+    assert.equal(into.get('Error'), 'narrowed=0: 1', 'only the Python file links to the Python class')
+    assert.equal(into.get('join'), 'narrowed=0: 1', 'the header keeps its C-family caller; the TypeScript call is not one')
+    assert.equal(languageFamily('tsx'), 'js')
+    assert.equal(languageFamily('vue'), 'js')
+    assert.equal(languageFamily('cpp'), 'c')
+    assert.equal(languageFamily('objc'), 'c')
+    assert.equal(languageFamily('python'), 'python')
   })
 })

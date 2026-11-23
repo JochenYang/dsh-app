@@ -329,19 +329,24 @@ export function renderOverviewContext(
     }
   }
 
-  // HUBS BY RUNG, not by count. `overview.hubs` arrives ordered by reference
-  // count descending, which is exactly what must NOT reach the text: two symbols
-  // at 34 and 35 swap places when one gains a call site, and under two significant
-  // digits a count crossing a ten (`~34` → `~35`, `9` → `10`) changed the row
-  // itself. Measured on 234 real sessions: 138 of the 274 re-pushed diffs were hub
-  // rows, most of them a reorder or a one-digit change. Snapping every candidate to
-  // the same ladder the headline uses, then ordering by rung descending and id
-  // ascending, makes the set move only when a symbol CROSSES a rung — and makes the
-  // order independent of the counts within one. The candidates are still the
-  // most-referenced ones the query found; this only decides which of them are
-  // named, and in what order.
+  // HUBS BY RUNG, not by count. `overview.hubs` arrives ordered by references from
+  // source files descending (query.ts `projectOverview`: the total is dominated by
+  // tests on a real project, which ranked a fake-message builder first), which is
+  // exactly what must NOT reach the text: two symbols at 34 and 35 swap places when
+  // one gains a call site, and under two significant digits a count crossing a ten
+  // (`~34` → `~35`, `9` → `10`) changed the row itself. Measured on 234 real
+  // sessions: 138 of the 274 re-pushed diffs were hub rows, most of them a reorder
+  // or a one-digit change. Snapping every candidate to the same ladder the headline
+  // uses, then ordering by rung descending and id ascending, makes the set move only
+  // when a symbol CROSSES a rung — and makes the order independent of the counts
+  // within one. The candidates are still the most-referenced ones the query found;
+  // this only decides which of them are named, and in what order.
+  //
+  // The count on the row is the SOURCE one, labelled: it is what the list is ranked
+  // by, and `codegraph_impact` on the same id answers with the total, so the two
+  // numbers a reader may see are each named for what they count.
   const hubs = overview.hubs
-    .map(hub => ({ hub, rung: ladderRung(hub.references) }))
+    .map(hub => ({ hub, rung: ladderRung(hub.sourceReferences) }))
     .sort((a, b) => (b.rung - a.rung) || (a.hub.symbol.id < b.hub.symbol.id ? -1 : a.hub.symbol.id > b.hub.symbol.id ? 1 : 0))
     .slice(0, Math.min(budget, MAX_HUBS_CAP))
     .map(entry => entry.hub)
@@ -352,9 +357,18 @@ export function renderOverviewContext(
     // two declarations share it (and `projectOverview` admits names declared twice).
     // The id already contains kind, path and name, so it REPLACES that text rather
     // than being appended to it: copyable and no longer than what it replaces.
-    lines.push('Most-referenced symbols \u2014 read these first to learn the vocabulary (each id is directly queryable):')
+    //
+    // A hub nothing in source references prints its TOTAL, said to be tests only:
+    // "0 source call site(s)" on a row headed "most referenced" contradicts itself,
+    // and in a project made of tests every row would say it.
+    const anySource = hubs.some(hub => hub.sourceReferences > 0)
+    lines.push(anySource
+      ? 'Most-referenced symbols in source files \u2014 read these first to learn the vocabulary (each id is directly queryable):'
+      : 'Most-referenced symbols, referenced from tests only \u2014 read these first all the same (each id is directly queryable):')
     for (const hub of hubs) {
-      lines.push(`- ${hub.symbol.id} \u2014 ${magnitude(hub.references)} call site(s)`)
+      lines.push(hub.sourceReferences > 0
+        ? `- ${hub.symbol.id} \u2014 ${magnitude(hub.sourceReferences)} source call site(s)`
+        : `- ${hub.symbol.id} \u2014 ${magnitude(hub.references)} call site(s), tests only`)
     }
   }
 

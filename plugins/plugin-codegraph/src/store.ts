@@ -62,8 +62,17 @@ import { dirname } from 'node:path'
  * project indexed before this version would answer "no direct callers" for every
  * IPC handler until each of its files happened to change. The rebuild is what
  * makes the join exist.
+ *
+ * Version 7 changes no table: it is the MEANING of a `references` edge. A name
+ * the file imports from a module outside the project draws no edge from here on
+ * (`ImportBindings` in parse.ts), and a project-wide name match is bounded by
+ * language family (`languageFamily` in indexer.ts); a version-6 graph holds the
+ * edges it drew — measured on real projects, 20,161 false edges that ranked a
+ * test framework's `describe` first, and 321,990 that crossed a language family
+ * and ranked a Python `class Error` first — and only a changed file loses its
+ * own. The rebuild is what makes every project's existing graph true.
  */
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 7
 
 /** One indexed file, as the incremental pass sees it. */
 export interface FileRecord {

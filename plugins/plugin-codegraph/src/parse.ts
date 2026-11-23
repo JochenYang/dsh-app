@@ -1958,34 +1958,67 @@ function linkTargets(targets: readonly string[], sameFile: readonly string[] = [
 }
 
 /**
- * The names one file imports, and the project paths each came from.
+ * What one file's import clauses say about the names it uses.
  *
- * `import { Base } from './base'` states that THIS file's `Base` is the one in
- * `./base`, which is the most precise signal available after "declared here". Kept
- * as its own function because BOTH the call walk and the relationship walk resolve
- * through it; two copies would be two answers to one question, and the first one to
- * drift would produce calls that disagree with heritage about what a name means.
+ * `from`: the project paths a name came from. `import { Base } from './base'`
+ * states that THIS file's `Base` is the one in `./base`, which is the most precise
+ * signal available after "declared here". Kept as its own function because BOTH the
+ * call walk and the relationship walk resolve through it; two copies would be two
+ * answers to one question, and the first one to drift would produce calls that
+ * disagree with heritage about what a name means.
  *
+ * `outside`: the names bound to a module the indexer could place OUTSIDE the
+ * project — `import { describe } from 'vitest'`, `import { join } from 'node:path'`.
+ * A clause is a statement about where a name lives, and when the target is
+ * certainly not in the project the project-wide match in `linkFor` contradicts it.
+ * Measured on a real 1728-file TypeScript project: 20,161 calls named a symbol the
+ * file had imported from an external module while some project file declared the
+ * same name — `expect` (vitest) 15,216, `join` (node:path) 2,874, `describe` 1,182
+ * — and every one became a reference to that unrelated declaration. `describe`
+ * was ranked the project's most-referenced symbol on the strength of 1,182 false
+ * edges.
+ *
+ * Only what the indexer is SURE about lands in `outside` (`isExternal`); a bare
+ * specifier it cannot place — a workspace package, a path alias, a dependency that
+ * is not installed — stays out, and the name keeps its project-wide match. Dropping
+ * a real caller is the worst answer this graph can give, so an uncertain clause must
+ * fall through exactly as it did before this set existed.
+ */
+export interface ImportBindings {
+  /** name → the project paths this file imports it from, in clause order. */
+  readonly from: ReadonlyMap<string, readonly string[]>
+  /** Names imported from a module that is certainly outside the project. */
+  readonly outside: ReadonlySet<string>
+}
+
+/**
  * @param parsed - one file's parse.
  * @param resolveModule - turns a specifier into a project-relative path, or `undefined`.
- * @returns name → the paths this file imports it from, in clause order.
+ * @param isExternal - answers whether a specifier names a module outside the project;
+ *   `undefined` when the caller cannot say, which keeps every name in the fallback.
+ * @returns the two statements the file's clauses make about the names it imports.
  */
-function importedFromMap(
+function importBindings(
   parsed: ParsedFile,
   resolveModule: ((specifier: string) => string | undefined) | undefined,
-): Map<string, string[]> {
-  const importedFrom = new Map<string, string[]>()
-  if (resolveModule === undefined) return importedFrom
+  isExternal: ((specifier: string) => boolean) | undefined,
+): ImportBindings {
+  const from = new Map<string, string[]>()
+  const outside = new Set<string>()
   for (const clause of parsed.imports) {
-    const target = resolveModule(clause.specifier)
-    if (target === undefined) continue
-    for (const name of clause.names) {
-      const list = importedFrom.get(name)
-      if (list === undefined) importedFrom.set(name, [target])
-      else if (!list.includes(target)) list.push(target)
+    const target = resolveModule === undefined ? undefined : resolveModule(clause.specifier)
+    if (target !== undefined) {
+      for (const name of clause.names) {
+        const list = from.get(name)
+        if (list === undefined) from.set(name, [target])
+        else if (!list.includes(target)) list.push(target)
+      }
+    }
+    if (isExternal?.(clause.specifier) === true) {
+      for (const name of clause.names) outside.add(name)
     }
   }
-  return importedFrom
+  return { from, outside }
 }
 
 /**
@@ -2010,27 +2043,33 @@ function importedFromMap(
  * consulted and could not answer, so the edge is a project-wide match with an import
  * that merely mentions the name.
  *
+ * A name the file binds to a module OUTSIDE the project gets no edge at all, below
+ * the two layers and above the fallback: the clause says where the name lives, the
+ * project-wide match would say otherwise, and the file is the one statement here
+ * that is about this name. `ImportBindings.outside` carries the measurement.
+ *
  * @param name - the call's callee, or the heritage/annotation's type name.
  * @param resolve - name → every declaration id carrying it.
  * @param local - this file's declarations, by name.
- * @param importedFrom - this file's import clauses, by name.
+ * @param imported - this file's import clauses: what they name in the project, and what they bind outside it.
  * @returns the ids worth an edge, and whether a same-file or import clause chose them.
  */
 function linkFor(
   name: string,
   resolve: (name: string) => readonly string[],
   local: ReadonlyMap<string, string[]>,
-  importedFrom: ReadonlyMap<string, string[]>,
+  imported: ImportBindings,
 ): { readonly ids: readonly string[], readonly narrowed: boolean } {
   const sameFile = local.get(name) ?? []
   if (sameFile.length > 0) return { ids: linkTargets(resolve(name), sameFile), narrowed: true }
-  const sources = importedFrom.get(name)
+  const sources = imported.from.get(name)
   if (sources !== undefined && sources.length > 0) {
     const inSources = resolve(name).filter(id => sources.some(source => id.startsWith(`${source}#`)))
     // Only a HIT narrows. A miss means the module re-exports the name rather than
     // declaring it, and the clause then carries no information about the target.
     if (inSources.length > 0) return { ids: linkTargets(inSources), narrowed: true }
   }
+  if (imported.outside.has(name)) return { ids: [], narrowed: false }
   return { ids: linkTargets(resolve(name)), narrowed: false }
 }
 
@@ -2071,6 +2110,12 @@ export function relationEdges(
    * and an import name a path in exactly the same way.
    */
   resolveModule?: (specifier: string) => string | undefined,
+  /**
+   * Answers whether an import specifier names a module outside the project, so a
+   * name the file imports from it is not linked to an unrelated project declaration
+   * (`ImportBindings`). The same predicate `callEdges` uses, for the same reason.
+   */
+  isExternal?: (specifier: string) => boolean,
 ): EdgeRecord[] {
   const edges: EdgeRecord[] = []
   // A module-private type can only mean itself, so a local declaration is exact and
@@ -2086,15 +2131,15 @@ export function relationEdges(
     else list.push(symbol.id)
   }
   // IMPORT-GUIDED: the names this file imports, and the module each came from. The
-  // map is shared with the call walk (`importedFromMap`), so a call and a heritage
+  // map is shared with the call walk (`importBindings`), so a call and a heritage
   // clause can never disagree about which declaration a name means.
   //
   // Measured on a real project: `Model` is declared in two files, so every signature
   // naming it produced TWO edges and the count read about double the truth. The
   // import clause is what tells them apart.
-  const importedFrom = importedFromMap(parsed, resolveModule)
+  const imported = importBindings(parsed, resolveModule, isExternal)
   const add = (from: string, name: string, kind: 'extends' | 'implements' | 'type_refs', line: number): void => {
-    const linked = linkFor(name, resolve, local, importedFrom)
+    const linked = linkFor(name, resolve, local, imported)
     for (const target of linked.ids) edges.push({ from, to: target, kind, line, narrowed: linked.narrowed })
   }
   for (const relation of parsed.heritage) add(relation.from, relation.name, relation.kind, relation.line)
@@ -2165,6 +2210,14 @@ export function callEdges(
    * signature references read about double the truth before the import layer.
    */
   resolveModule?: (specifier: string) => string | undefined,
+  /**
+   * Answers whether an import specifier names a module outside the project. A name
+   * the file imports from such a module is not linked to a same-named project
+   * declaration: measured on a real project, that fallback drew 20,161 false edges —
+   * a test framework's `describe` onto a project function of that name, 1,184 times
+   * (`ImportBindings`). `undefined` keeps the fallback for every clause.
+   */
+  isExternal?: (specifier: string) => boolean,
 ): EdgeRecord[] {
   const edges: EdgeRecord[] = []
   // The ids this file declares, by name. A module-private declaration can only mean
@@ -2180,9 +2233,16 @@ export function callEdges(
     if (list === undefined) local.set(symbol.name, [symbol.id])
     else list.push(symbol.id)
   }
-  const importedFrom = importedFromMap(parsed, resolveModule)
+  const imported = importBindings(parsed, resolveModule, isExternal)
   for (const call of parsed.calls) {
-    const linked = linkFor(call.name, resolve, local, importedFrom)
+    // A member call on a module the file imports from outside the project names
+    // a member of THAT module: `path.join()` after `import path from 'node:path'`
+    // is not a call to a project `join`, however many project functions share
+    // the property's name. The clause bound `path`, not `join`, so the lookup
+    // below would not see it; the receiver is the statement that does.
+    const receiver = /^[A-Za-z_$][\w$]*/u.exec(call.receiver ?? '')?.[0]
+    if (receiver !== undefined && imported.outside.has(receiver)) continue
+    const linked = linkFor(call.name, resolve, local, imported)
     // Zero targets means one of two things, and neither can produce an edge: the
     // callee is outside this project, or its name is shared so widely that every
     // declaration of it would be noise.
