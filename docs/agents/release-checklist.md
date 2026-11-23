@@ -15,6 +15,11 @@ declared — `node scripts/check-changeset.mjs --base <last-tag>` lists the
 releasable diff — plus the delivery-path walk for anything that predates the
 gate:
 
+- [ ] **The push's own CI run is green before the runtime is dispatched.** The
+      runtime cells build plugins and run the four artifact gates, not the plugin
+      test suites, so a red suite ships straight into the runtime (v0.19.9: two
+      Linux-only memory tests were red in CI while the first dispatch ran in
+      parallel). `gh run watch <ci-run-id> --exit-status` first, then dispatch.
 - [ ] **Does a user on the previous version actually RECEIVE this change?** Walk
       the delivery path, do not assume it:
   - a change in `src/` (the shell) → a new `vX.Y.Z` tag. Nothing else delivers it.
