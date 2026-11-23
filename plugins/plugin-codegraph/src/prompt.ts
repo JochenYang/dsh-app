@@ -20,6 +20,14 @@
  * row's symbol id goes to `codegraph_context(symbol)`. A name would not do for the
  * hub rows: two declarations can share one, and the selector then refuses it.
  *
+ * STABLE UNDER EDITS is the third property, after bounded and complete enough. The
+ * kernel appends a snapshot whenever the whole text changes and retires nothing
+ * (`magnitude` carries the measurement), so every row here is built to stay
+ * byte-identical across an edit that does not change the project's SHAPE: counts
+ * snap to a rung, hubs are ordered by rung rather than by count, entry rows carry
+ * no line number, and the directory layout is another rung. What does move is
+ * worth re-reading — a symbol crossing a rung, a file entering the entry list.
+ *
  * @module @dsh-app/plugin-codegraph/prompt
  */
 
@@ -32,9 +40,17 @@ const MIN_ENTRIES = 5
 const MIN_HUBS = 5
 /** How many languages the context names, whatever the size. */
 const MAX_LANGUAGES = 3
+/** How many top-level directories the layout line names, whatever the size. */
+const MAX_LAYOUT = 5
 /** The ceiling, so a huge project cannot spend the whole context budget on this. */
 const MAX_ENTRIES_CAP = 12
 const MAX_HUBS_CAP = 12
+
+/** One top-level directory and how many indexed files it holds, as `projectLayout` counts them. */
+export interface LayoutEntry {
+  readonly dir: string
+  readonly files: number
+}
 
 /**
  * How many rows this project's shape is worth.
@@ -59,7 +75,52 @@ function rowBudget(files: number): number {
 }
 
 /**
- * A count as a coarse magnitude (`~360`, `~5.8k`), or the exact value below ten.
+ * The 1–2–5 ladder a {@link magnitude} snaps to: three points per decade, from 5 up.
+ *
+ * A closed list, not a formula, so the table IS the spec a test can read: a value is
+ * rounded to whichever rung is nearest in LOG distance, and a value exactly between
+ * two rungs (their geometric mean) takes the LOWER one, so a boundary value never
+ * flips to the larger rung on one side of an edit and back on the other.
+ */
+const LADDER: readonly number[] = [
+  5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000,
+  100_000, 200_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000,
+  50_000_000, 100_000_000, 200_000_000, 500_000_000, 1_000_000_000, 2_000_000_000,
+]
+
+/**
+ * Which ladder rung a count belongs to: the bucket every magnitude in this block
+ * is built from.
+ *
+ * One function for the headline, the hub rows and the layout line, deliberately —
+ * one rounding rule for the whole block, so two counts cannot disagree about what
+ * "~50" means, and so a hub can be ORDERED by the same bucket its row prints.
+ * Non-positive and non-finite values are their own bucket, 0.
+ */
+function ladderRung(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0
+  // Below 5 the value IS its rung, exactly as `magnitude` prints it: a hub with 3
+  // call sites sorts below one with 4, and neither shares a rung with `~5`.
+  if (value < 5) return value
+  // Nearest in log space. For an adjacent pair (a, b) the geometric mean is
+  // sqrt(a*b); a value at or below it belongs to a, above it to b — "at" takes
+  // the LOWER rung, so a value sitting on the boundary cannot flip upward on one
+  // side of an edit and back on the other. Compared as squares (v*v <= a*b)
+  // because the mean of two integers is usually not an integer, and sqrt would
+  // make "exactly at" a floating-point question.
+  const last = LADDER[LADDER.length - 1]!
+  for (let index = 0; index < LADDER.length - 1; index++) {
+    const lower = LADDER[index]!
+    const upper = LADDER[index + 1]!
+    if (value < upper) {
+      return value * value <= lower * upper ? lower : upper
+    }
+  }
+  return last
+}
+
+/**
+ * A count snapped to a 1–2–5 rung (`~500`, `~20k`), or the exact value below 5.
  *
  * NOT COSMETIC — this is what keeps the block from being re-pushed on every edit.
  *
@@ -76,26 +137,35 @@ function rowBudget(files: number): number {
  * session carried 438 snapshots (1.37 MB of text, 66% of everything in it) and 435
  * of those carried this block with 351 DIFFERENT versions, differing only in
  * `304 files, 4881 symbols, 17046 edges` becoming `305 files, 4893 symbols, 17081
- * edges` after a single edit. The exact numbers are one `codegraph_context` call
- * away — the call this block exists to encourage — so a bucket costs a reader
- * nothing and saves a full snapshot per edit.
+ * edges` after a single edit.
  *
- * Two significant digits: `356` → `~360`, `5750` → `~5.8k`, `19888` → `~20k`. A
- * bucket moves only when the project really changed size, which is the moment the
- * number is worth reading.
+ * Two significant digits was the first fix (`356` → `~360`, `5750` → `~5.8k`) and it
+ * was not enough. Measured on 234 real sessions afterwards: 35 sessions re-pushed
+ * the block 354 times, 280 of them because THIS text changed, and the headline's
+ * counts account for 229 of the 274 recoverable diffs — `~440 edges` became `~450`
+ * after one edit, because at the tens scale two significant digits move on every
+ * unit. The hub rows cost 138 more (`~34` → `~35`, `9` → `10`, or a re-order when
+ * two counts swapped), for roughly 51 million tokens re-read in total.
+ *
+ * So a rung, not a precision: `430` → `~500`, `7700` → `~10k`, `27000` → `~20k`.
+ * Between 5 and 10 there is no rung but the endpoints, so an edge count at that
+ * size is read as `5` or `10`; and the only counts that still move per edit are the
+ * ones a reader cannot act on anyway. The cost is a coarser reading, and the exact
+ * number is one `codegraph_context` call away — the call this block exists to
+ * encourage — so a bucket costs a reader nothing and saves a full snapshot per edit.
+ *
+ * Below 5 the exact value IS the bucket: a project with 3 files is not
+ * approximated, and a hub with 0–4 call sites is a statement the ladder cannot make.
  *
  * @param value - a non-negative count.
  * @returns the rendered magnitude.
  */
 function magnitude(value: number): string {
   if (!Number.isFinite(value) || value < 0) return String(value)
-  // Below ten the exact value IS the bucket: a project with 3 files is not
-  // approximated by "~3", and these counts never churn at that size.
-  if (value < 10) return String(value)
-  const [unit, suffix] = value >= 1_000_000 ? [1_000_000, 'M'] : value >= 1_000 ? [1_000, 'k'] : [1, '']
-  // `toPrecision(2)` on the scaled value, then back through Number so `9.0`
-  // prints as `9` rather than a trailing zero no reader needs.
-  return `~${String(Number((value / unit).toPrecision(2)))}${suffix}`
+  if (value < 5) return String(value)
+  const rung = ladderRung(value)
+  const [unit, suffix] = rung >= 1_000_000 ? [1_000_000, 'M'] : rung >= 1_000 ? [1_000, 'k'] : [1, '']
+  return `~${String(rung / unit)}${suffix}`
 }
 
 /** The queue states this block answers to. `unindexed` never reaches it. */
@@ -109,9 +179,23 @@ export interface OverviewInputs {
   readonly failure: string | undefined
   /** The shape, when a graph could be read. */
   readonly overview: ProjectOverview | undefined
+  /**
+   * The top-level directories and their file counts, from `projectLayout(graph)`.
+   *
+   * Separate from `overview` rather than a field on it: `ProjectOverview` is also
+   * what `codegraph_context` returns to the model, and a directory histogram is a
+   * sentence for the prompt, not a tool-output row. Optional so a caller that has
+   * not read the graph yet contributes no layout line instead of failing.
+   */
+  readonly layout?: readonly LayoutEntry[] | undefined
   /** What the last pass recorded about itself. */
   readonly truncated: boolean
   readonly removalSkipped: boolean
+  /**
+   * Files the last pass skipped as generated output. Optional only for callers
+   * built before it existed; the provider passes what the graph recorded.
+   */
+  readonly generatedSkipped?: number | undefined
 }
 
 /**
@@ -163,8 +247,8 @@ export function overviewContextText(inputs: OverviewInputs): string {
     return `Code graph: the last index pass for this project FAILED, so no shape is reported here.${reason} Treat any answer from \`codegraph_*\` with suspicion until the code graph settings page re-indexes it.`
   }
   const freshness: Freshness = inputs.state === 'stale' ? 'stale' : 'current'
-  const note = freshnessNote(freshness, inputs.truncated, inputs.removalSkipped)
-  return renderOverviewContext(inputs.overview, freshness, note)
+  const note = freshnessNote(freshness, inputs.truncated, inputs.removalSkipped, inputs.generatedSkipped ?? 0)
+  return renderOverviewContext(inputs.overview, freshness, note, inputs.layout ?? [])
 }
 
 /**
@@ -173,12 +257,15 @@ export function overviewContextText(inputs: OverviewInputs): string {
  * @param overview - the project's shape, or undefined when it has no graph yet.
  * @param freshness - how current the graph is.
  * @param note - the freshness sentence to carry, when there is one.
+ * @param layout - the top-level directories (`projectLayout`), already counted
+ *   per directory; bucketing, ordering and the cut happen here. Defaults to none.
  * @returns the text, or '' to contribute nothing.
  */
 export function renderOverviewContext(
   overview: ProjectOverview | undefined,
   freshness: 'current' | 'stale' | 'indexing',
   note: string | undefined,
+  layoutRows: readonly LayoutEntry[] = [],
 ): string {
   // An indexing graph answers from an empty shape, and "0 files" would be a
   // statement about the project rather than about the pass. Saying nothing is
@@ -200,6 +287,22 @@ export function renderOverviewContext(
   // one line and not a section.
   lines.push('Covers the project\u2019s indexed files: imports, calls, extends/implements, signature type references, and the docs that name a symbol. Names are resolved statically (no type inference, no dynamic dispatch), so a dependency it cannot name may be missing — read the source and the tests before changing shared code.')
 
+  // WHERE IT LIVES, in one line. The entry list names files and the hub list names
+  // symbols, and neither says which directories hold the project — so "is this a
+  // `src/` with a `plugins/` beside it, or a flat repo" was still a listing
+  // question. Counts are rungs for the same reason the headline's are: `plugins
+  // ~500, test ~100` survives the edit that adds a file, and the order is rung
+  // descending then name ascending, so two directories in one rung never swap on
+  // a count. Sorted and cut HERE rather than in `projectLayout`, so the rule has
+  // exactly one home and the query stays a plain count per directory.
+  const layout = layoutRows
+    .map(entry => ({ dir: entry.dir, rung: ladderRung(entry.files) }))
+    .sort((a, b) => (b.rung - a.rung) || (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0))
+    .slice(0, MAX_LAYOUT)
+  if (layout.length >= 2) {
+    lines.push(`Top-level layout (indexed files): ${layout.map(entry => `${entry.dir} ${magnitude(entry.rung)}`).join(', ')}.`)
+  }
+
   // Sized to the project, not fixed: five named a tenth of a monorepo and more
   // than a small library has. See `rowBudget`.
   const budget = rowBudget(overview.files)
@@ -210,19 +313,38 @@ export function renderOverviewContext(
     // without spending a single extra token on a selector.
     lines.push('Files nothing else imports \u2014 where a project starts, or a library\u2019s public surface (query one with `codegraph_context("<path>")`):')
     for (const entry of entries) {
-      // The LINE, because "which file" is not the question that was asked. Measured in a
-      // real session: the model read this block, saw `apps/api/src/main.ts (starts at
-      // function bootstrap)`, then ran glob plus four reads anyway — and cited
-      // `main.ts:34` in its answer. It wanted the line, and paying five tool calls for a
-      // number this block already knew is exactly the cost the block exists to remove.
-      const head = entry.symbol === undefined
-        ? ''
-        : ` (starts at ${entry.symbol.kind} ${entry.symbol.name}:${String(entry.symbol.line)})`
+      // NO LINE NUMBER, by a decision that reversed an earlier one. The line used
+      // to be here for a measured reason: a model that read `(starts at function
+      // bootstrap)` ran glob plus four reads anyway and cited `main.ts:34` — it
+      // wanted the number, and five tool calls for it is the cost this block exists
+      // to remove. But the line moves whenever a line is inserted ABOVE it, and
+      // that moved the whole snapshot: measured on 234 real sessions, the entry
+      // rows accounted for 82 of the 274 re-pushed diffs, most of them a line
+      // shift and nothing else. One `codegraph_context("<path>")` returns the
+      // outline with every line in it, so the number is one call away rather
+      // than five — and the block stops re-sending itself every time someone
+      // adds an import.
+      const head = entry.symbol === undefined ? '' : ` (starts at ${entry.symbol.kind} ${entry.symbol.name})`
       lines.push(`- ${entry.path}${head}`)
     }
   }
 
-  const hubs = overview.hubs.slice(0, Math.min(budget, MAX_HUBS_CAP))
+  // HUBS BY RUNG, not by count. `overview.hubs` arrives ordered by reference
+  // count descending, which is exactly what must NOT reach the text: two symbols
+  // at 34 and 35 swap places when one gains a call site, and under two significant
+  // digits a count crossing a ten (`~34` → `~35`, `9` → `10`) changed the row
+  // itself. Measured on 234 real sessions: 138 of the 274 re-pushed diffs were hub
+  // rows, most of them a reorder or a one-digit change. Snapping every candidate to
+  // the same ladder the headline uses, then ordering by rung descending and id
+  // ascending, makes the set move only when a symbol CROSSES a rung — and makes the
+  // order independent of the counts within one. The candidates are still the
+  // most-referenced ones the query found; this only decides which of them are
+  // named, and in what order.
+  const hubs = overview.hubs
+    .map(hub => ({ hub, rung: ladderRung(hub.references) }))
+    .sort((a, b) => (b.rung - a.rung) || (a.hub.symbol.id < b.hub.symbol.id ? -1 : a.hub.symbol.id > b.hub.symbol.id ? 1 : 0))
+    .slice(0, Math.min(budget, MAX_HUBS_CAP))
+    .map(entry => entry.hub)
   if (hubs.length > 0) {
     // The full symbol ID leads each row, so "expand one of these" is an instruction
     // a reader can follow by copying. It used to say "pass any id above" while the

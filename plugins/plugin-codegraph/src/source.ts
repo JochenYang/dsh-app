@@ -26,6 +26,7 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { oneRow } from './store.ts'
+import { SWITCH_ENV, switchIsOn } from './switches.ts'
 
 /** A requested slice: where it starts, where the declaration ends, and its bound. */
 export interface SourceRequest {
@@ -89,11 +90,11 @@ export type SourceResult =
  * A kill switch rather than a config row: the risky half of this module is the one
  * filesystem read, and turning it off must not require a code change on a user's
  * machine. Set `DSH_APP_CODEGRAPH_SOURCE=0` to answer without source, exactly as
- * the tools did before it existed.
+ * the tools did before it existed. The convention it follows lives in
+ * `switches.ts`, beside the plugin's other two switches.
  */
 export function sourceEnabled(): boolean {
-  const value = process.env.DSH_APP_CODEGRAPH_SOURCE
-  return value !== '0' && value !== 'false'
+  return switchIsOn(process.env, SWITCH_ENV.source)
 }
 
 /**

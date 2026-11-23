@@ -171,6 +171,29 @@ describe('apply', () => {
     assert.equal(required('codegraph_impact').includes('symbol'), true)
   })
 
+  it('declares depth and detail as optional, each with the values it accepts', () => {
+    // Both are additions to a tool the model already calls: an omitted one must
+    // mean the previous behaviour (one level of callers; the level the file size
+    // picks), not an error. The enum on `detail` is the contract the execute
+    // reads — a value outside it is refused before any code runs.
+    //
+    // The registered `parameters` is the compiled JSON Schema object (the
+    // property specs sit under `properties`, the required names in `required`),
+    // not the per-property map the definition was written with.
+    const { ctx, definitions } = fakeContext()
+    apply(ctx as never)
+    const parameters = (tool: string): { properties?: Record<string, { type?: string, enum?: string[] }>, required?: string[] } =>
+      definitions.get(tool)?.parameters as { properties?: Record<string, { type?: string, enum?: string[] }>, required?: string[] } | undefined ?? {}
+    const depth = parameters('codegraph_impact').properties?.depth
+    assert.equal(depth?.type, 'number')
+    assert.equal(parameters('codegraph_impact').required?.includes('depth') ?? false, false, 'depth is optional')
+
+    const detail = parameters('codegraph_context').properties?.detail
+    assert.equal(detail?.type, 'string')
+    assert.deepEqual(detail?.enum, ['auto', 'names', 'signatures', 'full'])
+    assert.equal(parameters('codegraph_context').required?.includes('detail') ?? false, false, 'detail is optional')
+  })
+
   it('registers the routes under the plugin prefix the client fetches', () => {
     const { ctx, routes } = fakeContext()
     apply(ctx as never)

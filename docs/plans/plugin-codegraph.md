@@ -1,6 +1,6 @@
 # plugin-codegraph
 
-- Status: active
+- Status: done
 - Plan date: 2026-10-22
 - Risk: medium
 
@@ -44,7 +44,7 @@
 | W10c | P0 | 会话页顶部「文件」视图：注册 `conversation.view`，渲染当前项目的图谱（文件→符号分层，`<svg>` 手绘，不引图形库） | [x] |
 | W11 | P1 | documents 边：把 docs/ 与 AGENTS.md 的段落关联到符号 | [x] |
 | W11b | P1 | **回炉 W5：调用边归属到符号而非文件。** 现状 `edges.src` 恒为 `file:<path>`（parse 层不记录每条调用属于哪个声明），所以 `codegraph_context.calls` 只能答"这个文件调了什么"，答不了"这个函数调了什么"。修法：`extractSymbols` 在提取调用时记下当前所在的声明 id，`callEdges` 用它作 `src`；同时保留文件级边（`impact` 的"哪个文件受影响"依赖它），并给两者不同的 `kind` 或前端过滤。改 parse.ts + indexer.ts + query.ts + 相应测试 | [x] |
-| W12 | P1 | 读时 HEAD 校验：落后时返回 stale:true 并触发后台重建 | [~] |
+| W12 | P1 | 读时 HEAD 校验：落后时返回 stale:true。**口径修正**：读路径不再触发重建——重建由 `tools/result` 之后那次只读的变更检查负责（见 `docs/agents/codegraph.md` §9a），从读路径发起会让一个反复提问的模型把树走个不停 | [x] |
 | W13 | P2 | 其余语言接入：rust/ruby/php/bash 已加提取规则（真实语法树验证）；css/ini/regex 显式登记为空规则（无可引用语义） | [x] |
 | W14 | P2 | 设置页序号登记进 docs/agents/settings-rail-order.md | [x] |
 | W15 | P2 | 文档：docs/agents/codegraph.md + AGENTS.md 阅读表一行 | [x] |
@@ -59,7 +59,7 @@
 |------|----------|------|------|
 | 1 骨架与存储 | W1, W2 | 插件能被内核加载，schema 建表成功 | [x] |
 | 2 解析通路 | W3, W4, W5 | ts/js/python 三语言能提取符号与调用边 | [x] |
-| 3 增量与队列 | W6, W7, W12 | 二次索引走增量，状态机四态可观测 | [ ] |
+| 3 增量与队列 | W6, W7, W12 | 二次索引走增量，状态机四态可观测 | [x] |
 | 4 工具与路由 | W8, W9 | 三个工具在真实会话中可用，路由过 Connection 围栏 | [x] |
 | 5 设置页 | W10, W10b, W14 | 语言下载可用，项目可切换，序号表已更新 | [x] |
 | 6 文档与扩展 | W11, W11b, W13, W15 | documents 边可用，调用边可按符号归属，文档落盘 | [x] |
@@ -78,23 +78,23 @@
 
 | # | 用例 | 输入/操作 | 预期 | 验证方式 | 结果 |
 |---|------|-----------|------|----------|------|
-| 1 (W2) | schema 建表幂等 | 同一 DB 连续两次 initialize | 不抛错，表结构不变 | `npm test` | pending |
-| 2 (W3) | 未安装语言 | 解析 .rb 文件且未装 ruby | 返回 LANGUAGE_NOT_INSTALLED | `npm test` | pending |
-| 3 (W4) | 符号提取 | 一个已知 TS 文件 | 符号名与行号正确 | `npm test` | pending |
-| 4 (W5) | 调用边 | A 调用 B | references(A→B) 存在 | `npm test` | pending |
-| 5 (W6) | 增量跳过 | 改一个文件后重建 | 只重解析该文件 | `npm test` | pending |
-| 6 (W7) | 状态机 | 索引进中查询 | 返回 INDEXING | `npm test` | pending |
-| 7 (W8) | impact 正确性 | diffRulerMarks | 返回 git-tab.tsx | `probe-codegraph.cjs` | pending |
-| 8 (W9) | 路由围栏 | 无 cookie 请求 | 401 | `probe-codegraph.cjs` | pending |
-| 9 (W10) | 语言下载 | 设置页勾选 ruby | .wasm 落盘，状态变已安装 | 手工 + 路由断言 | pending |
-| 10 (W12) | stale 语义 | 提交后首次查询 | stale:true 且后台开始重建 | `probe-codegraph.cjs` | pending |
-| 11 (W11) | documents 边 | docs/agents/security-invariants.md | 关联到相关符号 | `npm test` | pending |
+| 1 (W2) | schema 建表幂等 | 同一 DB 连续两次 initialize | 不抛错，表结构不变 | `npm test` | PASS (`tests/store.test.ts`，版本不符即整库重建、`meta.project` 保留) |
+| 2 (W3) | 未安装语言 | 解析 .rb 文件且未装 ruby | 返回 LANGUAGE_NOT_INSTALLED（现名 `unsupported: 'missing'`） | `npm test` | PASS (`tests/parse.test.ts` 的 `unsupportedFor`：有规则而语法缺失才报 `missing`) |
+| 3 (W4) | 符号提取 | 一个已知 TS 文件 | 符号名与行号正确 | `npm test` | PASS (`tests/parse.test.ts`：每条提取规则一条用例，跑真实语法) |
+| 4 (W5) | 调用边 | A 调用 B | references(A→B) 存在 | `npm test` | PASS (`tests/parse.test.ts` 的 `callEdges`、`tests/e2e.test.ts`) |
+| 5 (W6) | 增量跳过 | 改一个文件后重建 | 只重解析该文件 | `npm test` | PASS (`tests/indexer.test.ts` 的 `re-parses only the file that changed`、`tests/freshness.test.ts`) |
+| 6 (W7) | 状态机 | 索引进中查询 | 返回 INDEXING | `npm test` | PASS (`tests/queue.test.ts`、`tests/freshness.test.ts`) |
+| 7 (W8) | impact 正确性 | diffRulerMarks | 返回 git-tab.tsx | `probe-codegraph.cjs` | PASS (`tests/query.test.ts` 的调用点计数与排序、`tests/tool-text.test.ts`、`tests/e2e.test.ts`)。**真机探针 `scripts/probe-codegraph.cjs` 已不在仓库**（2026-11-23 核对：`scripts/` 下只剩 `probe-codegraph-langs.cjs`） |
+| 8 (W9) | 路由围栏 | 无 cookie 请求 | 401 | `probe-codegraph.cjs` | **测试缺口**：围栏由 Connection carrier 施加，本插件没有 401 的自动化用例，原定的真机探针也不在了；`tests/routes.test.ts` 只钉住信封与「未打开过的路径不得索引/删除」的操作围栏。已记入 `codegraph-understanding-and-cost.md` 的 Deferred |
+| 9 (W10) | 语言下载 | 设置页勾选 ruby | .wasm 落盘，状态变已安装 | 手工 + 路由断言 | PASS (`tests/routes.test.ts` 的安装/移除/冲突用例、`tests/languages.test.ts` 的哈希校验) |
+| 10 (W12) | stale 语义 | 提交后首次查询 | stale:true 且后台开始重建 | `probe-codegraph.cjs` | PASS，**预期已改口径**：stale:true；重建不再由读路径发起（见 W12）(`tests/freshness.test.ts`) |
+| 11 (W11) | documents 边 | docs/agents/security-invariants.md | 关联到相关符号 | `npm test` | PASS (`tests/docs.test.ts`、`tests/indexer.test.ts` 的阶段 3 用例) |
 
 ## Verification commands
 
 ```sh
 cd plugins/plugin-codegraph && npm run typecheck && npm test
-node scripts/probe-codegraph.cjs
+# node scripts/probe-codegraph.cjs —— 已不存在（2026-11-23 核对）；路由围栏因此没有真机用例，见测试计划第 8 行
 node scripts/plugin-gates.mjs plugins/plugin-codegraph
 npm run check:suites:gate
 npm run check:slots

@@ -124,6 +124,42 @@ describe('openGraph', () => {
     assert.deepEqual([meta.truncated, meta.removalSkipped], [false, false])
   })
 
+  it('rebuilds a version-4 graph, keeps the project, and comes back with the new columns', () => {
+    // The v5 bump's whole reason: a v4 graph has no `signature`, `doc` or `narrowed`,
+    // and the incremental pass would keep those absences for every unchanged file —
+    // so a stored 4 must rebuild. The project is not derived data and must survive it,
+    // and the rebuilt tables must be the v5 ones, or the next write would throw.
+    const path = tempGraph()
+    const first = openGraph(path)
+    writeProjectMeta(first.db, {
+      cwd: 'D:/codes/kept', name: 'kept', head: 'abc', indexedAt: 42,
+      fileCount: 12, symbolCount: 34, edgeCount: 56,
+      truncated: false, removalSkipped: false, generatedSkipped: 0, missingLanguage: 0, noRules: 0, parseErrors: 0,
+    })
+    // The v4 tables, recreated in place and written the v4 way.
+    first.db.exec('DROP TABLE edges')
+    first.db.exec('DROP TABLE symbols')
+    first.db.exec('CREATE TABLE symbols (id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL, end_line INTEGER NOT NULL, parent TEXT)')
+    first.db.exec('CREATE TABLE edges (src TEXT NOT NULL, dst TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL, PRIMARY KEY (src, dst, kind, line)) WITHOUT ROWID')
+    first.db.prepare('INSERT INTO symbols (id, path, name, kind, line, end_line, parent) VALUES (?, ?, ?, ?, ?, ?, ?)').run('a.ts#function:old', 'a.ts', 'old', 'function', 1, 1, null)
+    first.db.prepare('UPDATE meta SET value = ? WHERE key = ?').run('4', 'schema_version')
+    first.close()
+
+    const second = openGraph(path)
+    const meta = readProjectMeta(second.db)
+    const remaining = second.db.prepare('SELECT COUNT(*) AS n FROM symbols').get() as { n: number }
+    const columns = (table: string) => (second.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name)
+    const symbolColumns = columns('symbols')
+    const edgeColumns = columns('edges')
+    second.close()
+
+    assert.equal(remaining.n, 0, 'the v4 rows are gone, not migrated')
+    assert.equal(meta?.cwd, 'D:/codes/kept', 'the project survives the version it had')
+    assert.ok(symbolColumns.includes('signature'), `symbols columns: ${symbolColumns.join(',')}`)
+    assert.ok(symbolColumns.includes('doc'), `symbols columns: ${symbolColumns.join(',')}`)
+    assert.ok(edgeColumns.includes('narrowed'), `edges columns: ${edgeColumns.join(',')}`)
+  })
+
   it('keeps the project metadata round-tripping', () => {
     const path = tempGraph()
     const graph = openGraph(path)
@@ -137,6 +173,7 @@ describe('openGraph', () => {
       edgeCount: 4,
       truncated: false,
       removalSkipped: false,
+      generatedSkipped: 0,
       missingLanguage: 0,
       noRules: 0,
       parseErrors: 0,
@@ -151,6 +188,7 @@ describe('openGraph', () => {
       edgeCount: 4,
       truncated: false,
       removalSkipped: false,
+      generatedSkipped: 0,
       missingLanguage: 0,
       noRules: 0,
       parseErrors: 0,
@@ -163,6 +201,25 @@ describe('openGraph', () => {
     const graph = openGraph(path)
     graph.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('project', '{not json')
     assert.equal(readProjectMeta(graph.db), undefined)
+    graph.close()
+  })
+
+  it('reads a blob written before `generatedSkipped` existed as zero, and a malformed one as missing', () => {
+    // The field was added after this schema version first shipped, and the identity
+    // read that precedes a rebuild runs against the OLD blob: strict there would
+    // drop the project on upgrade. Only "absent" is tolerated; a wrong type is
+    // still a corrupt blob.
+    const graph = openGraph(tempGraph())
+    const base = { cwd: 'D:/codes/x', name: 'x', head: 'abc', indexedAt: 1, fileCount: 1, symbolCount: 1, edgeCount: 1, truncated: false, removalSkipped: false, missingLanguage: 0, noRules: 0, parseErrors: 0 }
+    const write = (extra: Record<string, unknown>): void => {
+      graph.db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('project', JSON.stringify({ ...base, ...extra }))
+    }
+    write({})
+    assert.equal(readProjectMeta(graph.db)?.generatedSkipped, 0, 'absent means nothing was counted')
+    write({ generatedSkipped: 'many' })
+    assert.equal(readProjectMeta(graph.db), undefined, 'a string is not a count')
+    write({ generatedSkipped: null })
+    assert.equal(readProjectMeta(graph.db), undefined, 'nor is null')
     graph.close()
   })
 })
@@ -258,6 +315,30 @@ describe('replaceFile', () => {
     const edge = { from: a.id, to: b.id, kind: 'references' as const, line: 3 }
     replaceFile(graph.db, file('a.ts'), [a], [edge, edge])
     assert.equal(graphStats(graph.db).edges, 1, 'the primary key collapses a duplicate observation')
+    graph.close()
+  })
+
+  it('writes the signature, the doc and the narrowed flag, defaulting what a record omits', () => {
+    // Optional on the record, never NULL in the table: a schema-file scanner declares
+    // symbols with no head to read, and a query must not have to tell '' from NULL.
+    const graph = openGraph(tempGraph())
+    const withBoth = { ...symbol('a.ts', 'alpha', 3), signature: 'alpha(a: number): number', doc: 'Adds.' }
+    const bare = symbol('a.ts', 'beta', 5)
+    replaceFile(graph.db, file('a.ts'), [withBoth, bare], [
+      { from: withBoth.id, to: bare.id, kind: 'references', line: 4, narrowed: true },
+      { from: fileNodeId('a.ts'), to: bare.id, kind: 'contains', line: 5 },
+    ])
+    // Rows come back as null-prototype objects from node:sqlite, so the comparison is
+    // on tuples rather than on whole rows.
+    const symbols = (graph.db.prepare('SELECT name, signature, doc FROM symbols ORDER BY line').all() as { name: string, signature: string, doc: string }[])
+      .map(row => [row.name, row.signature, row.doc])
+    assert.deepEqual(symbols, [
+      ['alpha', 'alpha(a: number): number', 'Adds.'],
+      ['beta', '', ''],
+    ])
+    const edges = (graph.db.prepare('SELECT kind, narrowed FROM edges ORDER BY kind').all() as { kind: string, narrowed: number }[])
+      .map(row => [row.kind, row.narrowed])
+    assert.deepEqual(edges, [['contains', 0], ['references', 1]])
     graph.close()
   })
 

@@ -28,9 +28,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { en, NS, type CodegraphKey } from './locales.ts'
 import { nameBubble } from './row.ts'
+// Type only: the one key list, so the page cannot show a counter the host does not keep.
+import type { UsageRow } from '../usage.ts'
 
 /** The route prefix the host half registers. */
 const ROUTE_PREFIX = '/api/plugins/dsh-app/codegraph'
+
 
 /** One project row as the host reports it. */
 interface ProjectRow {
@@ -40,6 +43,7 @@ interface ProjectRow {
   readonly indexedAt: number
   readonly queued: boolean
   readonly failure?: string
+  readonly usage?: UsageRow
   readonly lastOutcome?: {
     readonly parsed: number
     readonly skipped: number
@@ -66,6 +70,19 @@ interface LanguageRow {
   readonly bytes: number
   readonly extensions: readonly string[]
 }
+
+/** One environment switch as the host reports it. */
+interface SwitchRow {
+  readonly id: string
+  readonly variable: string
+  readonly on: boolean
+}
+
+/** The switches this client has a sentence for. A newer host may report one
+ *  more; it is skipped rather than rendered with a made-up description. */
+const SWITCH_IDS = ['prefetch', 'grepNote', 'source'] as const
+type SwitchId = (typeof SWITCH_IDS)[number]
+const isSwitchId = (id: string): id is SwitchId => (SWITCH_IDS as readonly string[]).includes(id)
 
 /** A host failure carrying the coded message the client renders. */
 interface HostText {
@@ -330,11 +347,47 @@ function LanguageItem({ language, busy, onAction, t }: {
   )
 }
 
+/**
+ * The environment switches: what each one does, whether it is on right now, and
+ * the variable to set.
+ *
+ * The page cannot flip them — they are read by the host process at launch — so
+ * this is the one place a user learns that a default-on behaviour exists and how
+ * to turn it off. A switch the host reports but this client has no sentence for
+ * is left out: a row with no description would say nothing a user can act on.
+ */
+function SwitchList({ switches, t }: { switches: readonly SwitchRow[], t: CodegraphTranslate }): ReactNode {
+  const known = switches.filter((row): row is SwitchRow & { id: SwitchId } => isSwitchId(row.id))
+  if (known.length === 0) return null
+  return (
+    <div className="dshcg_card">
+      <div className="dshcg_row">
+        <strong>{t('codegraph.switches.title')}</strong>
+      </div>
+      <p className="dshcg_intro">{t('codegraph.switches.hint')}</p>
+      <div className="dshcg_switches">
+        {known.map(row => (
+          <div key={row.id} className="dshcg_switch">
+            <div className="dshcg_switchMain">
+              {/* The variable exactly as it must be spelled, selectable as one
+                  piece: a name split across lines cannot be copied. */}
+              <code className="dshcg_switchName">{row.variable}</code>
+              <Tag tone={row.on ? 'success' : 'neutral'}>{row.on ? t('codegraph.switches.on') : t('codegraph.switches.off')}</Tag>
+            </div>
+            <p className="dshcg_switchDesc">{t(`codegraph.switches.${row.id}`)}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 /** The settings section entry point. */
 export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
   const translate: CodegraphTranslate = t
   const [projects, setProjects] = useState<readonly ProjectRow[]>([])
   const [languages, setLanguages] = useState<readonly LanguageRow[]>([])
+  const [switches, setSwitches] = useState<readonly SwitchRow[]>([])
   const [selected, setSelected] = useState<string | undefined>(undefined)
   // The project picker: one dropdown rather than a strip, because the number of
   // projects is unbounded and a strip changes shape as it grows.
@@ -359,12 +412,14 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
     generation.current = mine
     try {
       const [status, langs] = await Promise.all([
-        fetchJson<{ projects: ProjectRow[] }>(`${ROUTE_PREFIX}/status`),
+        fetchJson<{ projects: ProjectRow[], switches?: SwitchRow[] }>(`${ROUTE_PREFIX}/status`),
         fetchJson<{ languages: LanguageRow[] }>(`${ROUTE_PREFIX}/languages`),
       ])
       if (generation.current !== mine) return
       setProjects(status.projects)
       setLanguages(langs.languages)
+      // Absent on a host older than this page: no rows, and the block hides.
+      setSwitches(status.switches ?? [])
       setLoadError(undefined)
       // Keep the selection if it still exists; otherwise fall to the newest.
       setSelected(current => (
@@ -525,6 +580,8 @@ export function CodegraphSection({ t }: PropsLocale<typeof NS>): ReactNode {
           ))}
         </div>
       </div>
+
+      <SwitchList switches={switches} t={translate} />
 
       <RiskConfirmation
         open={pendingForget !== undefined}

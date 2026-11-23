@@ -195,6 +195,47 @@ describe('indexProject', () => {
     graph.close()
   })
 
+  it('records which layer chose each reference, in the column phase 2 writes itself', async () => {
+    // `narrowed` has two write paths: `replaceFile` (the `contains` edges) and this
+    // phase's own INSERT for everything resolved by name. The stub has no imports, so
+    // the parse below is given one by hand: `shared` is declared in two files, and the
+    // clause `import { shared } from './lib'` is what picks one of them.
+    const { root, graph } = project()
+    write(root, 'lib.ts', 'SYM shared')
+    write(root, 'other.ts', 'SYM shared')
+    write(root, 'app.ts', "import { shared } from './lib'\nSYM local\nCALL shared\nCALL local")
+    const parse = (source: string, path: string): ParsedFile => {
+      const parsed = stubParse(source, path)
+      return path === 'app.ts'
+        ? { ...parsed, imports: [{ specifier: './lib', line: 1, names: ['shared'] }] }
+        : parsed
+    }
+    await indexProject(graph, root, parse)
+    const rows = (graph.db.prepare('SELECT kind, dst, narrowed FROM edges ORDER BY kind, dst').all() as unknown as { kind: string, dst: string, narrowed: number }[])
+      .map(row => [row.kind, row.dst, row.narrowed])
+    assert.deepEqual(rows, [
+      // The kinds that never resolve by name stay 0.
+      ['contains', 'app.ts#function:local', 0],
+      ['contains', 'lib.ts#function:shared', 0],
+      ['contains', 'other.ts#function:shared', 0],
+      ['imports', 'file:lib.ts', 0],
+      // A same-file declaration and an import clause both narrow.
+      ['references', 'app.ts#function:local', 1],
+      ['references', 'lib.ts#function:shared', 1],
+    ])
+    graph.close()
+
+    // Without the clause the name is matched project-wide: both declarations, both 0.
+    const wide = project()
+    write(wide.root, 'lib.ts', 'SYM shared')
+    write(wide.root, 'other.ts', 'SYM shared')
+    write(wide.root, 'app.ts', 'CALL shared')
+    await indexProject(wide.graph, wide.root, stubParse)
+    const flags = (wide.graph.db.prepare("SELECT narrowed FROM edges WHERE kind = 'references' ORDER BY dst").all() as unknown as { narrowed: number }[]).map(row => row.narrowed)
+    assert.deepEqual(flags, [0, 0])
+    wide.graph.close()
+  })
+
   it('updates the recorded stamp when the bytes are unchanged', async () => {
     // A checkout or a `touch` changes mtime without changing content. Without
     // recording the new stamp, this file is re-read and re-hashed on every pass
@@ -389,6 +430,9 @@ describe('what the walk leaves out: .gitignore and generated files', () => {
     assert.equal(outcome.parsed, 2, 'the two hand-written files are parsed')
     const names = (graph.db.prepare('SELECT name FROM symbols ORDER BY name').all() as { name: string }[]).map(row => row.name)
     assert.deepEqual(names, ['alsoHand', 'hand'])
+    // The count lives in the graph, not only in the pass's outcome, so every later
+    // tool answer can say what was left out.
+    assert.equal(readProjectMeta(graph.db)?.generatedSkipped, 2)
   })
 
   it('keeps the rows of a file a new .gitignore excludes, instead of reading it as deleted', async () => {

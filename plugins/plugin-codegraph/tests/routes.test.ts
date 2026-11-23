@@ -25,7 +25,9 @@ import {
   type CodegraphRoutesOptions,
 } from '../src/routes.ts'
 import type { ProjectStatus } from '../src/queue.ts'
+import { SWITCH_ENV, WIRED_SWITCHES, switchIsOn } from '../src/switches.ts'
 import { openGraph, replaceFile, type FileRecord, type Graph, type SymbolRecord } from '../src/store.ts'
+import { UsageCounters, emptyUsage } from '../src/usage.ts'
 
 const created: string[] = []
 /** Graphs this file opened; closed before their directories go. */
@@ -159,11 +161,44 @@ describe('GET /status', () => {
     assert.equal(reply.body.ok, true)
     const value = reply.body.value as { projects: { cwd: string }[] }
     assert.deepEqual(value.projects.map(p => p.cwd), ['D:/b', 'D:/a'], 'sorted by indexedAt desc')
-    // The status answer carries the projects and nothing else: a `storageRoot`
-    // field used to ride along and reached the browser while nothing read it —
-    // a local path in the page for no benefit.
-    assert.deepEqual(Object.keys(value).sort(), ['projects'])
+    // The status answer carries the projects and the switches, nothing else: a
+    // `storageRoot` field used to ride along and reached the browser while
+    // nothing read it — a local path in the page for no benefit. The switches
+    // are the one deliberate addition: the page lists each one's variable and
+    // current state, which is the only place a user learns it exists.
+    assert.deepEqual(Object.keys(value).sort(), ['projects', 'switches'])
     await dispose()
+  })
+
+  it('lists every wired switch with its variable and its live state', async () => {
+    const { routes, dispose } = harness(options())
+    const reply = await call(routes.get(`${ROUTE_PREFIX}/status`)!, new Request('dsh-app://app/x'))
+    const { switches } = reply.body.value as { switches: { id: string, variable: string, on: boolean }[] }
+    assert.deepEqual(switches.map(row => row.id), [...WIRED_SWITCHES], 'exactly the switches whose behaviour is wired')
+    assert.ok(switches.length > 0, 'a page with no switch to show would hide the feature that has one')
+    for (const row of switches) {
+      assert.equal(row.variable, SWITCH_ENV[row.id as keyof typeof SWITCH_ENV], 'the variable is spelled as the host reads it')
+      assert.equal(typeof row.on, 'boolean')
+    }
+    // `DSH_APP_CODEGRAPH_SOURCE` is the switch that predates this list; its state
+    // follows the environment the process actually has.
+    assert.equal(switches.find(row => row.id === 'source')?.on, switchIsOn(process.env, SWITCH_ENV.source))
+    await dispose()
+  })
+
+  it('gives every project a usage row, zeros when nothing was counted', async () => {
+    const without = harness(options())
+    const zero = await call(without.routes.get(`${ROUTE_PREFIX}/status`)!, new Request('dsh-app://app/x'))
+    assert.deepEqual((zero.body.value as { projects: { usage: unknown }[] }).projects[0]?.usage, emptyUsage())
+    await without.dispose()
+
+    const counters = new UsageCounters()
+    counters.bump('D:/codes/a', 'find', 2)
+    counters.bump('D:/codes/a', 'prefetchSkipped')
+    const withUsage = harness(options({ usage: () => counters.all() }))
+    const reply = await call(withUsage.routes.get(`${ROUTE_PREFIX}/status`)!, new Request('dsh-app://app/x'))
+    assert.deepEqual((reply.body.value as { projects: { usage: Record<string, number> }[] }).projects[0]?.usage, { ...emptyUsage(), find: 2, prefetchSkipped: 1 })
+    await withUsage.dispose()
   })
 })
 

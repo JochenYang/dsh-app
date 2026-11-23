@@ -20,7 +20,8 @@
  * The kernel's session-log FORMAT — not anything this plugin owns: v4 logs,
  * one JSON event per line, stored as MULTI-FRAME zstd (one frame per write).
  * The reader, the event types and the privacy boundary are documented in
- * `scripts/lib/session-log.mjs`. When the kernel changes that format the
+ * `scripts/lib/session-log.mjs` at the repository root — one copy, shared with
+ * the code graph's replay scripts. When the kernel changes that format the
  * counts change silently: check `parsed` against `files` first.
  *
  * ## What it is for
@@ -35,7 +36,7 @@
 import { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { aggregate, formatUsage, listSessionLogs, parseSince } from './lib/session-log.mjs'
+import { aggregate, formatUsage, listSessionLogs, parseSince } from '../../../scripts/lib/session-log.mjs'
 
 const USAGE = 'usage: node plugins/plugin-memory/scripts/memory-usage.mjs [--since YYYY-MM-DD] [--root <dir>]'
 

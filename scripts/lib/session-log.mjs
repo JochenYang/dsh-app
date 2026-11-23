@@ -1,9 +1,25 @@
 /**
- * Reader and aggregator for the kernel's session logs — the engine behind
- * `scripts/memory-usage.mjs`, kept apart from the argument handling so the
- * multi-frame walk and the counting can be tested on a constructed file.
+ * Reader for the kernel's session logs, plus the memory plugin's tally.
  *
- * ## What this depends on: the kernel's log format, not this plugin's
+ * Two halves, and the split decides who may import what:
+ *
+ *   - `decompressFrames`, `parseEvents`, `listSessionLogs`, `parseSince` are
+ *     the generic reader. They return EVENTS — a message body included — so a
+ *     caller that prints anything derived from them owns its own privacy
+ *     boundary; the two replay scripts under `plugins/plugin-codegraph/scripts/`
+ *     print counts and sizes only.
+ *   - `aggregate`, `emptyUsage`, `formatUsage` are the memory plugin's tally,
+ *     the engine behind `plugins/plugin-memory/scripts/memory-usage.mjs`, kept
+ *     here so the multi-frame walk and the counting can be tested on a
+ *     constructed file.
+ *
+ * It lives at the repository root because two plugins' scripts share it:
+ * `plugins/plugin-memory/scripts/{memory-usage,relevance-replay}.mjs` and
+ * `plugins/plugin-codegraph/scripts/{usage-replay,prefetch-replay}.mjs`. A
+ * plugin's `lib/` never bundles it — the import gate reads `src/**` only — so
+ * the shared copy costs no plugin a dependency.
+ *
+ * ## What this depends on: the kernel's log format, not anything in this repository
  *
  *   - the file name `session.v4.jsonl.zstd`, anywhere under the sessions root;
  *   - one JSON event per line, the first being a header (it carries no `time`);
@@ -26,15 +42,16 @@
  *
  * ## Privacy boundary
  *
- * Nothing here returns, and `formatUsage` never prints, a message, a card
- * body, a topic key or a directory path. Tool arguments are read for ONE
+ * The memory tally never returns, and `formatUsage` never prints, a message, a
+ * card body, a topic key or a directory path. Tool arguments are read for ONE
  * property each — whether `topic` or `query` is a non-empty string — and
  * dropped. Result payloads are reduced to counts, to fixed bucket names, and
  * to a refusal reason ONLY when it is a stable code (or one of a few fixed
  * word reasons); anything else — a sentence, a value with content embedded in
- * it — is counted under `other` and never printed.
+ * it — is counted under `other` and never printed. The generic reader above
+ * makes no such promise: its events hold whatever the kernel logged.
  *
- * @module plugin-memory/scripts/lib/session-log
+ * @module dsh-app/scripts/lib/session-log
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -155,7 +172,7 @@ export function listSessionLogs(root) {
     try {
       entries = readdirSync(dir, { withFileTypes: true })
     } catch {
-      process.stderr.write(`memory-usage: skipped a directory that could not be listed: ${dir}\n`)
+      process.stderr.write(`session-log: skipped a directory that could not be listed: ${dir}\n`)
       return
     }
     for (const entry of entries) {

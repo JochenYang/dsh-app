@@ -7,10 +7,13 @@
  * `read` eight times. A description is an instruction; this is the answer, and it
  * arrives before the plan is made.
  *
- * The tests below pin the two properties that decide whether that works: the block
- * must say NOTHING when the graph cannot back it up (an empty or still-indexing
- * graph), and it must stay inside a context budget while naming enough to orient a
- * reader.
+ * The tests below pin the three properties that decide whether that works: the
+ * block must say NOTHING when the graph cannot back it up (an empty or
+ * still-indexing graph), it must stay inside a context budget while naming enough
+ * to orient a reader, and — because the kernel re-appends the whole snapshot on
+ * any byte change and retires nothing — it must stay BYTE-IDENTICAL across an
+ * edit that did not change the project's shape. Measured on 234 real sessions:
+ * 35 re-pushed this block 354 times, 280 of them because this text changed.
  *
  * @module plugin-codegraph/tests/prompt
  */
@@ -39,17 +42,35 @@ function overview(over: Partial<ProjectOverview> = {}): ProjectOverview {
   }
 }
 
+/** A hub row as `projectOverview` hands it over: the symbol plus its edge count. */
+function hub(id: string, references: number): ProjectOverview['hubs'][number] {
+  const [path, rest] = id.split('#') as [string, string]
+  const [kind, name] = rest.split(':') as [string, string]
+  return { symbol: { id, name, kind, path, line: 1, parent: undefined }, references }
+}
+
+/** The hub rows of a rendered block: the `- ` rows that carry a symbol id. */
+function hubRows(text: string): string[] {
+  return text.split('\n').filter(line => /^- \S+#\w+:\S+ — /u.test(line))
+}
+
+/** The block with its hub rows removed, for "nothing else moved" comparisons. */
+function withoutHubRows(text: string): string {
+  return text.split('\n').filter(line => !/^- \S+#\w+:\S+ — /u.test(line)).join('\n')
+}
+
 describe('renderOverviewContext', () => {
   it('names the counts, the entry candidates and the hubs', () => {
     const text = renderOverviewContext(overview(), 'current', undefined)
-    assert.match(text, /120 files/u)
-    assert.match(text, /900 symbols/u)
+    assert.match(text, /~100 files/u)
+    assert.match(text, /~1k symbols/u)
     assert.match(text, /typescript ~100/u)
     assert.match(text, /src\/cli\.ts/u)
-    // The LINE, not just the file: measured in a real session, the model read this block,
-    // saw `src/cli.ts (starts at function run)`, then ran glob plus four reads anyway and
-    // cited `main.ts:34` in its answer — it wanted the number this row already knew.
-    assert.match(text, /starts at function run:12/u)
+    // The starting SYMBOL, and no line number: the line moved on every edit above it
+    // and re-sent the whole snapshot (82 of 274 measured re-pushes were entry rows),
+    // while `codegraph_context("<path>")` hands the outline with every line in one call.
+    assert.match(text, /^- src\/cli\.ts \(starts at function run\)$/mu)
+    assert.doesNotMatch(text, /run:\d+/u, 'the row carries no line to go stale')
     assert.match(text, /shared/u)
   })
 
@@ -128,7 +149,7 @@ describe('renderOverviewContext', () => {
     // only excludes more than two), so the instruction was unfollowable exactly on
     // the rows it pointed at.
     const text = renderOverviewContext(overview(), 'current', undefined)
-    assert.match(text, /^- src\/util\.ts#function:shared — ~40 call site\(s\)$/mu,
+    assert.match(text, /^- src\/util\.ts#function:shared — ~50 call site\(s\)$/mu,
       'the hub row leads with the full symbol id, which is what the tool accepts')
     assert.doesNotMatch(text, /pass any id above/iu, 'the instruction now matches what the rows carry')
     // And the entry rows stay queryable by path — no id needed, because a path is
@@ -173,7 +194,7 @@ describe('overviewContextText — the state matrix', () => {
 
   it('reports the shape when the graph is current and complete', () => {
     const text = overviewContextText(inputs())
-    assert.match(text, /120 files/u)
+    assert.match(text, /~100 files/u)
     assert.doesNotMatch(text, /older than the working tree/u)
     assert.doesNotMatch(text, /file budget/u)
   })
@@ -184,7 +205,7 @@ describe('overviewContextText — the state matrix', () => {
     for (const inputsUnderTest of [inputs({ state: 'indexing', overview: undefined }), inputs({ state: 'indexing' })]) {
       const text = overviewContextText(inputsUnderTest)
       assert.match(text, /being built/u)
-      assert.doesNotMatch(text, /120 files/u, 'and no shape is asserted while it builds')
+      assert.doesNotMatch(text, /~100 files/u, 'and no shape is asserted while it builds')
       assert.doesNotMatch(text, /\b0 files\b/u, 'nor a shape-shaped zero')
     }
   })
@@ -196,7 +217,7 @@ describe('overviewContextText — the state matrix', () => {
     const text = overviewContextText(inputs({ state: 'failed', failure: 'EPERM: root unreadable' }))
     assert.match(text, /FAILED/u)
     assert.match(text, /EPERM: root unreadable/u, 'the recorded reason is carried, not swallowed')
-    assert.doesNotMatch(text, /120 files/u, 'and no shape is asserted')
+    assert.doesNotMatch(text, /~100 files/u, 'and no shape is asserted')
   })
 
   it('announces a failed pass even when no reason was recorded', () => {
@@ -207,7 +228,7 @@ describe('overviewContextText — the state matrix', () => {
 
   it('says the graph is behind when the queue says stale', () => {
     const text = overviewContextText(inputs({ state: 'stale' }))
-    assert.match(text, /120 files/u, 'a stale graph is still worth reporting')
+    assert.match(text, /~100 files/u, 'a stale graph is still worth reporting')
     assert.match(text, /older than the working tree/u)
   })
 
@@ -234,30 +255,188 @@ describe('overviewContextText — the state matrix', () => {
   })
 })
 
-describe('the counts are magnitudes, so an edit does not re-push the block', () => {
+describe('the counts are 1–2–5 rungs, so an edit does not re-push the block', () => {
   // The kernel appends a whole runtime-context snapshot whenever ANY byte of the
   // joined text changes and retires nothing (the older copies stay in context),
   // so a count that moves by one after every edit costs a full snapshot — this
   // block plus the cwd, the policy and the task state — per edit. Measured on a
   // real session here: 351 of 435 snapshots differed only in these numbers.
-  it('renders two significant digits with a tilde, and exact values below ten', () => {
-    const text = renderOverviewContext(overview({ files: 356, symbols: 5750, edges: 19888 }), 'current', undefined)
-    assert.match(text, /\(~360 files, ~5\.8k symbols, ~20k edges/u)
+  //
+  // Two significant digits was the first fix and was not enough: at the tens
+  // scale every unit moves the digit (`~440` → `~450`), and the headline's counts
+  // account for 229 of the 274 measured re-pushes. A rung moves only when a
+  // project changes size by a factor, which is the moment the number is worth it.
+  const headline = (text: string): string => text.split('\n')[0] ?? ''
+
+  it('snaps to the nearest rung in log distance, with a tilde, and prints values below 5 exactly', () => {
+    const text = renderOverviewContext(overview({ files: 430, symbols: 7700, edges: 27000 }), 'current', undefined)
+    assert.match(headline(text), /\(~500 files, ~10k symbols, ~20k edges/u)
     const tiny = renderOverviewContext(overview({ files: 3, symbols: 4, edges: 5 }), 'current', undefined)
-    assert.match(tiny, /\(3 files, 4 symbols, 5 edges/u)
+    // Below 5 the exact value IS the bucket; 5 is the first rung and reads as one.
+    assert.match(headline(tiny), /\(3 files, 4 symbols, ~5 edges/u)
   })
 
-  it('is byte-identical while the counts stay inside their bucket', () => {
-    const before = renderOverviewContext(overview({ files: 356, symbols: 5750, edges: 19888 }), 'current', undefined)
-    const afterEdit = renderOverviewContext(overview({ files: 359, symbols: 5751, edges: 19890 }), 'current', undefined)
+  it('reads the ladder at its representative points', () => {
+    // One render per value, each through the symbol count so one assertion pins
+    // one rung: 4 is exact, 5 and 7 are the `5` rung, 8 rounds UP to 10, and the
+    // geometric midpoints (7.07, 14.1, 31.6, 316, 3162, 1.41M) take the LOWER rung.
+    const symbolCount = (value: number): string => {
+      const match = /\(~\S+ files, (~?\S+) symbols,/u.exec(headline(renderOverviewContext(overview({ symbols: value }), 'current', undefined)))
+      return match?.[1] ?? ''
+    }
+    assert.equal(symbolCount(0), '0', 'a zero count is exact, like every value below 5')
+    assert.equal(symbolCount(4), '4')
+    assert.equal(symbolCount(5), '~5')
+    assert.equal(symbolCount(7), '~5')
+    assert.equal(symbolCount(8), '~10')
+    assert.equal(symbolCount(152), '~200')
+    assert.equal(symbolCount(430), '~500')
+    assert.equal(symbolCount(7700), '~10k')
+    assert.equal(symbolCount(27000), '~20k')
+    assert.equal(symbolCount(1_500_000), '~2M', 'log-nearest: 1.5M is closer to 2M (0.288) than to 1M (0.405)')
+  })
+
+  it('is byte-identical while the counts stay inside their rung', () => {
+    const before = renderOverviewContext(overview({ files: 430, symbols: 7700, edges: 27000 }), 'current', undefined)
+    const afterEdit = renderOverviewContext(overview({ files: 431, symbols: 7750, edges: 27400 }), 'current', undefined)
     assert.equal(afterEdit, before,
       'one edited file must not change the text: the snapshot would be re-appended for nothing')
   })
 
   it('does move when the project changes magnitude, which is worth telling', () => {
-    const before = renderOverviewContext(overview({ files: 356 }), 'current', undefined)
+    const before = renderOverviewContext(overview({ files: 430 }), 'current', undefined)
     const grown = renderOverviewContext(overview({ files: 4800 }), 'current', undefined)
     assert.notEqual(grown, before)
-    assert.match(grown, /~4\.8k files/u)
+    assert.match(grown, /~5k files/u)
+  })
+})
+
+describe('the block is stable across an edit that did not change the shape', () => {
+  // The second half of the same measurement: of the 274 re-pushed diffs, 138 were
+  // hub rows (a reorder or `~34` → `~35`), 82 were entry rows (a line shift or a
+  // new file), 32 were the indexing status flipping in and out. Each row is built
+  // so the common edit changes nothing; what does change is worth re-reading.
+  const render = (over: Partial<ProjectOverview>): string => renderOverviewContext(overview(over), 'current', undefined)
+
+  it('keeps the hub text when two hubs swap counts inside one rung', () => {
+    const before = render({ hubs: [hub('src/x.ts#function:a', 34), hub('src/y.ts#function:b', 35)] })
+    const swapped = render({ hubs: [hub('src/x.ts#function:a', 35), hub('src/y.ts#function:b', 34)] })
+    assert.equal(swapped, before, 'both are ~50; the order is the id, not the count')
+    assert.match(before, /^- src\/x\.ts#function:a — ~50 call site\(s\)$/mu)
+    assert.match(before, /^- src\/y\.ts#function:b — ~50 call site\(s\)$/mu)
+  })
+
+  it('orders hubs by rung then id, so a count inside a rung cannot reorder them', () => {
+    // Delivered in count-descending order, as `projectOverview` does; the text must
+    // not inherit it. Both are in the 100 rung, so the lower id leads whatever the
+    // counts say. A hub row is the one carrying a `#`: the entry rows above it share
+    // the `- src/` prefix.
+    const text = render({ hubs: [hub('src/z.ts#function:late', 120), hub('src/a.ts#function:early', 90)] })
+    assert.deepEqual(hubRows(text), ['- src/a.ts#function:early — ~100 call site(s)', '- src/z.ts#function:late — ~100 call site(s)'])
+    // Below 5 every value is its own rung and prints exactly, so the larger one
+    // still leads and neither is rounded up to `~5`.
+    const small = render({ hubs: [hub('src/b.ts#function:three', 3), hub('src/a.ts#function:four', 4)] })
+    assert.deepEqual(hubRows(small), ['- src/a.ts#function:four — 4 call site(s)', '- src/b.ts#function:three — 3 call site(s)'])
+  })
+
+  it('changes only the hub list when the next candidate crosses a rung into the budget', () => {
+    // Seven candidates for a six-row budget: the seventh sits in the 50 rung and is
+    // cut. When it gains enough call sites to cross into the 100 rung, its id sorts
+    // first and it displaces the last row. The set changes and nothing else does —
+    // compared as SETS, because inserting a row shifts every row below it, and as
+    // whole text with the hub rows removed.
+    const base = [
+      hub('src/m.ts#function:h1', 100), hub('src/n.ts#function:h2', 100), hub('src/o.ts#function:h3', 100),
+      hub('src/p.ts#function:h4', 100), hub('src/q.ts#function:h5', 100), hub('src/r.ts#function:h6', 100),
+    ]
+    const before = render({ hubs: [...base, hub('src/a.ts#function:h7', 60)] })
+    assert.deepEqual(hubRows(before), base.map(row => `- ${row.symbol.id} — ~100 call site(s)`),
+      'a 50-rung symbol stays below six 100-rung ones')
+    const after = render({ hubs: [...base, hub('src/a.ts#function:h7', 90)] })
+    assert.deepEqual(hubRows(after), [
+      '- src/a.ts#function:h7 — ~100 call site(s)',
+      ...base.slice(0, 5).map(row => `- ${row.symbol.id} — ~100 call site(s)`),
+    ], 'the newcomer leads its rung by id, and the last row is the one displaced')
+    assert.equal(withoutHubRows(after), withoutHubRows(before), 'every other line of the block is unchanged')
+  })
+
+  it('keeps the entry text when a line is inserted above the start symbol', () => {
+    const before = render({})
+    const shifted = render({
+      entryCandidates: [
+        { path: 'src/cli.ts', symbols: 4, symbol: { id: 'src/cli.ts#function:run', name: 'run', kind: 'function', path: 'src/cli.ts', line: 13, parent: undefined } },
+        { path: 'src/index.ts', symbols: 1, symbol: undefined },
+      ],
+    })
+    assert.equal(shifted, before, 'a line shift is not a change to the project')
+  })
+
+  it('adds exactly one line when a file enters the entry list', () => {
+    const before = render({})
+    const grown = render({
+      entryCandidates: [
+        ...overview().entryCandidates,
+        { path: 'src/new.ts', symbols: 1, symbol: undefined },
+      ],
+    })
+    const grownLines = grown.split('\n')
+    const added = grownLines.findIndex(line => line === '- src/new.ts')
+    assert.ok(added >= 0, 'the new entry row is present')
+    grownLines.splice(added, 1)
+    assert.equal(grownLines.join('\n'), before, 'and nothing else in the block moved')
+  })
+
+  it('ignores a symbol count change on an entry row, which the row no longer prints', () => {
+    const before = render({})
+    const recount = render({
+      entryCandidates: [
+        { path: 'src/cli.ts', symbols: 40, symbol: { id: 'src/cli.ts#function:run', name: 'run', kind: 'function', path: 'src/cli.ts', line: 12, parent: undefined } },
+        { path: 'src/index.ts', symbols: 10, symbol: undefined },
+      ],
+    })
+    assert.equal(recount, before)
+  })
+})
+
+describe('the top-level layout line', () => {
+  const layoutLine = (text: string): string | undefined => text.split('\n').find(line => line.startsWith('Top-level layout'))
+
+  it('is absent without a layout, with one directory, or for a flat project', () => {
+    // One directory says nothing about a project's shape, and a flat one has no
+    // directories to name — both are the case where the line would be noise.
+    assert.equal(layoutLine(renderOverviewContext(overview(), 'current', undefined)), undefined)
+    assert.equal(layoutLine(renderOverviewContext(overview(), 'current', undefined, [{ dir: 'src', files: 300 }])), undefined)
+    assert.equal(layoutLine(renderOverviewContext(overview(), 'current', undefined, [])), undefined)
+  })
+
+  it('names up to five directories, by rung descending then name ascending', () => {
+    // `test` at 80 rounds UP to the 100 rung, so it leads the three 60-file
+    // directories; those share the 50 rung and are ordered by name, not by their
+    // exact counts — which is the point, since 60/61/62 would otherwise reorder.
+    const text = renderOverviewContext(overview(), 'current', undefined, [
+      { dir: 'src', files: 62 }, { dir: 'test', files: 80 }, { dir: 'docs', files: 60 },
+      { dir: 'plugins', files: 500 }, { dir: 'scripts', files: 61 }, { dir: 'extra', files: 1 },
+    ])
+    assert.equal(
+      layoutLine(text),
+      'Top-level layout (indexed files): plugins ~500, test ~100, docs ~50, scripts ~50, src ~50.',
+    )
+  })
+
+  it('sits right after the coverage line and does not move the rest of the block', () => {
+    const without = renderOverviewContext(overview(), 'current', undefined)
+    const withLayout = renderOverviewContext(overview(), 'current', undefined, [{ dir: 'src', files: 100 }, { dir: 'test', files: 20 }])
+    const lines = withLayout.split('\n')
+    const index = lines.findIndex(line => line.startsWith('Top-level layout'))
+    assert.match(lines[index - 1] ?? '', /^Covers the project/u, 'the layout follows what the counts cover')
+    assert.match(lines[index + 1] ?? '', /^Files nothing else imports/u, 'and precedes the lists')
+    lines.splice(index, 1)
+    assert.equal(lines.join('\n'), without)
+  })
+
+  it('counts inside a directory as one rung, so adding a file changes nothing', () => {
+    const before = renderOverviewContext(overview(), 'current', undefined, [{ dir: 'src', files: 430 }, { dir: 'test', files: 80 }])
+    const after = renderOverviewContext(overview(), 'current', undefined, [{ dir: 'src', files: 431 }, { dir: 'test', files: 81 }])
+    assert.equal(after, before)
   })
 })

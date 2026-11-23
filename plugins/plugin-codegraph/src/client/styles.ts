@@ -175,6 +175,45 @@ const cssText = `
   flex: 0 0 auto;
   margin-left: auto;
 }
+.dshcg_switches {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dshcg_switch {
+  /* One switch per row, stacked: the list is three items at most, and a grid
+     here would give one item a whole row of empty cards beside it. */
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  min-width: 0;
+}
+.dshcg_switchMain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.dshcg_switchName {
+  /* The variable is copied, never wrapped: a name broken across two lines
+     pastes with a line break in it. It shrinks with an ellipsis instead. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  user-select: all;
+}
+.dshcg_switchDesc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--dsw-alias-label-secondary);
+}
 .dshcg_empty {
   margin: 0;
   color: var(--dsw-alias-label-secondary);

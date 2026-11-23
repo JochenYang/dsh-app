@@ -21,6 +21,7 @@
 import { allRows, fileNodeId, oneRow, type Graph } from './store.ts'
 import { parseSymbolQuery, queryTokens, type SymbolQuery } from './search.ts'
 import type { SourceRefusal } from './source.ts'
+import type { OutlineDetail } from './budget.ts'
 
 /**
  * How fresh the graph is, as every answer reports it.
@@ -60,7 +61,7 @@ export interface SymbolView {
  * still reached for grep, because nothing in the answer said how large the question
  * was. A caller count is that statement.
  */
-export interface FoundSymbol extends SymbolView {
+export interface FoundSymbol extends SignedSymbol {
   /** How many reference edges point at it. */
   readonly references: number
 }
@@ -73,6 +74,14 @@ export interface EdgeView {
   readonly path: string | undefined
   /** The other end's symbol name, when it is a symbol. */
   readonly name: string | undefined
+  /**
+   * The callee's signature, when this call resolves to exactly one declaration.
+   *
+   * A shared name links to every declaration of it, and a call line that could
+   * mean two functions has no one signature to print — so the field is absent
+   * rather than the first candidate's.
+   */
+  readonly signature?: string | undefined
 }
 
 /** The result of `codegraph_find`. */
@@ -191,6 +200,20 @@ export interface ImpactResult extends ToolEnvelope {
    * builds an `ImpactResult` by hand still type-checks.
    */
   readonly lists?: ImpactLists | undefined
+  /**
+   * The test files that reference the target, when any do.
+   *
+   * A change the tests catch is a change found before a user does, so the test
+   * files come out of the reference rows and into a group of their own, where
+   * "run these first" is one glance. Absent when no test file references the
+   * symbol: an empty group would be a heading with nothing under it.
+   */
+  readonly tests?: TestFiles | undefined
+  /**
+   * The callers expanded to `depth` levels, when more than one level was asked
+   * for. At the default depth the `referencing` rows are the whole answer.
+   */
+  readonly callers?: CallerTree | undefined
 }
 
 /**
@@ -209,11 +232,107 @@ export interface ImpactLists {
   readonly imports: ListMeta
 }
 
+/**
+ * The test files that reference a symbol, deduplicated.
+ *
+ * Mutable arrays, not `readonly`: this value is handed to the tool's output
+ * schema, whose inferred type is a mutable array (the JSON snapshot's shape),
+ * and typing it `readonly` would force a cast at the boundary — the same
+ * trade {@link FileOutline.starReExports} documents.
+ */
+export interface TestFiles {
+  /** The test files, by path, at most {@link MAX_TEST_FILES} of them. */
+  readonly files: string[]
+  /** How many test files reference the symbol in total. */
+  readonly total: number
+}
+
+/**
+ * One caller in the `depth` tree.
+ *
+ * A TYPE alias rather than an interface: the tool's output schema writes the
+ * tree out to three levels and the innermost `children` is an untyped JSON
+ * array, whose element type (`JsonValue`) accepts a type alias's implicit
+ * index signature and refuses an interface's lack of one.
+ */
+export type CallerNode = {
+  readonly id: string
+  readonly name: string
+  readonly kind: string
+  /** The file the caller is declared in. */
+  readonly path: string
+  /** Where it first calls the node above it. */
+  readonly line: number
+  /** Its own callers, one level down; empty at the requested depth. */
+  readonly children: CallerNode[]
+  /**
+   * True when this symbol already appears higher up the tree, which is where a
+   * cycle stops: the node is named and not expanded again.
+   */
+  readonly repeated?: boolean
+  /**
+   * How many distinct symbols call this one, present only when that list was
+   * cut at {@link MAX_CALLERS_PER_SYMBOL} — so the reader can tell a hub with
+   * 300 callers shown as 12 from a function with 12.
+   */
+  readonly callers?: number
+}
+
+/** The caller tree behind one symbol, to the requested depth. */
+export interface CallerTree {
+  /** The depth that was asked for, after clamping. */
+  readonly depth: number
+  /** How many nodes the tree carries. */
+  readonly nodes: number
+  /** True when the NODE budget stopped the walk, so callers are missing from every level it reached. */
+  readonly truncated: boolean
+  /** The symbols that call the target, one level down from it. */
+  readonly roots: CallerNode[]
+  /**
+   * How many distinct symbols call the target, present only when the roots were
+   * cut at {@link MAX_CALLERS_PER_SYMBOL} — the same statement as a node's
+   * `callers`, made about the symbol the question was asked of.
+   */
+  readonly callers?: number | undefined
+}
+
+/** How many test files one `impact` answer lists. */
+export const MAX_TEST_FILES = 15
+
+/** How many callers one node in the `depth` tree lists. */
+export const MAX_CALLERS_PER_SYMBOL = 12
+
+/** How many nodes one `depth` tree may carry before the walk stops. */
+export const MAX_CALLER_NODES = 60
+
+/**
+ * One row of a file outline, as `codegraph_context` reports it.
+ *
+ * Named, not inline in {@link ContextResult}: the renderer draws one row per
+ * detail level, and the budget has to measure the same row before the level is
+ * chosen — two callers that must agree on the shape.
+ */
+export interface OutlineEntry {
+  readonly id: string
+  readonly name: string
+  readonly kind: string
+  readonly path: string
+  readonly line: number
+  readonly parent: string | undefined
+  readonly references: number
+  /** True when this module publishes the symbol. */
+  readonly exported: boolean
+  /** The declaration's head, when the parse found one. */
+  readonly signature?: string | undefined
+  /** The first sentence of the comment above it, when there is one. */
+  readonly doc?: string | undefined
+}
+
 /** The result of `codegraph_context`. */
 export interface ContextResult extends ToolEnvelope {
   readonly symbol?: SymbolView | undefined
-  /** Symbols declared in the same file. */
-  readonly siblings: readonly SymbolView[]
+  /** Symbols declared in the same file, each with its head when it has one. */
+  readonly siblings: readonly SignedSymbol[]
   /** What this symbol calls (outgoing references). */
   readonly calls: readonly EdgeView[]
   /** What calls it (incoming references). */
@@ -246,17 +365,19 @@ export interface ContextResult extends ToolEnvelope {
    */
   readonly file?: {
     readonly path: string
-    readonly symbols: readonly {
-      readonly id: string
-      readonly name: string
-      readonly kind: string
-      readonly path: string
-      readonly line: number
-      readonly parent: string | undefined
-      readonly references: number
-      /** True when this module publishes the symbol. */
-      readonly exported: boolean
-    }[]
+    /**
+     * How much each row says — decided in `execute` and read back by the
+     * renderer, so the JSON value and the text name one level. The first line
+     * prints it.
+     */
+    readonly detail: OutlineDetail
+    /**
+     * How many rows the list budget dropped. Present only when it dropped any:
+     * the rows shown are the exported and most-referenced ones, and a reader
+     * told the count knows what the file still holds that this answer does not.
+     */
+    readonly cut?: number | undefined
+    readonly symbols: readonly OutlineEntry[]
     /** Modules this file republishes whole (`export * from './x'`). */
     readonly reExports: readonly string[]
   } | undefined
@@ -320,12 +441,17 @@ export interface SourceView {
 export type SourceRefusalCode = SourceRefusal
 
 /** The note a freshness value carries. */
-export function freshnessNote(freshness: Freshness, truncated: boolean, removalSkipped: boolean): string | undefined {
+export function freshnessNote(freshness: Freshness, truncated: boolean, removalSkipped: boolean, generatedSkipped = 0): string | undefined {
   const parts: string[] = []
   if (freshness === 'indexing') parts.push('The graph is being built right now; this answer may be incomplete (a project touched for the first time is indexing). Ask again in a moment.')
   if (freshness === 'stale') parts.push('The graph is older than the working tree. Results describe an earlier state; a rebuild is running, so ask again in a moment.')
   if (truncated) parts.push('The index hit its file budget, so only part of the project is covered.')
   if (removalSkipped) parts.push('The last pass could not verify deletions, so removed files may still appear.')
+  // The generated-file rule is a shape, not a verdict: a hand-written file with
+  // machine-long lines is caught with the bundles. "No such symbol" must not read
+  // as final while that is possible, so the count travels with every answer, as
+  // `truncated` does.
+  if (generatedSkipped > 0) parts.push(`The index skipped ${String(generatedSkipped)} file(s) as generated output (bundles, minified or machine-written files); a name that lives in one of them is not in this answer.`)
   return parts.length === 0 ? undefined : parts.join(' ')
 }
 
@@ -344,9 +470,24 @@ interface SymbolRow {
   readonly parent: string | null
 }
 
-/** The view-side conversion, applied once per row. */
+/**
+ * The view-side conversion, applied once per row.
+ *
+ * Field by field, not `{ ...row }`. A detail row ({@link SymbolDetailRow}) is a
+ * `SymbolRow` too, so a spread here would carry `signature` and `doc` into every
+ * `SymbolView` — and a tool schema with `additionalProperties: false` turns one
+ * undeclared key into an INVALID_TOOL_OUTPUT for the whole answer. Measured the
+ * first time this ran: `find` answered `doc: ""` and the schema refused it.
+ */
 function toSymbolView(row: SymbolRow): SymbolView {
-  return { ...row, parent: row.parent ?? undefined }
+  return {
+    id: row.id,
+    name: row.name,
+    kind: row.kind,
+    path: row.path,
+    line: row.line,
+    parent: row.parent ?? undefined,
+  }
 }
 
 /** Read one symbol row by id. */
@@ -398,6 +539,56 @@ function symbolColumns(prefix = ''): string {
 }
 
 /**
+ * A symbols-table row with the two v5 columns a detail read adds.
+ *
+ * Kept apart from {@link SymbolRow} on purpose. Every tool schema is
+ * `additionalProperties: false`, so a column must reach only the views whose
+ * schema declares it: the plain views keep reading {@link symbolColumns}, and
+ * only the queries that hand their rows to a signed or detailed view read these.
+ */
+interface SymbolDetailRow extends SymbolRow {
+  readonly signature: string
+  readonly doc: string
+}
+
+/** {@link symbolColumns} plus `signature` and `doc`, for the queries that report them. */
+function symbolDetailColumns(prefix = ''): string {
+  return `${symbolColumns(prefix)}, ${prefix}signature, ${prefix}doc`
+}
+
+/**
+ * A symbol view that may also carry its head.
+ *
+ * Carried so a short `find` answer or an outline row can lead with what the
+ * symbol takes and returns; absent for a declaration the parser found no head
+ * for (a scanner language, a modifiers-only head), never `''`.
+ */
+export interface SignedSymbol extends SymbolView {
+  readonly signature?: string | undefined
+}
+
+/** A symbol view that may also carry its head and its summary. */
+export interface SymbolDetail extends SignedSymbol {
+  readonly doc?: string | undefined
+}
+
+/** `''` is how the store says "none": the view omits the key rather than carry it. */
+function toSigned(row: SymbolDetailRow): SignedSymbol {
+  return {
+    ...toSymbolView(row),
+    ...(row.signature === '' ? {} : { signature: row.signature }),
+  }
+}
+
+/** The view with head and summary, each present only when the parse found one. */
+function toDetail(row: SymbolDetailRow): SymbolDetail {
+  return {
+    ...toSigned(row),
+    ...(row.doc === '' ? {} : { doc: row.doc }),
+  }
+}
+
+/**
  * Find symbols, through four tiers of increasingly weak evidence.
  *
  * The ordering is the answer's quality: a caller who types `diffRulerMarks` means
@@ -423,8 +614,8 @@ function symbolColumns(prefix = ''): string {
 export function findSymbols(graph: Graph, raw: string, limit: number): { symbols: FoundSymbol[], truncated: boolean } {
   const query = parseSymbolQuery(raw)
   const text = query.text
-  const rows: SymbolRow[] = []
-  const merged = new Map<string, SymbolRow>()
+  const rows: SymbolDetailRow[] = []
+  const merged = new Map<string, SymbolDetailRow>()
   const tier = (extra: readonly string[], params: readonly (string | number)[]): void => {
     for (const row of rowsIn(graph, query, extra, params, limit + 1)) {
       if (!merged.has(row.id)) merged.set(row.id, row)
@@ -485,7 +676,7 @@ export function findSymbols(graph: Graph, raw: string, limit: number): { symbols
     )) counts.set(row.dst, row.n)
   }
   return {
-    symbols: kept.map(row => ({ ...toSymbolView(row), references: counts.get(row.id) ?? 0 })),
+    symbols: kept.map(row => ({ ...toSigned(row), references: counts.get(row.id) ?? 0 })),
     truncated: rows.length > limit,
   }
 }
@@ -504,7 +695,7 @@ function rowsIn(
   extra: readonly string[],
   params: readonly (string | number)[],
   limit: number,
-): SymbolRow[] {
+): SymbolDetailRow[] {
   const conditions = [...extra]
   const values: (string | number)[] = [...params]
   if (query.kind !== undefined) { conditions.push('s.kind = ?'); values.push(query.kind.toLowerCase()) }
@@ -516,9 +707,9 @@ function rowsIn(
   if (query.lang !== undefined) { conditions.push('f.lang = ?'); values.push(query.lang.toLowerCase()) }
   const from = query.lang === undefined ? 'symbols s' : 'symbols s JOIN files f ON f.path = s.path'
   const where = conditions.length === 0 ? '' : ` WHERE ${conditions.join(' AND ')}`
-  return allRows<SymbolRow>(
+  return allRows<SymbolDetailRow>(
     graph.db,
-    `SELECT ${symbolColumns('s.')} FROM ${from}${where} ORDER BY s.path, s.line LIMIT ?`,
+    `SELECT ${symbolDetailColumns('s.')} FROM ${from}${where} ORDER BY s.path, s.line LIMIT ?`,
     ...values, limit,
   )
 }
@@ -556,6 +747,20 @@ export interface Referrer {
    * "`resolveName` calls this" is actionable; "somewhere in this file" is not.
    */
   readonly name: string | undefined
+  /**
+   * True when the referring file itself named the target — a declaration in the
+   * same file, or the import clause the name came through. False (or absent
+   * from a hand-built row) when the name was matched project-wide: a guess the
+   * reader can check. This is what the `✓` on a reference row means.
+   */
+  readonly narrowed?: boolean | undefined
+  /**
+   * The referring symbol's id, when the reference sits inside a declaration.
+   *
+   * Absent for a file-level reference, which has no symbol to expand. This is
+   * the key the `depth` tree deduplicates callers by.
+   */
+  readonly callerId?: string | undefined
 }
 
 /**
@@ -673,10 +878,10 @@ export function referencesTo(graph: Graph, symbolId: string, limit: number): { r
   // `limit + 1` keeps `truncated` a fact rather than a guess: a symbol with 200 callers
   // used to answer 40 rows with NO signal, so the model read a complete-looking list
   // that was missing 80% of the callers and would then edit the symbol and miss them.
-  const rows = allRows<{ src: string, line: number, kind: string, name: string | null, path: string | null }>(
+  const rows = allRows<{ src: string, line: number, kind: string, name: string | null, path: string | null, narrowed: number }>(
     graph.db,
-    `SELECT src, line, kind, name, path FROM (
-       SELECT e.src AS src, e.line AS line, e.kind AS kind, s.name AS name, s.path AS path,
+    `SELECT src, line, kind, name, path, narrowed FROM (
+       SELECT e.src AS src, e.line AS line, e.kind AS kind, s.name AS name, s.path AS path, e.narrowed AS narrowed,
               ROW_NUMBER() OVER (PARTITION BY e.src ORDER BY e.line) AS rank_in_source
        FROM edges e LEFT JOIN symbols s ON s.id = e.src
        WHERE e.dst = ? AND e.kind = 'references'
@@ -687,17 +892,22 @@ export function referencesTo(graph: Graph, symbolId: string, limit: number): { r
   const truncated = rows.length > limit
   return {
     rows: rows.slice(0, limit).map((row) => {
+      // The confidence mark and the caller's id ride on every row: `narrowed` is
+      // 1 only when the referring file itself resolved the name (parse.ts's
+      // `linkFor`), and the id is what lets a reader expand a caller in place
+      // instead of searching for its name.
+      const confidence = { ...(row.narrowed === 1 ? { narrowed: true } : {}) }
       if (row.src.startsWith('file:')) {
-        return { path: row.src.replace(/^file:/u, ''), line: row.line, kind: row.kind, name: undefined }
+        return { path: row.src.replace(/^file:/u, ''), line: row.line, kind: row.kind, name: undefined, ...confidence }
       }
       // A symbol id is `<path>#<kind>:<name>`; the join gives both parts, but fall
       // back to unpacking the id when the row is gone (a symbol removed between two
       // passes, which the next pass settles).
       if (row.path !== null && row.name !== null) {
-        return { path: row.path, line: row.line, kind: row.kind, name: row.name }
+        return { path: row.path, line: row.line, kind: row.kind, name: row.name, ...confidence, callerId: row.src }
       }
       const hash = row.src.lastIndexOf('#')
-      return { path: hash > 0 ? row.src.slice(0, hash) : row.src, line: row.line, kind: row.kind, name: undefined }
+      return { path: hash > 0 ? row.src.slice(0, hash) : row.src, line: row.line, kind: row.kind, name: undefined, ...confidence, callerId: row.src }
     }),
     truncated,
     // "There are more" without "how many" is a warning the reader cannot size:
@@ -733,25 +943,226 @@ function countEdgesFrom(graph: Graph, src: string, kind: string): number {
   return (graph.db.prepare('SELECT COUNT(*) AS n FROM edges WHERE src = ? AND kind = ?').get(src, kind) as { n: number }).n
 }
 
+/**
+ * Whether a project-relative path is a test file, by the conventions projects
+ * actually use rather than by one language's.
+ *
+ * A directory (`test/`, `tests/`, `__tests__/`, `spec/`), a suffix before the
+ * extension (`.test.`, `.spec.`, `.e2e.`), and the three languages whose
+ * convention is a filename pattern: Go's `_test.go`, Python's `test_*.py`, and
+ * the `FooTest`/`FooTests` class of C#, Java, Kotlin and Swift. That last one
+ * is scoped to those extensions on purpose: `*Test.*` unscoped would match a
+ * React component named `UnitTest`, which is a test's SUBJECT, not a test.
+ *
+ * Project-relative with forward slashes, which is how the graph keys a path.
+ */
+export const TEST_PATH: RegExp = /(?:^|\/)(?:tests?|__tests__|spec)\/|\.(?:test|spec|e2e)\.|_test\.go$|(?:^|\/)test_[^/]*\.py$|(?:^|\/)[^/]*Tests?\.(?:cs|java|kt|kts|swift)$/u
+
+/**
+ * The test files that reference a symbol, deduplicated.
+ *
+ * Both kinds of reference count: a call inside a declaration (the edge's `src`
+ * is a symbol, whose file is looked up) and a call at file scope (`src` is
+ * `file:<path>`). "Run these first" is only true if a test that calls the symbol
+ * at top level is in the list, and a test file's calls are often at top level.
+ *
+ * @param graph - the open graph.
+ * @param id - the symbol's node id.
+ * @param limit - how many files the answer may carry.
+ * @returns the files by path, and how many there are in total.
+ */
+export function testFilesReferencing(graph: Graph, id: string, limit = MAX_TEST_FILES): { files: string[], total: number } {
+  // No REGEXP in SQLite without an application function, so the shape test is
+  // done here, on the distinct paths — bounded by how many files reference one
+  // symbol, which for the busiest hub in this repository is a few hundred.
+  const paths = allRows<{ path: string }>(
+    graph.db,
+    `SELECT s.path AS path FROM edges e JOIN symbols s ON s.id = e.src
+     WHERE e.dst = ? AND e.kind = 'references'
+     UNION
+     SELECT substr(e.src, 6) FROM edges e
+     WHERE e.dst = ? AND e.kind = 'references' AND e.src LIKE 'file:%'`,
+    id, id,
+  ).map(row => row.path).filter(path => TEST_PATH.test(path))
+  paths.sort()
+  return { files: paths.slice(0, limit), total: paths.length }
+}
+
+/** One caller of a symbol, as the tree's SQL reads it. */
+interface CallerRow {
+  readonly src: string
+  readonly name: string
+  readonly path: string
+  readonly kind: string
+  readonly line: number
+}
+
+/**
+ * The distinct symbols that call one symbol, in first-call order.
+ *
+ * Grouped by `src`, so a function that calls the target five times is one
+ * caller and its `line` is the first of the five. File-level references are
+ * left out: they have no symbol to expand, and `impact`'s `referencing` rows
+ * already list them.
+ */
+function callersOf(graph: Graph, id: string, limit: number): { rows: CallerRow[], total?: number } {
+  const rows = allRows<CallerRow>(
+    graph.db,
+    `SELECT e.src AS src, s.name AS name, s.path AS path, s.kind AS kind, MIN(e.line) AS line
+     FROM edges e JOIN symbols s ON s.id = e.src
+     WHERE e.dst = ? AND e.kind = 'references'
+     GROUP BY e.src
+     ORDER BY line, src
+     LIMIT ?`,
+    id, limit + 1,
+  )
+  if (rows.length <= limit) return { rows }
+  // Counted only when cut, the rule `referencesTo` follows: the common caller
+  // pays nothing for a number nobody reads.
+  const total = (graph.db.prepare(
+    "SELECT COUNT(DISTINCT e.src) AS n FROM edges e JOIN symbols s ON s.id = e.src WHERE e.dst = ? AND e.kind = 'references'",
+  ).get(id) as { n: number }).n
+  return { rows: rows.slice(0, limit), total }
+}
+
+/**
+ * The callers of one symbol, expanded breadth-first to `depth` levels.
+ *
+ * The tree is the `depth > 1` shape of "who calls this": `referencing` names
+ * the first level, and this walks the same edges further. Three rules keep it
+ * both bounded and true:
+ *
+ *   - **Breadth first.** Every root is listed before any root's callers are,
+ *     so a tree cut by the node budget is complete at every level it shows,
+ *     rather than one deep branch and nothing of the others.
+ *   - **Deduplicated by id.** A symbol already in the tree reappears as a
+ *     `repeated` leaf — which is where a cycle (A calls B calls A) stops
+ *     without the walk looping.
+ *   - **Two budgets, both reported.** At most `perLevel` callers per node, and
+ *     the count of the cut on that node's row; at most `maxNodes` nodes in the
+ *     whole tree, which is what `truncated` says.
+ *
+ * @param graph - the open graph.
+ * @param id - the symbol whose callers are wanted.
+ * @param depth - how many levels to expand; 1 is the roots alone.
+ * @param limits - `perLevel` callers per node and `maxNodes` in total.
+ * @returns the tree, its node count and whether the node budget cut it.
+ */
+export function callerTree(
+  graph: Graph,
+  id: string,
+  depth: number,
+  limits: { perLevel?: number, maxNodes?: number } = {},
+): CallerTree {
+  const perLevel = limits.perLevel ?? MAX_CALLERS_PER_SYMBOL
+  const maxNodes = limits.maxNodes ?? MAX_CALLER_NODES
+  // Built mutable, read as `CallerNode`: a node's `callers` is known only after
+  // its own callers were read, which is after the node itself was placed.
+  type Building = { -readonly [K in keyof CallerNode]: CallerNode[K] }
+  // NOT seeded with the asked symbol. A recursive function is its own caller, and
+  // seeding made that row a `(see above)` leaf with nothing above it; unseeded, the
+  // symbol appears once as a caller and its callers — the roots, already placed —
+  // are the `(see above)` leaves, which is a true pointer. Every id is added as it
+  // is placed, so a cycle still stops.
+  const seen = new Set<string>()
+  const roots: CallerNode[] = []
+  let nodes = 0
+  let truncated = false
+  /** The nodes of the level being expanded, whose callers the next level adds. */
+  let frontier: Building[] = []
+
+  /**
+   * Append `parentId`'s callers to `into`, and record on `parent` how many it
+   * has when the list was cut — the count belongs to the node whose callers
+   * they are, not to the children that happen to be listed.
+   */
+  const expand = (parentId: string, into: CallerNode[], parent?: Building): number | undefined => {
+    const found = callersOf(graph, parentId, perLevel)
+    for (const row of found.rows) {
+      if (nodes >= maxNodes) { truncated = true; break }
+      const repeated = seen.has(row.src)
+      const node: Building = {
+        id: row.src,
+        name: row.name,
+        kind: row.kind,
+        path: row.path,
+        line: row.line,
+        children: [],
+        ...(repeated ? { repeated: true } : {}),
+      }
+      seen.add(row.src)
+      into.push(node)
+      nodes += 1
+      if (!repeated) frontier.push(node)
+    }
+    return found.total
+  }
+
+  const rootCallers = expand(id, roots)
+  for (let level = 2; level <= depth && !truncated; level += 1) {
+    const parents = frontier
+    frontier = []
+    for (const parent of parents) {
+      if (truncated) break
+      const total = expand(parent.id, parent.children, parent)
+      if (total !== undefined) parent.callers = total
+    }
+  }
+  return {
+    depth,
+    nodes,
+    truncated,
+    roots,
+    ...(rootCallers === undefined ? {} : { callers: rootCallers }),
+  }
+}
+
 /** An outgoing edge joined to the symbol it points at. */
 interface OutgoingRow {
   readonly kind: string
   readonly line: number
   readonly name: string | null
   readonly path: string | null
+  readonly signature: string | null
 }
 
-/** Outgoing reference edges of one symbol, resolved to names. */
+/**
+ * Outgoing reference edges of one symbol, resolved to names.
+ *
+ * A row also carries the callee's SIGNATURE when the call resolves to exactly
+ * one declaration. A shared name links to every declaration of it (up to ten),
+ * so one call can hold several edges; the signature of the first candidate
+ * would be a guess printed as a fact. Ambiguity is counted per line AND callee
+ * name, in one statement after the rows: `return target(x) + dup()` holds two
+ * calls on one line, each unambiguous, and counting the line's distinct targets
+ * would have read that as a shared name.
+ */
 export function callsOf(graph: Graph, symbolId: string, limit: number): { rows: EdgeView[], truncated: boolean } {
   const rows = allRows<OutgoingRow>(
     graph.db,
-    `SELECT e.kind AS kind, e.line AS line, s.name AS name, s.path AS path
+    `SELECT e.kind AS kind, e.line AS line, s.name AS name, s.path AS path, s.signature AS signature
      FROM edges e LEFT JOIN symbols s ON s.id = e.dst
      WHERE e.src = ? AND e.kind = 'references' ORDER BY e.line LIMIT ?`,
     symbolId, limit + 1,
   )
+  const kept = rows.slice(0, limit)
+  const shared = new Set(
+    allRows<{ line: number, name: string }>(
+      graph.db,
+      `SELECT e.line AS line, s.name AS name FROM edges e JOIN symbols s ON s.id = e.dst
+       WHERE e.src = ? AND e.kind = 'references'
+       GROUP BY e.line, s.name HAVING COUNT(DISTINCT e.dst) > 1`,
+      symbolId,
+    ).map(row => `${String(row.line)}\u0000${row.name}`),
+  )
   return {
-    rows: rows.slice(0, limit).map(row => ({ kind: row.kind, line: row.line, name: row.name ?? undefined, path: row.path ?? undefined })),
+    rows: kept.map(row => ({
+      kind: row.kind,
+      line: row.line,
+      name: row.name ?? undefined,
+      path: row.path ?? undefined,
+      ...(row.signature !== null && row.signature !== '' && !shared.has(`${String(row.line)}\u0000${row.name ?? ''}`) ? { signature: row.signature } : {}),
+    })),
     truncated: rows.length > limit,
   }
 }
@@ -793,19 +1204,24 @@ export function documentsFor(graph: Graph, symbolId: string, limit: number): { r
   }
 }
 
-/** Every symbol declared in one file. */
-export function symbolsInFile(graph: Graph, path: string, limit: number): SymbolView[] {
-  const rows = allRows<SymbolRow>(
+/**
+ * Every symbol declared in one file, with each one's head.
+ *
+ * Head but no summary: this is the `same file` list of a symbol answer, whose
+ * rows say what a neighbour takes and returns, not what it is for.
+ */
+export function symbolsInFile(graph: Graph, path: string, limit: number): SignedSymbol[] {
+  const rows = allRows<SymbolDetailRow>(
     graph.db,
-    `SELECT ${symbolColumns()} FROM symbols WHERE path = ? ORDER BY line LIMIT ?`,
+    `SELECT ${symbolDetailColumns()} FROM symbols WHERE path = ? ORDER BY line LIMIT ?`,
     path, limit,
   )
-  return rows.map(toSymbolView)
+  return rows.map(toSigned)
 }
 
 /** One symbol of a file, with the count that says whether anything depends on it. */
 export interface FileSymbol {
-  readonly symbol: SymbolView
+  readonly symbol: SymbolDetail
   /** How many reference edges point at it, from anywhere including this file. */
   readonly references: number
   /**
@@ -893,9 +1309,9 @@ export function fileOutline(graph: Graph, path: string, limit: number): FileOutl
   ).map(row => row.dst.replace(/^file:/u, ''))
 
   const total = (graph.db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE path = ?').get(path) as { n: number }).n
-  const rows = allRows<SymbolRow>(
+  const rows = allRows<SymbolDetailRow>(
     graph.db,
-    `SELECT ${symbolColumns()} FROM symbols WHERE path = ? ORDER BY line`,
+    `SELECT ${symbolDetailColumns()} FROM symbols WHERE path = ? ORDER BY line`,
     path,
   )
   const ordered = rows
@@ -910,8 +1326,10 @@ export function fileOutline(graph: Graph, path: string, limit: number): FileOutl
     })
   return {
     path,
+    // Head AND summary per row: which of them a row prints is the renderer's
+    // decision, made against the list budget (`budget.ts`), not the query's.
     symbols: ordered.slice(0, limit).map(entry => ({
-      symbol: toSymbolView(entry.row),
+      symbol: toDetail(entry.row),
       references: entry.references,
       exported: exported.has(entry.row.id),
     })),
@@ -971,7 +1389,7 @@ export interface ProjectOverview {
   readonly edges: number
   /** Files per language id, largest first. */
   readonly byLanguage: { readonly lang: string, readonly files: number }[]
-  /** Files nothing else imports, most-substantial first. */
+  /** Files nothing else imports, conventional entry filenames first, then by path. */
   readonly entryCandidates: EntryCandidate[]
   /** The most-referenced symbols. */
   readonly hubs: HubSymbol[]
@@ -1020,6 +1438,14 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
   // never appeared — while a 371-symbol HTML template did. `cli`/`main`/`index`
   // is what a project's own convention calls a start, and that signal is worth
   // more than the edge count here.
+  //
+  // WITHIN a class, by PATH — not by symbol count. `n DESC` used to sit between
+  // the class and the path, and it reordered the list on every edit that added or
+  // removed a declaration: measured on 234 real sessions, 82 of the 274 re-pushed
+  // overview diffs were entry rows, a reorder among them. The count stays in the
+  // SELECT because `codegraph_context`'s outline still prints it; it no longer
+  // decides an order. The symbol count a file happens to have is not a statement
+  // about where a project starts, so nothing is lost by reading alphabetically.
   const entryRows = allRows<{ path: string, n: number }>(
     graph.db,
     `SELECT f.path AS path, COUNT(s.id) AS n
@@ -1041,8 +1467,7 @@ export function projectOverview(graph: Graph, limit: number): ProjectOverview {
            OR f.path LIKE '%/app.ts' OR f.path LIKE '%/cli.js'
            OR f.path LIKE '%/main.js' OR f.path LIKE '%/index.js' THEN 0
          ELSE 1
-       END ASC,
-       n DESC, f.path ASC
+       END ASC, f.path ASC
      LIMIT ?`,
     limit + 1,
   )
@@ -1219,4 +1644,43 @@ export function dropUndefined<T>(value: T): T {
 export function formatSymbol(symbol: SymbolView): string {
   const parent = symbol.parent === undefined ? '' : `${symbol.parent}.`
   return `${symbol.kind} ${parent}${symbol.name} — ${symbol.path}:${String(symbol.line)}`
+}
+
+/**
+ * The graph's top-level directories, each with its exact file count.
+ *
+ * The one fact about a project the overview could not state: the entry list
+ * names files and the hub list names symbols, and neither says WHERE the project
+ * lives — so "is this a `src/` with a `plugins/` beside it" was still a listing
+ * question, which is the chain this plugin exists to replace.
+ *
+ * Counted EXACTLY and sorted by name, with no cut. The prompt line prints rungs
+ * and orders by rung, and that rule lives there (`prompt.ts`) so it has exactly one
+ * home; a query that pre-bucketed or pre-sorted by size would make the second
+ * copy drift. The tool side may want the exact numbers one day, and this is
+ * already the shape for that.
+ *
+ * Documents count. A `docs/` directory is part of what the project looks like —
+ * the overview's own coverage line says the docs that name a symbol are indexed —
+ * and excluding them would print `docs 0` beside `src ~500`, which reads as a
+ * project without documentation rather than one with 60 files of it.
+ *
+ * Files at the root (no `/` in the path) are not a directory and are not counted:
+ * a `package.json` is not a place, and a synthetic `.` bucket would sort first
+ * in every project for no informational gain.
+ *
+ * @param graph - the open graph.
+ * @returns every top-level directory, by name ascending.
+ */
+export function projectLayout(graph: Graph): readonly { readonly dir: string, readonly files: number }[] {
+  const counts = new Map<string, number>()
+  for (const row of allRows<{ path: string }>(graph.db, 'SELECT path FROM files')) {
+    const slash = row.path.indexOf('/')
+    if (slash <= 0) continue
+    const dir = row.path.slice(0, slash)
+    counts.set(dir, (counts.get(dir) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([dir, files]) => ({ dir, files }))
 }

@@ -31,7 +31,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { decompressFrames, listSessionLogs, parseEvents, parseSince } from './lib/session-log.mjs'
+import { decompressFrames, listSessionLogs, parseEvents, parseSince } from '../../../scripts/lib/session-log.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = join(here, '..')

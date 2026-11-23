@@ -15,8 +15,9 @@
  *
  * Which files are candidates at all is decided in two steps: the fixed directory
  * list below, then the project's own `.gitignore` (`ignore.ts`), then generation
- * by name or by header banner. Both of the last two only ever SHRINK the walk,
- * which is why the counts they produce are reported rather than dropped.
+ * by name, by header banner or by the shape of their lines. The last three only
+ * ever SHRINK the walk, which is why the counts they produce are reported rather
+ * than dropped.
  *
  * What counts as changed. `mtime` + `size` first, because that is one `stat` per
  * file and catches every ordinary edit. A same-size rewrite with a preserved
@@ -41,6 +42,7 @@ import {
   hasNegation,
   isGeneratedHead,
   isGeneratedPath,
+  isGeneratedShape,
   isIgnored,
   parseGitignore,
   type IgnoreRule,
@@ -55,6 +57,7 @@ import {
   replaceFile,
   symbolsOf,
   writeProjectMeta,
+  type EdgeRecord,
   type FileRecord,
   type Graph,
   type ProjectMeta,
@@ -114,7 +117,7 @@ export interface IndexOutcome {
    */
   readonly ignored: number
   /**
-   * Files the walk skipped because they are generated, by name or by header
+   * Files the walk skipped because they are generated, by name, by header
    * banner. Separate from {@link ignored} because nobody excluded these — they
    * are tracked files that no human wrote.
    */
@@ -219,7 +222,7 @@ export interface ScanResult {
    * entry covers a subtree.
    */
   readonly ignored: string[]
-  /** Files that exist but are generated, by name or by header banner. */
+  /** Files that exist but are generated, by name, by header banner or by line shape. */
   readonly generated: string[]
   /**
    * True when the ROOT itself could not be read.
@@ -392,13 +395,21 @@ export function scanProject(root: string, limit = MAX_FILES, indexed?: ReadonlyS
         tooLarge.push(relativePath)
         continue
       }
-      // The banner is checked during the walk rather than when the bytes are
-      // parsed, because the two callers of this walk have to agree: `projectChanged`
-      // never parses, so a verdict that needed the parse would leave a generated file
-      // looking "new" to the check on every pass forever.
-      if (!(indexed?.has(relativePath) ?? false) && isGeneratedHead(readHead(absolute, GENERATED_HEAD_BYTES))) {
-        generated.push(relativePath)
-        continue
+      // The banner — and, for source files, the SHAPE of the head — are checked
+      // during the walk rather than when the bytes are parsed, because the two
+      // callers of this walk have to agree: `projectChanged` never parses, so a
+      // verdict that needed the parse would leave a generated file looking "new"
+      // to the check on every pass forever.
+      //
+      // The shape rule (a bundler's thousand-character lines) is for source only:
+      // prose is written one paragraph per line, and a README with long
+      // paragraphs is what it would otherwise call generated.
+      if (!(indexed?.has(relativePath) ?? false)) {
+        const head = readHead(absolute, GENERATED_HEAD_BYTES)
+        if (isGeneratedHead(head) || isGeneratedShape(head, isDocument)) {
+          generated.push(relativePath)
+          continue
+        }
       }
       if (files.length >= limit) {
         truncated = true
@@ -781,7 +792,12 @@ export async function indexProject(
   // is the invariant the old single-transaction version got for free and the
   // batched version has to restore explicitly.
   if (pending.length > 0) {
-    const insert = graph.db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line) VALUES (?, ?, ?, ?)')
+    // `narrowed` rides along with the name-resolved kinds; an `imports` edge below
+    // binds the column to 0, which is what a kind that never resolves by name carries.
+    const insert = graph.db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line, narrowed) VALUES (?, ?, ?, ?, ?)')
+    const insertResolved = (edge: EdgeRecord): void => {
+      insert.run(edge.from, edge.to, edge.kind, edge.line, edge.narrowed === true ? 1 : 0)
+    }
     // `imports` targets are project-relative paths; the graph's file nodes are
     // keyed the same way, so membership in the known set is the resolution test.
     // What an import may resolve TO: the files the graph already holds, plus the ones
@@ -820,7 +836,7 @@ export async function indexProject(
           // the one this file actually imports.
           specifier => resolveImport(entry.path, specifier, path => knownPaths.has(path)),
         )) {
-          insert.run(edge.from, edge.to, edge.kind, edge.line)
+          insertResolved(edge)
         }
         // Heritage and type references, resolved the same way calls are. These are
         // the edges that let `impact` answer "who implements this interface" and
@@ -835,12 +851,12 @@ export async function indexProject(
           // graph uses instead of at a `./`-relative string that joins to nothing.
           specifier => resolveImport(entry.path, specifier, path => knownPaths.has(path)),
         )) {
-          insert.run(edge.from, edge.to, edge.kind, edge.line)
+          insertResolved(edge)
         }
         for (const specifier of entry.parsed.imports) {
           const target = resolveImport(entry.path, specifier.specifier, path => knownPaths.has(path))
           if (target === undefined) continue
-          insert.run(entry.fileId, fileNodeId(target), 'imports', specifier.line)
+          insert.run(entry.fileId, fileNodeId(target), 'imports', specifier.line, 0)
         }
         inBatch += 1
         if (inBatch >= FILES_PER_COMMIT) {
@@ -1031,6 +1047,7 @@ export async function indexProject(
     edgeCount: stats.edges,
     truncated: scan.truncated,
     removalSkipped,
+    generatedSkipped: scan.generated.length,
     missingLanguage,
     noRules,
     parseErrors,

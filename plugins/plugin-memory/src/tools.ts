@@ -178,8 +178,8 @@ const WITHHELD = '(withheld: the text looks like a credential)'
 const CREDENTIAL_REFUSED = 'credential-refused'
 
 /** The two credential sentences. The M3 usage script matches their heads for
- *  the logs that predate stable codes — keep `scripts/lib/session-log.mjs` in
- *  step when either changes. */
+ *  the logs that predate stable codes — keep the repository root's
+ *  `scripts/lib/session-log.mjs` in step when either changes. */
 const CONTENT_CREDENTIAL_REASON = '内容可能包含密钥或凭据，拒绝保存；如确需记录请先脱敏再保存'
 const SUMMARY_CREDENTIAL_REASON = 'summary 可能包含密钥或凭据，拒绝保存；索引行会注入每个会话，敏感信息一律不落盘'
 

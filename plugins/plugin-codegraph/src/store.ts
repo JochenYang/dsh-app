@@ -49,8 +49,14 @@ import { dirname } from 'node:path'
  * incremental pass would keep those zeros for every unchanged file — so a source slice
  * would collapse to one line for the whole repository while the tool reported a
  * successful read. The rebuild is what makes the column true.
+ *
+ * Version 5 adds three columns whose absence reads as a fact: `symbols.signature` and
+ * `symbols.doc` (empty in an older graph, which would say "this declaration has no
+ * comment" about the 41% that do), and `edges.narrowed` (0 in an older graph, which
+ * would mark every import-narrowed reference as project-wide). None is derived at
+ * query time, so a rebuild is the only way an existing graph gets them.
  */
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 /** One indexed file, as the incremental pass sees it. */
 export interface FileRecord {
@@ -110,6 +116,16 @@ export interface SymbolRecord {
   readonly endLine: number
   /** The enclosing symbol's name, when the grammar nests one (a method in a class). */
   readonly parent: string | undefined
+  /**
+   * The declaration's head on one line — what it takes and returns — without its body.
+   *
+   * `''` when the parse found none. Optional on the record so the hand-written
+   * fixtures and the schema-file scanners (Prisma, GraphQL, HCL, SQL — none of which
+   * has a signature to read) stay valid; a real `extractSymbols` always sets it.
+   */
+  readonly signature?: string
+  /** The first sentence of the comment directly above the declaration, or `''`. */
+  readonly doc?: string
 }
 
 /** What an edge means. */
@@ -142,6 +158,16 @@ export interface EdgeRecord {
   readonly kind: EdgeKind
   /** 1-based line where the edge was observed. */
   readonly line: number
+  /**
+   * True when NAME resolution was narrowed to its target by a statement the file
+   * itself makes — a declaration in the same file, or the import clause the name
+   * came through. False when the name was matched project-wide (unique, or one of
+   * up to ten same-named declarations), which is a guess the reader can check.
+   *
+   * Optional so hand-written edge fixtures stay valid; `contains`, `imports` and
+   * `documents` never resolve by name and carry `false`. See `edges.narrowed`.
+   */
+  readonly narrowed?: boolean
 }
 
 /** Index state of one project, as the settings page and the tools report it. */
@@ -173,6 +199,13 @@ export interface ProjectMeta {
   readonly truncated: boolean
   /** True when the last pass skipped its removal step because the scan was partial. */
   readonly removalSkipped: boolean
+  /**
+   * Files the walk skipped as generated output (a bundle, a minified file, a file
+   * whose lines are machine-long). A name that lives in one of them is not in the
+   * graph, and the tool answers say so — a hand-written file with long lines is
+   * caught by the same rule, and silence would make "no such symbol" look final.
+   */
+  readonly generatedSkipped: number
   /** Files skipped because their grammar is not installed (a download fixes it). */
   readonly missingLanguage: number
   /** Files skipped because this plugin has no extraction rules for an installed grammar. */
@@ -206,7 +239,13 @@ CREATE TABLE IF NOT EXISTS symbols (
   -- at query time (see source.ts), because a copy here would be a second, staler
   -- version of the repository.
   end_line INTEGER NOT NULL,
-  parent   TEXT
+  parent   TEXT,
+  -- The declaration's head on one line and the first sentence of the comment above
+  -- it (parse.ts owns both). Stored rather than re-read at query time for the same
+  -- reason end_line is: the comment has to be matched against the tree to be found
+  -- at all. Empty string, never NULL, so a reader never has to branch on it.
+  signature TEXT NOT NULL DEFAULT '',
+  doc       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -214,6 +253,11 @@ CREATE TABLE IF NOT EXISTS edges (
   dst  TEXT NOT NULL,
   kind TEXT NOT NULL,
   line INTEGER NOT NULL,
+  -- 1 when the name was narrowed to its target by the referring file itself (a
+  -- same-file declaration or an import clause); 0 when it was matched project-wide,
+  -- and also for the kinds that never resolve by name (contains, imports,
+  -- documents) — a reader must filter by kind before reading 0 as "ambiguous".
+  narrowed INTEGER NOT NULL DEFAULT 0,
   -- The same reference can be observed twice in one parse (a duplicate match, or
   -- an import emitted from both the file node and a symbol). Without this, the
   -- duplicate survives into impact output and inflates every count.
@@ -312,6 +356,7 @@ export function openGraph(file: string): Graph {
       edgeCount: 0,
       truncated: false,
       removalSkipped: false,
+      generatedSkipped: 0,
       missingLanguage: 0,
       noRules: 0,
       parseErrors: 0,
@@ -410,7 +455,14 @@ export function readProjectMeta(db: DatabaseSync): ProjectMeta | undefined {
   for (const key of strings) if (typeof meta[key] !== 'string') return undefined
   for (const key of numbers) if (typeof meta[key] !== 'number' || !Number.isFinite(meta[key])) return undefined
   for (const key of booleans) if (typeof meta[key] !== 'boolean') return undefined
-  return parsed as ProjectMeta
+  // `generatedSkipped` is the one number a graph may legitimately lack: it was
+  // added after this schema version first shipped, and the identity read that
+  // precedes a rebuild (above) runs against the OLD blob — strict here would drop
+  // the project on upgrade, which is the exact loss that read exists to prevent.
+  // Absent means nothing was counted; anything but a finite number is still corrupt.
+  const generatedSkipped = meta.generatedSkipped
+  if (generatedSkipped !== undefined && (typeof generatedSkipped !== 'number' || !Number.isFinite(generatedSkipped))) return undefined
+  return { ...(parsed as ProjectMeta), generatedSkipped: generatedSkipped ?? 0 }
 }
 
 /**
@@ -491,6 +543,12 @@ export function symbolsOf(db: DatabaseSync): SymbolRecord[] {
   // `end_line` is aliased because the row is handed back as a `SymbolRecord`
   // (camelCase); every other column happens to have the same name in both worlds,
   // which is exactly why the one that does not needs the alias rather than a cast.
+  //
+  // `signature` and `doc` are deliberately NOT selected: the one caller (the index
+  // pass's name table) resolves by id and name, and loading every declaration's head
+  // and comment into it would cost memory for a pass that never reads them. They are
+  // read by their own query, and must stay out of `query.ts`'s `symbolColumns()` —
+  // that list is spread into a tool answer whose schema allows no extra property.
   return allRows<SymbolRecord>(db, 'SELECT id, path, name, kind, line, end_line AS endLine, parent FROM symbols')
 }
 
@@ -551,16 +609,19 @@ export function replaceFile(
     db.prepare('INSERT INTO files (path, mtime, size, hash, lang) VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, size = excluded.size, hash = excluded.hash, lang = excluded.lang')
       .run(file.path, file.mtime, file.size, file.hash, file.lang)
 
-    const insertSymbol = db.prepare('INSERT INTO symbols (id, path, name, kind, line, end_line, parent) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    // The two new columns default to empty rather than NULL for a record that
+    // carries neither: the schema-file scanners declare symbols with no head to
+    // read, and a query should never have to tell '' from NULL.
+    const insertSymbol = db.prepare('INSERT INTO symbols (id, path, name, kind, line, end_line, parent, signature, doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
     for (const symbol of symbols) {
-      insertSymbol.run(symbol.id, symbol.path, symbol.name, symbol.kind, symbol.line, symbol.endLine, symbol.parent ?? null)
+      insertSymbol.run(symbol.id, symbol.path, symbol.name, symbol.kind, symbol.line, symbol.endLine, symbol.parent ?? null, symbol.signature ?? '', symbol.doc ?? '')
     }
     // OR IGNORE, not a bare INSERT: the primary key is what collapses a
     // duplicate observation, and a parse that reports the same reference twice
     // is not an error worth failing the whole file over.
-    const insertEdge = db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line) VALUES (?, ?, ?, ?)')
+    const insertEdge = db.prepare('INSERT OR IGNORE INTO edges (src, dst, kind, line, narrowed) VALUES (?, ?, ?, ?, ?)')
     for (const edge of edges) {
-      insertEdge.run(edge.from, edge.to, edge.kind, edge.line)
+      insertEdge.run(edge.from, edge.to, edge.kind, edge.line, edge.narrowed === true ? 1 : 0)
     }
     db.exec('COMMIT')
   } catch (error) {

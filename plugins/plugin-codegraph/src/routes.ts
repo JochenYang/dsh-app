@@ -21,11 +21,19 @@ import { LANGUAGES, languageStatuses, type GrammarPaths, type LanguageStatus } f
 import { SUPPORTED_LANGUAGE_IDS } from './parse.ts'
 import { fileGraph, symbolGraph, type FileGraph, type SymbolGraph } from './graph-view.ts'
 import type { Graph } from './store.ts'
+import { SWITCH_ENV, WIRED_SWITCHES, readSwitches, type PluginSwitches } from './switches.ts'
+import { emptyUsage, type UsageRow } from './usage.ts'
 
 /** Everything the routes read, supplied by the plugin. */
 export interface CodegraphRoutesOptions {
   /** Every project the queue has seen. */
   readonly statuses: () => readonly ProjectStatus[]
+  /**
+   * What the model-facing features did per project, since this process started.
+   * Optional so a composition without counters still gets a page: the rows then
+   * report zeros.
+   */
+  readonly usage?: () => ReadonlyMap<string, UsageRow>
   /** Grammar directories, for the language list. */
   readonly grammarPaths: () => GrammarPaths
   /** Install one on-demand language. */
@@ -131,6 +139,31 @@ export interface ProjectRow {
     readonly durationMs: number
     readonly removalSkipped: boolean
   } | undefined
+  /** What the model-facing features did for this project since this process
+   *  started (every key present; zeros when nothing was counted). */
+  readonly usage: UsageRow
+}
+
+/** One environment switch as the settings page lists it. */
+export interface SwitchRow {
+  /** The behaviour it gates; the client owns the sentence for each id. */
+  readonly id: keyof PluginSwitches
+  /** The environment variable, exactly as it must be spelled. */
+  readonly variable: string
+  /** Whether it is on right now, read from the live environment. */
+  readonly on: boolean
+}
+
+/**
+ * The switches the settings page lists: only the wired ones, in a fixed order.
+ *
+ * Read on every request rather than at mount: the value cannot change while the
+ * process runs (a restart applies it), and a route that cached it would be one
+ * more thing to keep in step with the convention in `switches.ts`.
+ */
+function switchRows(): SwitchRow[] {
+  const state = readSwitches()
+  return WIRED_SWITCHES.map(id => ({ id, variable: SWITCH_ENV[id], on: state[id] }))
 }
 
 /**
@@ -184,6 +217,9 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
 
 /** Project rows, newest first, with the queue's live state. */
 function projectRows(options: CodegraphRoutesOptions): ProjectRow[] {
+  // Read once: the counters hand out copies, and one per project would be a copy
+  // of the whole table per row.
+  const usage = options.usage?.()
   return options.statuses()
     .map(status => ({
       cwd: status.cwd,
@@ -194,6 +230,7 @@ function projectRows(options: CodegraphRoutesOptions): ProjectRow[] {
       failure: status.failure,
       awaitingRetry: status.awaitingRetry,
       lastOutcome: status.lastOutcome,
+      usage: usage?.get(status.cwd) ?? emptyUsage(),
     }))
     .sort((left, right) => right.indexedAt - left.indexedAt)
 }
@@ -219,6 +256,7 @@ export function registerCodegraphRoutes(connectionFetch: HostConnectionFetch, op
     try {
       return ok({
         projects: projectRows(options),
+        switches: switchRows(),
       })
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error)

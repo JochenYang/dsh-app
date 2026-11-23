@@ -36,7 +36,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 // Type-only: pulls the Connection Context merge (ctx.connection) into scope, so
 // the settings routes register on ctx.connection.fetch rather than webServer.
@@ -50,6 +50,36 @@ import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { gitHead, indexProject, isStale, projectChanged } from './indexer.ts'
+import { OverviewStabilizer } from './overview-state.ts'
+import { projectLayout } from './query.ts'
+import { UsageCounters } from './usage.ts'
+import { createUserMessage, type MessageSource } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-session'
+import { SearchNoteMemory, searchNote } from './grep-note.ts'
+import { buildPrefetchPack } from './prefetch.ts'
+import { SWITCH_ENV, switchIsOn } from './switches.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-app-codegraph': { kind: 'dsh-app-codegraph' }
+  }
+}
+
+/** Source stamped on every note the search-note listener appends. */
+const NOTE_SOURCE: MessageSource = { kind: 'dsh-app-codegraph' }
+
+/**
+ * The kernel's search tools whose `pattern` is a regular expression over file
+ * CONTENTS (`dsh-tool-fs-search`: `grep`). `glob` matches paths, so a bare
+ * identifier there names a file, never a symbol.
+ */
+const SEARCH_TOOLS: ReadonlySet<string> = new Set(['grep'])
+
+/**
+ * The most notes one outer call may append. A `run_code` program can search fifty
+ * names in a loop; five lines after its output inform, fifty bury it.
+ */
+const MAX_NOTES_PER_CALL = 5
 
 /** The languages read by a scanner instead of a grammar, by id. */
 const SCANNERS: Readonly<Record<string, (source: string, path: string) => ParsedFile>> = {
@@ -97,6 +127,7 @@ import { LANGUAGES, bundledGrammarDir, downloadGrammar, grammarPath, type Gramma
 import {
   ambiguousCandidates,
   calledBy,
+  callerTree,
   callsOf,
   documentsFor,
   dropUndefined,
@@ -111,17 +142,18 @@ import {
   resolveSymbol,
   symbolSpan,
   symbolsInFile,
+  testFilesReferencing,
   type ContextResult,
   type FindResult,
   type Freshness,
   type ImpactResult,
 } from './query.ts'
-import { sourceBudget } from './budget.ts'
+import { MAX_OUTLINE_ROWS, planOutline, sourceBudget } from './budget.ts'
 import { readSourceSlice } from './source.ts'
 import { createIndexQueue, type IndexQueue } from './queue.ts'
 import { overviewContextText } from './prompt.ts'
 import { createRefreshScheduler } from './refresh.ts'
-import { renderContext, renderFind, renderImpact } from './tool-text.ts'
+import { outlineRow, renderContext, renderFind, renderImpact } from './tool-text.ts'
 import { removeTree } from './remove-tree.ts'
 import { registerCodegraphRoutes, type CodegraphRoutesOptions } from './routes.ts'
 import { fileNodeId, forgetFile, openGraph, peekProjectMeta, readFiles, readProjectMeta, type Graph, type ProjectMeta } from './store.ts'
@@ -240,6 +272,36 @@ export function knownProjects(storageRoot: string): { cwd: string, meta: Project
 export function apply(ctx: Context): void {
   /** Open graphs by project root; a graph stays open for the plugin's lifetime. */
   const graphs = new Map<string, Graph>()
+  /**
+   * What the model-facing features did, per project, since this process started.
+   * Served by `/status`; nothing here reaches a prompt.
+   */
+  const usage = new UsageCounters()
+  /**
+   * Which overview text each session was last shown, so the pushed block changes
+   * only when the project's shape really did (`overview-state.ts`).
+   */
+  const overviewState = new OverviewStabilizer()
+  /**
+   * Which identifiers each session has already been told where a search's name is
+   * declared (`grep-note.ts`). The note rides on the model's OWN search result, so
+   * a repeat would be noise, not information.
+   */
+  const searchNotes = new SearchNoteMemory()
+  /**
+   * Notes appended under one outer call, by that call's execution token: every
+   * sub-dispatch of a `run_code` carries the same `parent`, the outer execution's
+   * own token, so the count is per outer call even when several run side by side,
+   * and the entry leaves with the execution.
+   */
+  const notesUnder = new WeakMap<ToolExecutionToken, number>()
+  /**
+   * The request each session last claimed, whether its pack was counted, and the
+   * pack text the model was last given (held through a re-index, see the provider).
+   * The context provider runs on EVERY assembly, so the counters move only when the
+   * request is new.
+   */
+  const requestOf = new WeakMap<object, { text: string, counted: boolean, sent: string }>()
   /**
    * A project whose graph is being deleted.
    *
@@ -475,6 +537,67 @@ export function apply(ctx: Context): void {
     }
   }, 'plugin-codegraph: incremental refresh after tool results')
 
+  // THE NOTE AFTER A SEARCH (switch: `DSH_APP_CODEGRAPH_GREP_NOTE`).
+  //
+  // Measured on this machine's 234 sessions: `grep` 1,942 times, `codegraph_*` six.
+  // Telling the model the graph exists does not move it at the moment it plans, so
+  // the graph goes to the moment it already chose — one line after a result, naming
+  // where the searched identifier is declared and which call lists its references,
+  // and only when the graph is certain (`grep-note.ts` says what certain means).
+  //
+  // The gates, cheapest first, and each one's reason:
+  //   - the downstream decision is an `accept` of a result that is not an error: a
+  //     note on a blocked or failed search explains nothing;
+  //   - at most MAX_NOTES_PER_CALL notes per OUTER call, counted by the outer
+  //     execution's token. Any search counts, a `run_code` sub-dispatch included:
+  //     with the PTC executor selected — the configuration the live check ran in —
+  //     a model-direct native call is refused as UNKNOWN_TOOL and every search is a
+  //     sub-dispatch, whose contexts the executor ferries to the outer result. The
+  //     plan first scoped the note to model-direct calls, which in that
+  //     configuration is never. The cap keeps a script that loops over fifty names
+  //     from appending fifty lines; keyed by `parent` rather than by a "last root
+  //     seen" slot, two outer calls running side by side cannot reset each other.
+  //   - the graph is `current` with no check pending: a line number from a graph an
+  //     edit has just outrun is the one thing a note must never give.
+  //
+  // The listener never throws: it runs inside the tool pipeline, where an exception
+  // would turn a successful search into a failed one.
+  ctx.effect(() => ctx.on('tools/post-execute', async (exec, result, next) => {
+    const decision = await next()
+    if (decision.kind !== 'accept' || result.isError) return decision
+    if (!SEARCH_TOOLS.has(exec.name) || !switchIsOn(process.env, SWITCH_ENV.grepNote)) return decision
+    const args = exec.arguments
+    const pattern = typeof args === 'object' && args !== null && 'pattern' in args ? args.pattern : undefined
+    if (typeof pattern !== 'string') return decision
+    const cwd = exec.agent?.session?.header?.cwd
+    if (typeof cwd !== 'string' || cwd === '') return decision
+    const status = queue.status(cwd)
+    if (status?.state !== 'current' || status.pendingCheck === true) return decision
+    let note: string | undefined
+    try {
+      note = searchNote(graphFor(cwd), pattern)
+    } catch {
+      // A graph this process cannot read is the tools' failure to report, not the
+      // search's.
+      return decision
+    }
+    if (note === undefined) return decision
+    // The cap before the memory, and only a note that is actually appended counts:
+    // a name the cap skipped has not been "told about" and keeps its turn for a
+    // later call, and a repeat consumes nothing.
+    const under = exec.parent === undefined ? 0 : notesUnder.get(exec.parent) ?? 0
+    if (under >= MAX_NOTES_PER_CALL || !searchNotes.shouldNote(exec.agent, pattern)) return decision
+    if (exec.parent !== undefined) notesUnder.set(exec.parent, under + 1)
+    usage.bump(cwd, 'grepNotes')
+    return {
+      ...decision,
+      additionalContexts: [
+        ...(decision.additionalContexts ?? []),
+        createUserMessage({ content: [{ type: 'text', text: note }], source: NOTE_SOURCE }),
+      ],
+    }
+  }), 'plugin-codegraph: the search note')
+
   /** The freshness of one project's graph, as every tool answer reports it. */
   const freshnessOf = async (cwd: string): Promise<{ freshness: Freshness, note: string | undefined }> => {
     const status = queue.status(cwd)
@@ -490,7 +613,7 @@ export function apply(ctx: Context): void {
       }
     }
     if (status?.state === 'indexing') {
-      return { freshness: 'indexing', note: freshnessNote('indexing', meta?.truncated ?? false, meta?.removalSkipped ?? false) }
+      return { freshness: 'indexing', note: freshnessNote('indexing', meta?.truncated ?? false, meta?.removalSkipped ?? false, meta?.generatedSkipped ?? 0) }
     }
     if (meta === undefined) {
       // A project touched for the first time has no graph. "All projects get a
@@ -538,9 +661,9 @@ export function apply(ctx: Context): void {
           // another one: clearing the flag is what keeps a stream of queries in one
           // window from walking the tree per query.
           queue.settleCheck(cwd)
-          return { freshness: 'current', note: freshnessNote('current', meta.truncated, meta.removalSkipped) }
+          return { freshness: 'current', note: freshnessNote('current', meta.truncated, meta.removalSkipped, meta.generatedSkipped) }
         }
-        const extra = freshnessNote('current', meta.truncated, meta.removalSkipped)
+        const extra = freshnessNote('current', meta.truncated, meta.removalSkipped, meta.generatedSkipped)
         return {
           freshness: 'stale',
           note: `A change in the working tree was detected and a re-index is running; this answer describes the previous state. Ask again in a moment.${extra === undefined ? '' : ` ${extra}`}`,
@@ -560,7 +683,7 @@ export function apply(ctx: Context): void {
       // A stale graph is still useful, so the answer is served AND the rebuild
       // is requested. The next call reports `indexing` or `current`.
       void queue.request(cwd).catch(() => { /* recorded on the queue's status */ })
-      return { freshness: 'stale', note: freshnessNote('stale', meta.truncated, meta.removalSkipped) }
+      return { freshness: 'stale', note: freshnessNote('stale', meta.truncated, meta.removalSkipped, meta.generatedSkipped) }
     }
     if (status?.state === 'stale') {
       // A PROVED STALE GRAPH — a check compared the tree and found work, and the pass
@@ -580,10 +703,10 @@ export function apply(ctx: Context): void {
         : 'A change in the working tree was detected and a re-index is running; this answer describes the previous state. Ask again in a moment.'
       return {
         freshness: 'stale',
-        note: [reason, freshnessNote('current', meta.truncated, meta.removalSkipped)].filter(part => part !== undefined).join(' '),
+        note: [reason, freshnessNote('current', meta.truncated, meta.removalSkipped, meta.generatedSkipped)].filter(part => part !== undefined).join(' '),
       }
     }
-    return { freshness: 'current', note: freshnessNote('current', meta.truncated, meta.removalSkipped) }
+    return { freshness: 'current', note: freshnessNote('current', meta.truncated, meta.removalSkipped, meta.generatedSkipped) }
   }
 
   disposers.push(ctx.tools.register(defineTool({
@@ -628,6 +751,9 @@ export function apply(ctx: Context): void {
                 line: { type: 'number', required: true },
                 parent: { type: 'string' },
                 references: { type: 'number', required: true },
+                // The declaration's head (schema v5). Absent, never '', when the
+                // parse found none — `dropUndefined` removes the key.
+                signature: { type: 'string' },
               },
             },
           },
@@ -637,6 +763,7 @@ export function apply(ctx: Context): void {
     },
     async execute(args, exec) {
       const cwd = requireCwd(exec.agent)
+      usage.bump(cwd, 'find')
       const { freshness, note } = await freshnessOf(cwd)
       const found = findSymbols(graphFor(cwd), args.query, clampLimit(args.limit))
       return dropUndefined({ freshness, note, symbols: found.symbols, truncated: found.truncated }) satisfies FindResult
@@ -660,6 +787,10 @@ export function apply(ctx: Context): void {
         type: 'string',
         required: true,
         description: 'A symbol id from codegraph_find, or a name that is unique in this project.',
+      },
+      depth: {
+        type: 'number',
+        description: 'How many levels of callers to expand into an indented tree (1-3; default 1, which lists only the direct references). Use 2 or 3 to see who calls the callers, e.g. before changing a shared helper.',
       },
     },
     output: {
@@ -698,6 +829,13 @@ export function apply(ctx: Context): void {
                 // Absent (not null) for a reference at file scope, which is why
                 // it is optional rather than required.
                 name: { type: 'string' },
+                // True when the referring file itself resolved the name (a
+                // same-file declaration or the import clause the name came
+                // through); absent when it was a project-wide name match. The
+                // render prints it as a `✓` with a legend.
+                narrowed: { type: 'boolean' },
+                // The calling symbol's id, absent for a reference at file scope.
+                callerId: { type: 'string' },
               },
             },
           },
@@ -705,6 +843,88 @@ export function apply(ctx: Context): void {
           truncated: { type: 'boolean', required: true },
           total: { type: 'number', required: true },
           ambiguity: { type: 'number' },
+          // The test files among the references, deduplicated. Absent when no
+          // test file references the target: the group would be a heading with
+          // no rows under it.
+          tests: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              files: { type: 'array', required: true, items: { type: 'string' } },
+              total: { type: 'number', required: true },
+            },
+          },
+          // The callers expanded to `depth` levels, present only when more than
+          // one level was asked for. Written out to three levels: `depth` is
+          // clamped to 3 in `execute`, a level-3 node always carries an empty
+          // `children`, and that innermost array therefore declares no items.
+          // Raising the clamp means adding a level here, which is the right
+          // place to be reminded.
+          callers: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              depth: { type: 'number', required: true },
+              nodes: { type: 'number', required: true },
+              // True when the node budget (60) stopped the walk. A per-symbol cut
+              // is stated by `callers` on the node it belongs to, not here.
+              truncated: { type: 'boolean', required: true },
+              // How many distinct symbols call the target, when the roots were cut.
+              callers: { type: 'number' },
+              roots: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string', required: true },
+                    name: { type: 'string', required: true },
+                    kind: { type: 'string', required: true },
+                    path: { type: 'string', required: true },
+                    line: { type: 'number', required: true },
+                    callers: { type: 'number' },
+                    repeated: { type: 'boolean' },
+                    children: {
+                      type: 'array',
+                      required: true,
+                      items: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          id: { type: 'string', required: true },
+                          name: { type: 'string', required: true },
+                          kind: { type: 'string', required: true },
+                          path: { type: 'string', required: true },
+                          line: { type: 'number', required: true },
+                          callers: { type: 'number' },
+                          repeated: { type: 'boolean' },
+                          children: {
+                            type: 'array',
+                            required: true,
+                            items: {
+                              type: 'object',
+                              additionalProperties: false,
+                              properties: {
+                                id: { type: 'string', required: true },
+                                name: { type: 'string', required: true },
+                                kind: { type: 'string', required: true },
+                                path: { type: 'string', required: true },
+                                line: { type: 'number', required: true },
+                                callers: { type: 'number' },
+                                repeated: { type: 'boolean' },
+                                children: { type: 'array', required: true },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
           candidates: {
             type: 'array',
             required: true,
@@ -769,6 +989,7 @@ export function apply(ctx: Context): void {
     },
     async execute(args, exec) {
       const cwd = requireCwd(exec.agent)
+      usage.bump(cwd, 'impact')
       const { freshness, note } = await freshnessOf(cwd)
       const graph = graphFor(cwd)
       const target = resolveSymbol(graph, args.symbol)
@@ -805,6 +1026,17 @@ export function apply(ctx: Context): void {
       // interface does not call it, and an interface's reader is usually asking
       // exactly that question.
       const related = relatedTo(graph, target.id, MAX_ROWS)
+      // The depth is clamped here, at the boundary, because the parameter is the
+      // model's: a missing, fractional or oversized value is the default, not an
+      // error the model has to retry. Three is the ceiling the schema below is
+      // written out to.
+      const depth = args.depth === undefined || !Number.isFinite(args.depth)
+        ? 1
+        : Math.max(1, Math.min(Math.floor(args.depth), 3))
+      // The tests are a view over the references above, and the tree walks the
+      // same edges further; neither is another question about the graph.
+      const tests = testFilesReferencing(graph, target.id)
+      const callers = depth > 1 ? callerTree(graph, target.id, depth) : undefined
       return dropUndefined({
         freshness,
         note,
@@ -824,10 +1056,14 @@ export function apply(ctx: Context): void {
         // of callers read as complete is the one failure that silently produces
         // wrong code rather than a wrong answer. The aggregate stays for consumers
         // that only ask "is anything missing"; the per-list counts are what the
-        // render uses, because the aggregate cannot say WHICH list.
-        truncated: referencing.truncated || imports.truncated || related.truncated,
+        // render uses, because the aggregate cannot say WHICH list. The caller
+        // tree's node-budget cut counts as a cut of this answer too.
+        truncated: referencing.truncated || imports.truncated || related.truncated || (callers?.truncated ?? false),
         total: referencing.total,
         candidates: [],
+        // No test file, no group: an empty one would print a heading over nothing.
+        tests: tests.total === 0 ? undefined : { files: tests.files, total: tests.total },
+        callers,
         lists: {
           references: { shown: referencing.rows.length, total: referencing.total, truncated: referencing.truncated },
           imports: { shown: imports.rows.length, total: imports.total, truncated: imports.truncated },
@@ -858,6 +1094,11 @@ export function apply(ctx: Context): void {
       symbol: {
         type: 'string',
         description: 'A symbol id from codegraph_find, a name unique in this project, or a project file path for its outline. Omit it to get the project overview.',
+      },
+      detail: {
+        type: 'string',
+        enum: ['auto', 'names', 'signatures', 'full'],
+        description: 'For a FILE outline, how much each row says: `full` = signature plus the comment\u2019s first sentence, `signatures` = signature only, `names` = kind and name only. `auto` (the default) picks by file size. Every level still fits the answer budget (~1200 tokens), so a large file is stepped down and says so on the first line.',
       },
     },
     output: {
@@ -905,6 +1146,8 @@ export function apply(ctx: Context): void {
                 path: { type: 'string', required: true },
                 line: { type: 'number', required: true },
                 parent: { type: 'string' },
+                // The sibling's head (schema v5); absent when the parse found none.
+                signature: { type: 'string' },
               },
             },
           },
@@ -919,6 +1162,8 @@ export function apply(ctx: Context): void {
                 line: { type: 'number', required: true },
                 path: { type: 'string' },
                 name: { type: 'string' },
+                // The callee's head, only when the call resolves to one declaration.
+                signature: { type: 'string' },
               },
             },
           },
@@ -955,6 +1200,11 @@ export function apply(ctx: Context): void {
             additionalProperties: false,
             properties: {
               path: { type: 'string', required: true },
+              // The detail level the rows are drawn at, decided in `execute` and
+              // printed on the first line: one value for the JSON and the text.
+              detail: { type: 'string', enum: ['names', 'signatures', 'full'], required: true },
+              // How many rows the list budget dropped; absent when it dropped none.
+              cut: { type: 'number' },
               symbols: {
                 type: 'array',
                 required: true,
@@ -970,6 +1220,10 @@ export function apply(ctx: Context): void {
                     parent: { type: 'string' },
                     references: { type: 'number', required: true },
                     exported: { type: 'boolean', required: true },
+                    // The declaration's head and its summary (schema v5); each
+                    // absent when the parse found none.
+                    signature: { type: 'string' },
+                    doc: { type: 'string' },
                   },
                 },
               },
@@ -1051,6 +1305,7 @@ export function apply(ctx: Context): void {
     },
     async execute(args, exec) {
       const cwd = requireCwd(exec.agent)
+      usage.bump(cwd, 'context')
       const { freshness, note } = await freshnessOf(cwd)
       const graph = graphFor(cwd)
       // No selector: answer the question no symbol name can, from the graph's
@@ -1081,8 +1336,27 @@ export function apply(ctx: Context): void {
       // because a method definition does not mention its class and a symbol is not a
       // keyword. `symbolsInFile` already existed but was only reachable THROUGH a
       // symbol the model had to name first, which inverted the question.
-      const asFile = fileOutline(graph, args.symbol.replace(/^\.\//u, '').replace(/\\/gu, '/'), MAX_ROWS)
+      const asFile = fileOutline(graph, args.symbol.replace(/^\.\//u, '').replace(/\\/gu, '/'), MAX_OUTLINE_ROWS)
       if (asFile.symbols.length > 0) {
+        // The rows as the answer carries them; the plan then measures THESE, with
+        // the renderer's own row function, so the level it picks is the level the
+        // text is drawn at and the first line's size is the size that was spent.
+        const entries = asFile.symbols.map(entry => ({
+          id: entry.symbol.id,
+          name: entry.symbol.name,
+          kind: entry.symbol.kind,
+          path: entry.symbol.path,
+          line: entry.symbol.line,
+          parent: entry.symbol.parent,
+          references: entry.references,
+          // The public surface first, and marked: an exported symbol with no
+          // internal caller is still the API, and that is the row a reader
+          // asking "what does this module expose" wants.
+          exported: entry.exported,
+          signature: entry.symbol.signature,
+          doc: entry.symbol.doc,
+        }))
+        const plan = planOutline(args.detail ?? 'auto', entries, outlineRow)
         return dropUndefined({
           freshness,
           note,
@@ -1091,22 +1365,14 @@ export function apply(ctx: Context): void {
           calledBy: [],
           imports: importsOf(graph, asFile.path, MAX_ROWS).rows,
           documents: [],
-          truncated: asFile.truncated,
+          // A row the budget dropped is a row the answer does not carry, so it
+          // counts as a cut exactly like the row limit does.
+          truncated: asFile.truncated || plan.cut > 0,
           file: {
             path: asFile.path,
-            symbols: asFile.symbols.map(entry => ({
-              id: entry.symbol.id,
-              name: entry.symbol.name,
-              kind: entry.symbol.kind,
-              path: entry.symbol.path,
-              line: entry.symbol.line,
-              parent: entry.symbol.parent,
-              references: entry.references,
-              // The public surface first, and marked: an exported symbol with no
-              // internal caller is still the API, and that is the row a reader
-              // asking "what does this module expose" wants.
-              exported: entry.exported,
-            })),
+            detail: plan.detail,
+            cut: plan.cut > 0 ? plan.cut : undefined,
+            symbols: entries.slice(0, plan.rows),
             reExports: asFile.starReExports,
           },
         } satisfies ContextResult)
@@ -1178,6 +1444,7 @@ export function apply(ctx: Context): void {
   // mount where the carrier exists, and nothing is registered where it does not.
   const routeHandler: CodegraphRoutesOptions = {
     statuses: () => queue.statuses(),
+    usage: () => usage.all(),
     grammarPaths,
     installLanguage: async (id) => {
       const spec = LANGUAGES.find(language => language.id === id)
@@ -1261,6 +1528,11 @@ export function apply(ctx: Context): void {
     // suite's other per-session blocks: the model reads the project's shape after
     // it knows where it is, not before.
     order: 60,
+    // Literal text. The block carries file paths and directory names, and a
+    // scaffold's `templates/{{name}}/index.ts` would otherwise be read as a prompt
+    // variable — an unknown one makes the kernel's renderer throw, and the whole
+    // prompt with it. (The request pack below sets it for the same reason.)
+    interpolate: false,
     text: (assembly) => {
       const cwd = assembly.agent?.session.header.cwd
       if (cwd === undefined || cwd === '') return ''
@@ -1272,11 +1544,13 @@ export function apply(ctx: Context): void {
       // Everything below is I/O; the DECISION lives in `overviewContextText`, so the
       // five states are testable without a Context, a queue or a database.
       let overview
+      let layout: ReturnType<typeof projectLayout> = []
       let meta
       if (status.state !== 'indexing' && status.state !== 'failed') {
         try {
           const graph = graphFor(cwd)
           overview = projectOverview(graph, MAX_ROWS)
+          layout = projectLayout(graph)
           meta = readProjectMeta(graph.db)
         } catch {
           // A graph this process cannot read is not a reason to break the prompt:
@@ -1284,15 +1558,95 @@ export function apply(ctx: Context): void {
           return ''
         }
       }
-      return overviewContextText({
+      const candidate = overviewContextText({
         state: status.state === 'unindexed' ? 'indexing' : status.state,
         failure: status.failure,
         overview,
         truncated: meta?.truncated ?? false,
         removalSkipped: meta?.removalSkipped ?? false,
+        generatedSkipped: meta?.generatedSkipped ?? 0,
+        layout,
       })
+      // STABLE ACROSS ASSEMBLIES. The kernel appends a new snapshot whenever this
+      // text changes and retires nothing, so the text is decided for the SESSION:
+      // a re-index keeps the last complete block instead of flipping to the status
+      // sentence and back, and a real change is taken at most once per interval.
+      // Measured before this existed: 35 sessions re-pushed the block 354 times,
+      // 280 of them because its own text had moved.
+      const kind = status.state === 'failed'
+        ? 'failure'
+        : status.state === 'indexing' || status.state === 'unindexed' ? 'status' : 'full'
+      const before = overviewState.changes(cwd)
+      const text = overviewState.resolve(cwd, assembly.agent, kind, candidate)
+      if (overviewState.changes(cwd) !== before) usage.bump(cwd, 'overviewChanges')
+      return text
     },
   }), 'plugin-codegraph: project overview as runtime context')
+
+  // THE REQUEST PACK: the answer to "what are these files and names" before the plan.
+  //
+  // The kernel claims the inbox right before it assembles a step, so by the time the
+  // context provider below runs, the step's request is known. A request that names
+  // an indexed file or a uniquely declared identifier gets that declaration's
+  // position and signature (≤ 1,700 characters, `prefetch.ts`), as a SECOND runtime
+  // context: a user-role snapshot the kernel appends only when its text changes, so
+  // the steps of one turn cost nothing and the prompt's cached prefix stays cached.
+  // `interpolate: false` because declaration text is not a template.
+  //
+  // Why the project must be `current` with no check pending before a pack is FIRST
+  // built: a pack is a promise that these are the declarations as they stand. A
+  // line from a graph an edit has just outrun is the one thing it must never carry
+  // — so a not-yet-indexed project simply gets no pack for its first turn, and the
+  // overview carries the indexing sentence instead.
+  //
+  // A pack already sent is HELD through that window, though. The pack and the
+  // overview ride the same snapshot, so dropping it while a re-index runs and
+  // restoring it after is two whole-snapshot re-pushes per editing turn — the exact
+  // churn this round removes. The held text is the one the model already has; the
+  // next `current` assembly rebuilds it, and a real change lands once.
+  //
+  // Registered inside the `agents` scope, as plugin-memory does for its own
+  // request-relevant block: `agent/inbox/claimed` is that scope's event, and a
+  // kernel without the seam (a headless profile) mounts neither half.
+  ctx.inject(['agents'], (agentCtx) => {
+    agentCtx.on('agent/inbox/claimed', ({ agent, message }) => {
+      const request = requestTextOf(message)
+      // The last request claimed wins, and its counters start over: a new message
+      // is a new question, however alike its text.
+      if (request !== undefined) requestOf.set(agent, { text: request, counted: false, sent: '' })
+    })
+    agentCtx.effect(() => agentCtx.systemPrompt.context({
+      name: 'dsh-app:codegraph:request',
+      // Right after the overview: the project's shape first, the named declarations
+      // on top of it.
+      order: 61,
+      interpolate: false,
+      text: (assembly) => {
+        const agent = assembly.agent
+        const cwd = agent?.session.header.cwd
+        const request = agent === undefined ? undefined : requestOf.get(agent)
+        if (agent === undefined || cwd === undefined || cwd === '' || request === undefined) return ''
+        if (!switchIsOn(process.env, SWITCH_ENV.prefetch)) return ''
+        const status = queue.status(cwd)
+        if (status?.state !== 'current' || status.pendingCheck === true) return request.sent
+        let text = ''
+        try {
+          text = buildPrefetchPack(graphFor(cwd), request.text)?.text ?? ''
+        } catch {
+          // A graph this process cannot read is the tools' failure to report.
+          return request.sent
+        }
+        // The provider runs on every assembly, so a request is counted once: the
+        // first time its project was current for it.
+        if (!request.counted) {
+          request.counted = true
+          usage.bump(cwd, text === '' ? 'prefetchSkipped' : 'prefetchAttached')
+        }
+        request.sent = text
+        return text
+      },
+    }), 'plugin-codegraph: request pack context')
+  })
 
   ctx.effect(() => async () => {
     // THE ORDER IS THE CONTRACT, and the first await is the one that was missing.
@@ -1347,6 +1701,26 @@ function requireCwd(agent: { session?: { header?: { cwd?: unknown } } } | undefi
     throw new Error('codegraph needs a session working directory; this turn has none')
   }
   return cwd
+}
+
+/**
+ * The text of a claimed inbox message when it IS the request, else undefined.
+ *
+ * The harness injects its own material through the same inbox — runtime context, a
+ * skill catalog, a notice — each under its own producer `kind`; only `kind: 'user'`
+ * is what the person asked for. Non-text blocks carry nothing a declaration can be
+ * named by.
+ */
+function requestTextOf(message: UserMessage): string | undefined {
+  if (message.source.kind !== 'user') return undefined
+  let text = ''
+  for (const block of message.content) {
+    if (block.type === 'text') text += `${block.text}\n`
+  }
+  // Whitespace only is no request: a synthesized "ok" with no letters must not
+  // replace the question the session is still on.
+  const request = text.trim()
+  return request === '' ? undefined : request
 }
 
 /** Clamp a requested row limit into a sane range. */

@@ -14,6 +14,11 @@
  *     same-named symbols would produce an `impact` answer that is wrong in a way
  *     the reader cannot see; dropping it makes the graph under-report, which a
  *     reader can notice by finding no callers.
+ *   - A symbol also carries its **head** (`signature`: what it takes and returns, on
+ *     one line, without its body) and the first sentence of the **comment directly
+ *     above** it (`doc`); an edge carries whether the referring file itself named the
+ *     target (`narrowed`). The three are extracted here and written by `store.ts`;
+ *     nothing in this module reads them back, and the tools decide what to say.
  *
  * The per-language node names live in a table rather than in a query file (`.scm`)
  * for one reason: a query file is a second language to write, and a wrong one
@@ -774,7 +779,12 @@ export function unsupportedFor(languageId: string, grammarInstalled: boolean): f
 export interface SyntaxNode {
   readonly type: string
   readonly text: string
-  readonly startPosition: { readonly row: number }
+  /**
+   * `column` is read for one rule: a comment on the previous statement's line
+   * (`x = 1 // note`) is NOT the comment above the next declaration, and its
+   * column — right of the declaration's own — is what tells them apart.
+   */
+  readonly startPosition: { readonly row: number, readonly column: number }
   /**
    * Where the node ENDS. Read for one thing only — a symbol's `endLine`, which is
    * the half of its extent a source slice needs. A caller driving this module with
@@ -1127,6 +1137,353 @@ function matchesDeclaration(
   return true
 }
 
+/** A signature head is cut here, and `…` says so: past this it is a body in disguise. */
+const MAX_SIGNATURE = 200
+/** A doc summary is one sentence; a longer one is a paragraph the source still holds. */
+const MAX_DOC = 160
+
+/**
+ * The first `token` at bracket depth 0 in `text` from `from`, or -1.
+ *
+ * Depth is counted over `(`, `[` and `{`: a `{` inside a parameter list (`(x = {})`)
+ * is not a body, and a `:` inside `Record<string, { a: 1 }>` is not a head's end. The
+ * token is tested BEFORE its own bracket is counted, so the token may be a bracket.
+ */
+function depth0Index(text: string, token: string, from = 0): number {
+  let depth = 0
+  for (let index = from; index + token.length <= text.length; index++) {
+    if (depth === 0 && text.startsWith(token, index)) return index
+    const char = text[index]
+    if (char === '(' || char === '[' || char === '{') depth += 1
+    else if (char === ')' || char === ']' || char === '}') depth = Math.max(0, depth - 1)
+  }
+  return -1
+}
+
+/**
+ * The body's `{`: the first one at depth 0 that is not a type literal, or -1.
+ *
+ * A `{` right after `:`, `,`, `|`, `&`, `?`, `(` or `<` is a type — `(): { a } {`,
+ * `Record<string, { a: 1 }> {` — and cutting there answers `function f():` about a
+ * function whose return type is the point. Such a brace is counted and skipped, so
+ * its own group never surfaces as a body; the brace after `}` or `)` is the body.
+ */
+function bodyBrace(text: string): number {
+  let depth = 0
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if (depth === 0 && char === '{') {
+      const before = text.slice(0, index).trimEnd().at(-1) ?? ''
+      if (!':,|&?(<'.includes(before)) return index
+    }
+    if (char === '(' || char === '[' || char === '{') depth += 1
+    else if (char === ')' || char === ']' || char === '}') depth = Math.max(0, depth - 1)
+  }
+  return -1
+}
+
+/**
+ * The first depth-0 `=` in `text` that ASSIGNS, or -1.
+ *
+ * `=>` is an arrow, `==`/`<=`/`>=`/`!=` compare, and `+=`-style operators carry their
+ * own: a `=` is an assignment only when neither neighbour says otherwise.
+ */
+function depth0Assignment(text: string): number {
+  let depth = 0
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if (depth === 0 && char === '=') {
+      const after = text[index + 1] ?? ''
+      const before = index > 0 ? text[index - 1] : ''
+      if (after !== '=' && after !== '>' && !'=<>!+-*/%&|^?'.includes(before)) return index
+    }
+    if (char === '(' || char === '[' || char === '{') depth += 1
+    else if (char === ')' || char === ']' || char === '}') depth = Math.max(0, depth - 1)
+  }
+  return -1
+}
+
+/**
+ * Where a `:`-terminated head ends — Python's `def f(a) -> int:` and `class A(B):` —
+ * or -1.
+ *
+ * Two facts make a colon a head's end rather than a TypeScript return type's: it is
+ * the last thing on its line (a Python head always is; `(): { a } {` never is), and
+ * it follows a parameter list at depth 0. `::` is a path separator (`std::vec::Vec`)
+ * and never a head's end.
+ */
+function headColon(text: string): number {
+  const open = depth0Index(text, '(')
+  if (open < 0) return -1
+  // The matching close: the scan starts at depth 0 INSIDE the list, so a nested pair
+  // cancels itself and the first `)` seen at depth 0 is the one that closes `open`.
+  const close = depth0Index(text, ')', open + 1)
+  if (close < 0) return -1
+  for (let index = close + 1; index < text.length; index++) {
+    if (text[index] !== ':') continue
+    if (text[index - 1] === ':' || text[index + 1] === ':') continue
+    if (/^(?:\r\n|\n|\r|$)/u.test(text.slice(index + 1))) return index
+  }
+  return -1
+}
+
+/**
+ * Whether a value's right side is a function, so its head runs to `=>` or `{` rather
+ * than stopping at `=`. Measured by the arrow alone: `(…) =>`, `<T>(…) =>` and
+ * `async (…) =>` all carry one at depth 0, while `(a + b)` and `cond ? a : b` do not.
+ */
+function isFunctionValue(rightSide: string): boolean {
+  const value = rightSide.trimStart()
+  return /^(?:async\s+)?function\b/u.test(value) || depth0Index(value, '=>') >= 0
+}
+
+/** The kinds whose head a `:` can end. A `variable` never has a Python-style head. */
+const HEAD_COLON_KINDS = new Set(['function', 'method', 'class'])
+
+/**
+ * A head made of nothing but modifiers is not a signature (`export static`,
+ * `public abstract final`), and the column stores `''` for it rather than words the
+ * name repeats. Two or more, never one: `open` and `override` are modifier keywords
+ * in Swift and Kotlin and ordinary variable names everywhere — measured on this
+ * repository, a single-word rule emptied twelve `const open = …` heads.
+ */
+const MODIFIERS_ONLY = /^(?:(?:export|default|declare|abstract|async|public|private|protected|internal|static|final|override|readonly|const|let|var|val|pub|open|mut)\b\s*){2,}/u
+
+/**
+ * The declaration's head — what it takes and returns — on one line, without its body.
+ *
+ * One cut, chosen among the candidates the text offers, earliest wins:
+ *
+ *   - the body's `{` opens a body (`class C {`, `function f() {`, `def f(x) = { x }`)
+ *     and is not kept — a `{` in type position is not a body ({@link bodyBrace});
+ *   - `=>` at depth 0 opens an arrow's body and IS kept, because `x = (a) =>` says
+ *     more than `x = (a)`;
+ *   - `=` at depth 0 ends a value's head (`typed: Foo = compute()` → `typed: Foo`),
+ *     unless the right side is itself a function, which the two rules above then read;
+ *   - a `:` that ends its line after a parameter list ends a Python-style head
+ *     (`def f(a) -> int:` → `def f(a) -> int`, `class A(B):` → `class A(B)`) — for the
+ *     {@link HEAD_COLON_KINDS} kinds only.
+ *
+ * Whitespace collapses to single spaces first, so a parameter list spread over five
+ * lines is one line. Comments go before that — a head says what a declaration
+ * takes and returns, and a block or line comment inside it is prose that would
+ * otherwise ride into every answer that prints the signature, including the two
+ * that reach the model as a USER-role message (the request pack and the search
+ * note), where it would read as something the harness said. A double slash is a
+ * comment only at the start of the head or after whitespace or a delimiter, so a
+ * URL in a default (`url = 'https://x'`) survives. Past {@link MAX_SIGNATURE} the
+ * head is cut and `…` says so.
+ *
+ * @param nodeText - the declaration node's text, body included.
+ * @param kind - the symbol kind the extraction table gave the node.
+ * @returns the head, or `''` when nothing of it survives.
+ */
+export function normalizeSignature(nodeText: string, kind: string): string {
+  const text = nodeText.trim()
+  if (text === '') return ''
+  const cuts: number[] = []
+  const brace = bodyBrace(text)
+  if (brace >= 0) cuts.push(brace)
+  const arrow = depth0Index(text, '=>')
+  if (arrow >= 0) cuts.push(arrow + 2)
+  const assign = depth0Assignment(text)
+  if (assign >= 0 && !isFunctionValue(text.slice(assign + 1))) cuts.push(assign)
+  if (HEAD_COLON_KINDS.has(kind)) {
+    const colon = headColon(text)
+    if (colon >= 0) cuts.push(colon)
+  }
+  const head = stripHeadComments(cuts.length === 0 ? text : text.slice(0, Math.min(...cuts)))
+    .replace(/\s+/gu, ' ')
+    // After the fold, so line breaks are gone: any control character left cannot be
+    // read in a head, and a placeholder can.
+    .replace(/\p{Cc}/gu, '?')
+    .trim()
+  if (head.replace(MODIFIERS_ONLY, '').trim() === '') return ''
+  // The cap includes the ellipsis, so a head is never longer than MAX_SIGNATURE.
+  return head.length > MAX_SIGNATURE ? `${head.slice(0, MAX_SIGNATURE - 1)}…` : head
+}
+
+/**
+ * The comments out of a declaration head, its string literals untouched.
+ *
+ * A quote-aware scan rather than two regular expressions: a glob default (a
+ * recursive wildcard spelled star-star-slash, then the extension) holds the
+ * spelling of an empty block comment, and a text default holding "space,
+ * double slash, space" holds a line comment's — a regex would rewrite both, and
+ * the head is the declaration's fact as the model reads it (under the USER's
+ * role in the request pack and the
+ * search note). Outside quotes a block comment ends at its closing delimiter; a
+ * double slash is a comment only at the start of the head or after whitespace or a
+ * delimiter, so a URL in a default (`url = 'https://x'`) keeps its slashes. A
+ * comment just before a closing bracket takes its leading space with it, so a
+ * bracketed comment leaves no stray space before the bracket.
+ *
+ * @param head - the declaration's text up to its body.
+ * @returns the same text with comments replaced by single spaces.
+ */
+function stripHeadComments(head: string): string {
+  let out = ''
+  let quote: string | undefined
+  for (let i = 0; i < head.length;) {
+    const char = head[i]!
+    const next = head[i + 1]
+    if (quote !== undefined) {
+      out += char
+      if (char === '\\' && next !== undefined) {
+        out += next
+        i += 2
+        continue
+      }
+      if (char === quote) quote = undefined
+      i += 1
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char
+      out += char
+      i += 1
+      continue
+    }
+    if (char === '/' && next === '*') {
+      const end = head.indexOf('*/', i + 2)
+      i = end < 0 ? head.length : end + 2
+      const after = head.slice(i).match(/^\s*([\)\]\}])/u)
+      if (after === null) out += ' '
+      else out = out.trimEnd()
+      continue
+    }
+    if (char === '/' && next === '/' && (i === 0 || /[\s(,;]/u.test(head[i - 1]!))) {
+      const end = head.indexOf('\n', i)
+      i = end < 0 ? head.length : end
+      continue
+    }
+    out += char
+    i += 1
+  }
+  return out
+}
+
+/**
+ * The first sentence of the comment block directly above a declaration, or ''.
+ *
+ * Strips the decorations the supported grammars spell a comment with — the block
+ * openers (`/**`, `/*!`, `<!--`), the block closers, the per-line `*`, `//`, `///`,
+ * `#`, `--`, and haddock's `|` — drops a tag line (`@param …`) and everything after
+ * it (that half is for a reader of the source, not a summary), and keeps the first
+ * sentence. The fullwidth enders are here because the summary is read by a model
+ * working in Chinese as well as English. Past {@link MAX_DOC} the sentence is cut
+ * and `…` says so.
+ *
+ * @param commentText - the comment node's text, markers included.
+ * @returns the first sentence, or `''` when nothing survives the stripping.
+ */
+export function docComment(commentText: string): string {
+  const lines: string[] = []
+  for (const raw of commentText.split(/\r?\n/u)) {
+    // Closers first, so `* Foo */` loses its tail before the per-line star goes.
+    let line = raw.replace(/(?:\*\/|-->)\s*$/u, '').trim()
+    for (;;) {
+      // `/**` and `/*!` before the bare `/*`, and `///` as `//` repeated: the loop
+      // strips one marker at a time until none is left.
+      const stripped = line.replace(/^(?:\/\*\*|\/\*!|\/\*|\/{2,}|<!--|\*|#|--|\|)/u, '').trimStart()
+      if (stripped === line) break
+      line = stripped
+    }
+    if (line.startsWith('@')) break
+    if (line !== '') lines.push(line)
+  }
+  const text = lines.join(' ').replace(/\s+/gu, ' ').trim()
+  // An ASCII ender must be followed by a space or the end, or `3.14` and `e.g.` would
+  // end a sentence; a fullwidth one needs no such guard, because Chinese prose puts
+  // no space between sentences.
+  const end = text.search(/(?:[.!?](?=\s|$)|[。！？])/u)
+  const sentence = end < 0 ? text : text.slice(0, end + 1)
+  return sentence.length > MAX_DOC ? `${sentence.slice(0, MAX_DOC)}…` : sentence
+}
+
+/**
+ * A node type that is a comment. Every grammar here spells one with `comment` in the
+ * name (`comment`, `line_comment`, `block_comment`, `multiline_comment`,
+ * `documentation_comment`) but Haskell, whose documentation comment is a `haddock`.
+ */
+const COMMENT_NODE = /comment|haddock/u
+
+/**
+ * The comment directly above `node`, as a summary — or `''`.
+ *
+ * "Above" is two facts, and the second is the easy one to get wrong. The comment must
+ * end on the line before the declaration: a blank line between them ends its claim,
+ * and that is the common way of detaching a comment from what follows. And it must
+ * not start to the RIGHT of the declaration: Python attaches `x = 1  # note` as a
+ * SIBLING of the next `def`, one line above it (measured on a real parse), and that
+ * is a trailing comment on `x`, not a description of the function.
+ *
+ * @param node - the declaration.
+ * @param previous - what the walk holds as the node directly above it.
+ * @returns the summary, or `''`.
+ */
+function commentAbove(node: SyntaxNode, previous: SyntaxNode | null): string {
+  if (previous === null || !COMMENT_NODE.test(previous.type)) return ''
+  if (previous.endPosition.row !== node.startPosition.row - 1) return ''
+  if (previous.startPosition.column > node.startPosition.column) return ''
+  return docComment(previous.text)
+}
+
+/**
+ * Every node type that opens a bracketed body, read from the shapes' own `scopes`
+ * rather than hard-coded, so a language added later is covered by its own table.
+ */
+const BODY_SCOPES = new Set<string>(Object.values(GRAMMAR_SHAPES).flatMap(shape => [...shape.scopes]))
+
+/**
+ * The node a child reads as "the thing directly above it".
+ *
+ * A wrapper that opens on its declaration's own line hides the comment one level up:
+ * `export function f` is an `export_statement` whose first named child is the
+ * `function_declaration`, so the comment is the WRAPPER's previous sibling, not the
+ * declaration's. Measured on this repository's 478 TypeScript files: 6,220 of 15,189
+ * declarations have a comment on the line directly above, and 4,476 of those (72%)
+ * sit inside an `export_statement` or a `lexical_declaration` — without this
+ * pass-through, seven docs in ten would be stored as `''`. So a FIRST child on its
+ * parent's own row inherits the parent's `previous`.
+ *
+ * A body ({@link BODY_SCOPES}) never passes it down. Its first member is the body's
+ * own first statement (`class_body`, `statement_block`, Ruby's brace-less
+ * `body_statement`), and a class's doc must not become its first method's.
+ *
+ * @param parent - the node whose children are being walked.
+ * @param children - `parent.namedChildren`, already read once by the walk.
+ * @param index - the child's position among them.
+ * @param inherited - the parent's own `previous`.
+ * @returns the child's `previous`.
+ */
+function previousOf(parent: SyntaxNode, children: readonly SyntaxNode[], index: number, inherited: SyntaxNode | null): SyntaxNode | null {
+  if (index > 0) return children[index - 1] ?? null
+  const first = children[0]
+  if (first === undefined || first.startPosition.row !== parent.startPosition.row) return null
+  return BODY_SCOPES.has(parent.type) ? null : inherited
+}
+
+/**
+ * A Python docstring: the first statement of the body, when it is a bare string.
+ *
+ * Python documents with a string, not a comment, so the comment rule above reads
+ * nothing for most of its declarations. The shape is fixed (`block` →
+ * `expression_statement` → `string`), and only the FIRST statement counts — a string
+ * anywhere else is a value.
+ *
+ * @param node - a `function_definition` or `class_definition`.
+ * @returns the first sentence, or `''`.
+ */
+function pythonDocstring(node: SyntaxNode): string {
+  const body = node.namedChildren.find(child => child.type === 'block')
+  const statement = body?.namedChildren[0]
+  const value = statement?.type === 'expression_statement' ? statement.namedChildren[0] : undefined
+  if (value === undefined || value.type !== 'string') return ''
+  // The quotes are the literal's, not the prose's.
+  return docComment(value.text.replace(/^(['"]){1,3}|(['"]){1,3}$/gu, ''))
+}
+
 export function extractSymbols(root: SyntaxNode, path: string, language: string): ParsedFile {
   // `hasOwn` rather than a bare index: `node.type` is grammar-controlled text,
   // and a name like `constructor` would otherwise hit `Object.prototype`.
@@ -1171,8 +1528,12 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
    * separately from `parent` because `parent` is only the NAME (needed for the
    * next symbol's id) whereas the edge needs the full id, overload ordinal
    * included — two overloads of one name are two different callers.
+   *
+   * `previous` is the node this one reads as "directly above" it, which is where a
+   * doc comment would be; {@link previousOf} computes it per child.
    */
-  const walk = (node: SyntaxNode, parent: string | undefined, ownerId: string | undefined, parentType: string | undefined): void => {
+  const walk = (node: SyntaxNode, parent: string | undefined, ownerId: string | undefined, parentType: string | undefined, previous: SyntaxNode | null): void => {
+    const children = node.namedChildren
     const entry = Object.hasOwn(shape.declarations, node.type) ? shape.declarations[node.type] : undefined
     // ONE node type may declare several things (Elixir's `call` is `defmodule`, `def`,
     // `defimpl`, `@type` …), so a type maps to an ordered list and the first rule whose
@@ -1213,9 +1574,16 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
           // with no body (an interface member, a Rust `fn` prototype) is one line.
           endLine: node.endPosition.row + 1,
           parent,
+          signature: normalizeSignature(node.text, declaration.kind),
+          // A comment directly above wins over a docstring: a `#` line beside the
+          // `def` is the author's own shorter summary. Only Python documents with a
+          // string at all, so only its docstring is read.
+          doc: commentAbove(node, previous) || (language === 'python' ? pythonDocstring(node) : ''),
         })
         // A declaration's own body belongs to it.
-        for (const child of node.namedChildren) walk(child, name, id, node.type)
+        for (let index = 0; index < children.length; index++) {
+          walk(children[index], name, id, node.type, previousOf(node, children, index, previous))
+        }
         return
       }
     }
@@ -1337,10 +1705,12 @@ export function extractSymbols(root: SyntaxNode, path: string, language: string)
         if (name !== '') exports.push({ name: name.trim(), line, all: false, from: fromSpecifier })
       }
     }
-    for (const child of node.namedChildren) walk(child, parent, ownerId, node.type)
+    for (let index = 0; index < children.length; index++) {
+      walk(children[index], parent, ownerId, node.type, previousOf(node, children, index, previous))
+    }
   }
 
-  walk(root, undefined, undefined, undefined)
+  walk(root, undefined, undefined, undefined, null)
   return {
     symbols,
     calls,
@@ -1458,7 +1828,8 @@ function importedFromMap(
 }
 
 /**
- * The candidate ids one NAME should link to, through all three layers.
+ * The candidate ids one NAME should link to, through all three layers, and whether
+ * the referring file itself named the target.
  *
  * The import layer applies only when it can ANSWER: a clause naming a module that
  * declares none of this name falls through to the project-wide layer instead of
@@ -1469,28 +1840,37 @@ function importedFromMap(
  * would delete a real caller edge and make `codegraph_impact` say "nothing calls
  * this" about a function with call sites — the worst answer this plugin can give.
  *
+ * `narrowed` records WHICH layer answered, and it is the whole reason the layers are
+ * kept apart on the edge: the first two are statements the file makes (`function f`
+ * beside its caller, `import { Base } from './base'`), so a reader may trust the
+ * target; the third is a name match across the project — exact when unique, a
+ * candidate list when shared — and a reader told so can discount it. The barrel
+ * fallback above is exactly the case that must stay `false`: the import clause was
+ * consulted and could not answer, so the edge is a project-wide match with an import
+ * that merely mentions the name.
+ *
  * @param name - the call's callee, or the heritage/annotation's type name.
  * @param resolve - name → every declaration id carrying it.
  * @param local - this file's declarations, by name.
  * @param importedFrom - this file's import clauses, by name.
- * @returns the ids worth an edge.
+ * @returns the ids worth an edge, and whether a same-file or import clause chose them.
  */
 function linkFor(
   name: string,
   resolve: (name: string) => readonly string[],
   local: ReadonlyMap<string, string[]>,
   importedFrom: ReadonlyMap<string, string[]>,
-): readonly string[] {
+): { readonly ids: readonly string[], readonly narrowed: boolean } {
   const sameFile = local.get(name) ?? []
-  if (sameFile.length > 0) return linkTargets(resolve(name), sameFile)
+  if (sameFile.length > 0) return { ids: linkTargets(resolve(name), sameFile), narrowed: true }
   const sources = importedFrom.get(name)
   if (sources !== undefined && sources.length > 0) {
     const inSources = resolve(name).filter(id => sources.some(source => id.startsWith(`${source}#`)))
     // Only a HIT narrows. A miss means the module re-exports the name rather than
     // declaring it, and the clause then carries no information about the target.
-    if (inSources.length > 0) return linkTargets(inSources)
+    if (inSources.length > 0) return { ids: linkTargets(inSources), narrowed: true }
   }
-  return linkTargets(resolve(name))
+  return { ids: linkTargets(resolve(name)), narrowed: false }
 }
 
 /**
@@ -1553,7 +1933,8 @@ export function relationEdges(
   // import clause is what tells them apart.
   const importedFrom = importedFromMap(parsed, resolveModule)
   const add = (from: string, name: string, kind: 'extends' | 'implements' | 'type_refs', line: number): void => {
-    for (const target of linkFor(name, resolve, local, importedFrom)) edges.push({ from, to: target, kind, line })
+    const linked = linkFor(name, resolve, local, importedFrom)
+    for (const target of linked.ids) edges.push({ from, to: target, kind, line, narrowed: linked.narrowed })
   }
   for (const relation of parsed.heritage) add(relation.from, relation.name, relation.kind, relation.line)
   // ONE edge per (declaration, type), at its first line.
@@ -1577,12 +1958,18 @@ export function relationEdges(
   // declaration (`export * from './x'`), so they resolve against file nodes instead;
   // they still say "this file republishes that one's surface", which is what makes
   // "what does this package expose" answerable across a re-export chain.
+  //
+  // Every exports edge is `narrowed`: each branch below joins on a statement the file
+  // makes (the `from` module, or its own declaration), and an export that matches
+  // neither produces NO edge rather than a project-wide one — the boundary §10b of
+  // docs/agents/codegraph.md records for the re-export chain. There is no `false`
+  // exports edge to write, and the flag is set where the hit is made so that stays true.
   for (const entry of parsed.exports) {
     const fromFile = entry.from === undefined ? undefined : resolveModule?.(entry.from)
     if (entry.all) {
       // A re-export names a PATH. Storing it verbatim was the defect: the node is
       // project-relative, the specifier is not, and the edge joined to nothing.
-      if (fromFile !== undefined) edges.push({ from: fileId, to: `file:${fromFile}`, kind: 'exports', line: entry.line })
+      if (fromFile !== undefined) edges.push({ from: fileId, to: `file:${fromFile}`, kind: 'exports', line: entry.line, narrowed: true })
       continue
     }
     // A named re-export (`export { x } from '../y'`) means a declaration IN THAT
@@ -1592,13 +1979,13 @@ export function relationEdges(
     if (fromFile !== undefined) {
       // Narrow to the named module when the parse knows it; the join is exact.
       for (const target of linkTargets(resolve(entry.name).filter(id => id.startsWith(`${fromFile}#`)))) {
-        edges.push({ from: fileId, to: target, kind: 'exports', line: entry.line })
+        edges.push({ from: fileId, to: target, kind: 'exports', line: entry.line, narrowed: true })
       }
       continue
     }
     // A plain `export const x` / `export function f`: the declaration is this file's.
     for (const target of local.get(entry.name) ?? []) {
-      edges.push({ from: fileId, to: target, kind: 'exports', line: entry.line })
+      edges.push({ from: fileId, to: target, kind: 'exports', line: entry.line, narrowed: true })
     }
   }
   return edges
@@ -1634,11 +2021,11 @@ export function callEdges(
   }
   const importedFrom = importedFromMap(parsed, resolveModule)
   for (const call of parsed.calls) {
-    const targets = linkFor(call.name, resolve, local, importedFrom)
+    const linked = linkFor(call.name, resolve, local, importedFrom)
     // Zero targets means one of two things, and neither can produce an edge: the
     // callee is outside this project, or its name is shared so widely that every
     // declaration of it would be noise.
-    if (targets.length === 0) continue
+    if (linked.ids.length === 0) continue
     // SEVERAL targets: the name is declared more than once, by a handful.
     //
     // This used to be dropped as "ambiguous", and that was the single worst defect
@@ -1654,7 +2041,10 @@ export function callEdges(
     // Picking one would be a guess dressed as an answer; linking to all of them is a
     // fact — "this name is used here, and these are the declarations it could mean" —
     // which is what `codegraph_impact`'s candidates list exists to disambiguate.
-    for (const target of targets) {
+    //
+    // `narrowed` is what tells that candidates list from a certain edge: `false` here
+    // means the name was matched project-wide, so every target is a candidate.
+    for (const target of linked.ids) {
       // The edge starts at the enclosing DECLARATION when the call is inside one,
       // and at the file otherwise. This is what makes "what does this function
       // call" a question the graph can answer: attributing every call to the file
@@ -1666,7 +2056,7 @@ export function callEdges(
       // a module initialiser), a symbol id is a call made inside that symbol. A
       // separate kind would have meant every existing `references` query needing
       // to know about it, and `impact` genuinely wants both.
-      edges.push({ from: call.owner ?? callerId, to: target, kind: 'references', line: call.line })
+      edges.push({ from: call.owner ?? callerId, to: target, kind: 'references', line: call.line, narrowed: linked.narrowed })
     }
   }
   return edges

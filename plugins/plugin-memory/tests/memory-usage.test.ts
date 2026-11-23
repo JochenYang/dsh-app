@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
-import { aggregate, decompressFrames, emptyUsage, formatUsage, listSessionLogs, parseSince } from '../scripts/lib/session-log.mjs'
+import { aggregate, decompressFrames, emptyUsage, formatUsage, listSessionLogs, parseSince } from '../../../scripts/lib/session-log.mjs'
 import { scratchDir } from './scratch.ts'
 
 // `zstdCompressSync` is what builds the fixture; the script itself needs only

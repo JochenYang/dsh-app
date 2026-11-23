@@ -25,11 +25,13 @@ import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
 import {
   relationLabel,
+  outlineRow,
   renderContext,
   renderFind,
   renderImpact,
 } from '../src/tool-text.ts'
-import type { ContextResult, FindResult, ImpactResult, ListMeta, RelatedGroup, Referrer } from '../src/query.ts'
+import { estimateTokens, type OutlineDetail } from '../src/budget.ts'
+import type { CallerNode, ContextResult, FindResult, ImpactResult, ListMeta, OutlineEntry, RelatedGroup, Referrer } from '../src/query.ts'
 
 /** The text of the one block a renderer returns. */
 function text(blocks: { type: 'text', text: string }[]): string {
@@ -305,6 +307,7 @@ describe('renderContext', () => {
       truncated: false,
       file: {
         path: 'src/util.ts',
+        detail: 'full',
         symbols: [{
           id: 'src/util.ts#function:shared', name: 'shared', kind: 'function', path: 'src/util.ts',
           line: 9, parent: undefined, references: 40, exported: true,
@@ -420,5 +423,448 @@ describe('renderContext — the source section', () => {
       assert.match(rendered, /source: not included/u, `${reason} must say there is no source`)
       assert.match(rendered, pattern, `${reason} must name its own reason`)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Signature-led rows, the detail ladder, the confidence mark, the tests group
+// and the caller tree — the v5 columns read into the text.
+// ---------------------------------------------------------------------------
+
+/** One outline row, with the fields a case does not name set to the unremarkable. */
+const entry = (over: Partial<OutlineEntry> & Pick<OutlineEntry, 'id' | 'name' | 'kind' | 'line'>): OutlineEntry => ({
+  path: 'src/util.ts',
+  parent: undefined,
+  references: 0,
+  exported: false,
+  ...over,
+})
+
+/** A file-outline answer over the given rows at a detail level. */
+function outline(symbols: readonly OutlineEntry[], detail: OutlineDetail, over: Partial<ContextResult> = {}): ContextResult {
+  return {
+    freshness: 'current',
+    note: undefined,
+    siblings: [],
+    calls: [],
+    calledBy: [],
+    imports: [],
+    documents: [],
+    truncated: false,
+    ...over,
+    file: { path: 'src/util.ts', detail, symbols, reExports: [] },
+  }
+}
+
+describe('outlineRow — one row at each detail level', () => {
+  const shared = entry({ id: 'src/util.ts#function:shared', name: 'shared', kind: 'function', line: 9, references: 3, exported: true, signature: 'function shared(a: number): number', doc: 'Adds two numbers.' })
+
+  it('names: kind, parent, name, line and the id — nothing else', () => {
+    // The id stays because it is what the next call takes; the count and the
+    // export mark go, because at this level the row is an index, not a survey.
+    assert.equal(outlineRow(shared, 'names'), '- function shared:9 (id: src/util.ts#function:shared)')
+  })
+
+  it('signatures: the signature leads, then line, call sites, the export mark and the id', () => {
+    // The signature already says `function shared`, so the row does not say it again.
+    assert.equal(outlineRow(shared, 'signatures'), '- function shared(a: number): number :9 — 3 call site(s) [exported] (id: src/util.ts#function:shared)')
+  })
+
+  it('full: the same, with the doc sentence last', () => {
+    assert.equal(outlineRow(shared, 'full'), '- function shared(a: number): number :9 — 3 call site(s) [exported] (id: src/util.ts#function:shared) — Adds two numbers.')
+  })
+
+  it('full without a doc is the signatures row, with no dangling dash', () => {
+    const bare = entry({ ...shared, doc: undefined })
+    assert.equal(outlineRow(bare, 'full'), outlineRow(shared, 'signatures'))
+  })
+
+  it('puts the parent in front of a method signature that does not name it', () => {
+    // A grammar reads a method inside its class, so the head is `add(x)` and the
+    // row would read as a free function. `Widget.add(x)` is what a reader greps for.
+    const method = entry({ id: 'src/util.ts#method:Widget.add', name: 'add', kind: 'method', parent: 'Widget', line: 20, references: 2, signature: 'add(x: number): number' })
+    assert.equal(outlineRow(method, 'signatures'), '- Widget.add(x: number): number :20 — 2 call site(s) (id: src/util.ts#method:Widget.add)')
+    // A head that already mentions the parent (a Java `public void Widget.add`,
+    // or a qualified return type) is left alone.
+    const qualified = entry({ ...method, signature: 'public void Widget.add(int x)' })
+    assert.equal(outlineRow(qualified, 'signatures'), '- public void Widget.add(int x) :20 — 2 call site(s) (id: src/util.ts#method:Widget.add)')
+  })
+
+  it('falls back to the pre-v5 wording when the row has no signature', () => {
+    // A scanner language, or a head made of nothing but modifiers: the file must
+    // read as it did before the column existed, not as a row with nothing to lead.
+    const bare = entry({ id: 'src/util.ts#method:Widget.add', name: 'add', kind: 'method', parent: 'Widget', line: 20, references: 2, signature: undefined })
+    assert.equal(outlineRow(bare, 'signatures'), '- method Widget.add:20 — 2 call site(s) (id: src/util.ts#method:Widget.add)')
+    assert.equal(outlineRow(entry({ ...bare, signature: '' }), 'full'), '- method Widget.add:20 — 2 call site(s) (id: src/util.ts#method:Widget.add)')
+  })
+})
+
+describe('renderContext — the file outline', () => {
+  const rows = [
+    entry({ id: 'src/util.ts#function:shared', name: 'shared', kind: 'function', line: 9, references: 3, exported: true, signature: 'function shared(a: number): number', doc: 'Adds two numbers.' }),
+    entry({ id: 'src/util.ts#method:Widget.add', name: 'add', kind: 'method', parent: 'Widget', line: 20, references: 2, signature: 'add(x: number): number' }),
+  ]
+
+  it('names the level and the size on the first line, in the units the budget uses', () => {
+    const rendered = text(renderContext(outline(rows, 'signatures'), 40))
+    const listChars = rows.map(row => outlineRow(row, 'signatures')).join('\n').length
+    const expected = `codegraph_context: src/util.ts declares 2 symbol(s) · detail: signatures · ~${String(estimateTokens(listChars))}/1200 tokens`
+    assert.equal(rendered.split('\n')[0], expected)
+    assert.ok(estimateTokens(listChars) <= 1200)
+  })
+
+  it('draws the rows at the level the result names, not one it picks', () => {
+    const signatures = text(renderContext(outline(rows, 'signatures'), 40))
+    assert.match(signatures, /^- function shared\(a: number\): number :9 — 3 call site\(s\) \[exported\] \(id: src\/util\.ts#function:shared\)$/mu)
+    assert.doesNotMatch(signatures, /Adds two numbers/u, 'the doc is a `full`-level fact')
+    const full = text(renderContext(outline(rows, 'full'), 40))
+    assert.match(full, /— Adds two numbers\.$/mu)
+    const names = text(renderContext(outline(rows, 'names'), 40))
+    assert.match(names, /^- function shared:9 \(id: src\/util\.ts#function:shared\)$/mu)
+    assert.match(names, /^- method Widget\.add:20 \(id: src\/util\.ts#method:Widget\.add\)$/mu)
+    assert.doesNotMatch(names, /call site/u)
+  })
+
+  it('keeps the truncation sentence where it was, and adds the cut count after the size', () => {
+    const cut = { path: 'src/util.ts', detail: 'names' as const, symbols: rows, reExports: [] }
+    const rendered = text(renderContext({ ...outline(rows, 'names'), truncated: true, file: cut }, 40))
+    assert.match(rendered, /^codegraph_context: src\/util\.ts declares 2 symbol\(s\) \(TRUNCATED — more exist\) · detail: names · ~\d+\/1200 tokens$/mu)
+    const withCut = text(renderContext({ ...outline(rows, 'names'), truncated: true, file: { ...cut, cut: 22 } }, 40))
+    assert.match(withCut, / · 22 row\(s\) cut to fit the budget: the rows shown are the exported and most-referenced ones$/mu)
+    assert.doesNotMatch(text(renderContext({ ...outline(rows, 'names'), file: { ...cut, cut: 0 } }, 40)), /cut to fit/u, 'a zero cut is no cut')
+  })
+
+  it('renders every other line of the outline exactly as before', () => {
+    // The header gained two segments; nothing below it moved. Pinned as a literal,
+    // header size included: the two rows are 101 and 88 characters plus one
+    // newline, 190 characters, 48 tokens rounded up.
+    const rendered = text(renderContext({
+      ...outline(rows, 'signatures', { imports: ['src/lib.ts'] }),
+      file: { path: 'src/util.ts', detail: 'signatures', symbols: rows, reExports: ['src/other.ts'] },
+    }, 40))
+    assert.equal(rows.map(row => outlineRow(row, 'signatures')).join('\n').length, 190)
+    const lines = rendered.split('\n')
+    assert.equal(lines[0], 'codegraph_context: src/util.ts declares 2 symbol(s) · detail: signatures · ~48/1200 tokens')
+    assert.deepEqual(lines.slice(1), [
+      '- function shared(a: number): number :9 — 3 call site(s) [exported] (id: src/util.ts#function:shared)',
+      '- Widget.add(x: number): number :20 — 2 call site(s) (id: src/util.ts#method:Widget.add)',
+      're-exports these modules whole:',
+      '- src/other.ts',
+      'imports:',
+      '- src/lib.ts',
+      'Pass any id above as `symbol` to expand it, or use `codegraph_impact` for what a change would touch.',
+    ])
+  })
+})
+
+describe('renderFind — a short answer leads with the signature', () => {
+  const signed = {
+    id: 'src/a.ts#function:exported', name: 'exported', kind: 'function', path: 'src/a.ts', line: 1, parent: undefined,
+    references: 3, signature: 'function exported(a: number): number',
+  }
+
+  it('leads each row with the signature when there are ten rows or fewer', () => {
+    const rendered = text(renderFind({ freshness: 'current', note: undefined, truncated: false, symbols: [signed] }))
+    assert.equal(rendered.split('\n')[1], '- function exported(a: number): number — src/a.ts:1 — 3 call site(s) (id: src/a.ts#function:exported)')
+  })
+
+  it('keeps the kind-and-name row when there are eleven, signature or not', () => {
+    // Eleven rows is a survey; the signature would triple the answer for rows the
+    // reader will not open. Ten and eleven are the two sides of the one line.
+    const eleven = Array.from({ length: 11 }, (_, index) => ({ ...signed, id: `src/a.ts#function:exported${String(index)}`, name: `exported${String(index)}` }))
+    const rendered = text(renderFind({ freshness: 'current', note: undefined, truncated: false, symbols: eleven }))
+    assert.match(rendered, /^- function exported0 — src\/a\.ts:1 — 3 call site\(s\) \(id: src\/a\.ts#function:exported0\)$/mu)
+    assert.doesNotMatch(rendered, /\(a: number\)/u)
+    const ten = text(renderFind({ freshness: 'current', note: undefined, truncated: false, symbols: eleven.slice(0, 10) }))
+    assert.match(ten, /^- function exported\(a: number\): number — src\/a\.ts:1 — 3 call site\(s\) \(id: src\/a\.ts#function:exported0\)$/mu)
+  })
+
+  it('prefixes a method with its parent, and leaves a row without a signature as it was', () => {
+    const rendered = text(renderFind({
+      freshness: 'current', note: undefined, truncated: false,
+      symbols: [
+        { id: 'src/a.ts#method:Widget.add', name: 'add', kind: 'method', path: 'src/a.ts', line: 20, parent: 'Widget', references: 1, signature: 'add(x: number): number' },
+        { id: 'db/schema.prisma#struct:User', name: 'User', kind: 'struct', path: 'db/schema.prisma', line: 12, parent: undefined, references: 3 },
+      ],
+    }))
+    const rows = rendered.split('\n').filter(line => line.startsWith('- '))
+    assert.equal(rows[0], '- Widget.add(x: number): number — src/a.ts:20 — 1 call site(s) (id: src/a.ts#method:Widget.add)')
+    assert.equal(rows[1], '- struct User — db/schema.prisma:12 — 3 call site(s) (id: db/schema.prisma#struct:User)')
+  })
+})
+
+describe('renderContext — a symbol\u2019s siblings and calls', () => {
+  const base: ContextResult = {
+    freshness: 'current', note: undefined,
+    symbol: { id: 'src/a.ts#function:alpha', name: 'alpha', kind: 'function', path: 'src/a.ts', line: 1, parent: undefined },
+    siblings: [], calls: [], calledBy: [], imports: [], documents: [], truncated: false,
+  }
+  const beta = { id: 'src/a.ts#function:beta', name: 'beta', kind: 'function', path: 'src/a.ts', line: 10, parent: undefined, signature: 'function beta(x: number): number' }
+
+  it('gives a short sibling list the signature, and a long one the bare row', () => {
+    // Twenty-five is the line the outline draws between `full` and `signatures`;
+    // past it a list is a survey and the signature doubles it for nothing.
+    const short = text(renderContext({ ...base, siblings: [beta] }, 40))
+    assert.match(short, /^- function beta\(x: number\): number — src\/a\.ts:10$/mu)
+    const long = Array.from({ length: 26 }, (_, index) => ({ ...beta, id: `src/a.ts#function:beta${String(index)}`, name: `beta${String(index)}` }))
+    const surveyed = text(renderContext({ ...base, siblings: long }, 40))
+    assert.match(surveyed, /^- function beta0 — src\/a\.ts:10$/mu)
+    assert.doesNotMatch(surveyed, /\(x: number\)/u)
+  })
+
+  it('appends the callee\u2019s signature to a call row while the list is short', () => {
+    const rendered = text(renderContext({
+      ...base,
+      calls: [
+        { kind: 'references', line: 3, name: 'beta', path: 'src/a.ts', signature: 'function beta(x: number): number' },
+        // A shared name: `callsOf` leaves the signature off, and so must the row.
+        { kind: 'references', line: 4, name: 'gamma', path: undefined },
+      ],
+    }, 40))
+    assert.match(rendered, /^- beta at line 3 — function beta\(x: number\): number$/mu)
+    assert.match(rendered, /^- gamma at line 4$/mu)
+  })
+
+  it('keeps a long call list bare, signature or not', () => {
+    const calls = Array.from({ length: 16 }, (_, index) => ({ kind: 'references', line: index + 1, name: `c${String(index)}`, path: 'src/a.ts', signature: `function c${String(index)}()` }))
+    const rendered = text(renderContext({ ...base, calls }, 40))
+    assert.match(rendered, /^- c0 at line 1$/mu)
+    assert.doesNotMatch(rendered, /— function c/u)
+  })
+})
+
+describe('renderImpact — the tests group', () => {
+  const base = impact({})
+
+  it('lists the referencing test files under their own heading, after the references', () => {
+    const rendered = text(renderImpact({ symbol: 'shared' }, {
+      ...base,
+      tests: { files: ['tests/a.test.ts', 'tests/b.spec.ts'], total: 2 },
+    }))
+    const lines = rendered.split('\n')
+    const at = lines.indexOf('Tests that reference this (2 file(s)) — run these first:')
+    assert.ok(at > 0, 'the heading is there')
+    assert.deepEqual(lines.slice(at + 1, at + 3), ['- tests/a.test.ts', '- tests/b.spec.ts'])
+    // After the references (and their legend, when one was printed), before the imports.
+    assert.ok(at > lines.indexOf('- src/a.ts:3'))
+    assert.ok(at < lines.indexOf('its file imports (1):'))
+    assert.doesNotMatch(rendered, /TRUNCATED/u, 'a complete group says nothing about a cut')
+  })
+
+  it('says how many test files are missing when the group was cut', () => {
+    const rendered = text(renderImpact({ symbol: 'shared' }, {
+      ...base,
+      tests: { files: Array.from({ length: 15 }, (_, i) => `tests/t${String(i)}.test.ts`), total: 22 },
+    }))
+    assert.match(rendered, /^Tests that reference this \(15 of 22 file\(s\)\) — run these first:$/mu)
+    assert.match(rendered, /^TRUNCATED: 7 more test file\(s\) exist; this is a sample, not every test that touches it\.$/mu)
+  })
+
+  it('prints no group when no test file references the symbol', () => {
+    const rendered = text(renderImpact({ symbol: 'shared' }, { ...base, tests: { files: [], total: 0 } }))
+    assert.doesNotMatch(rendered, /Tests that reference/u)
+  })
+})
+
+describe('renderImpact — the confidence mark', () => {
+  it('marks a reference the referring file resolved itself, and explains the mark once', () => {
+    const rendered = text(renderImpact({ symbol: 'shared' }, impact({
+      referencing: [{ ...ref('src/a.ts', 3, 'alpha'), narrowed: true }, ref('src/b.ts', 8), { ...ref('src/c.ts', 9, 'gamma'), narrowed: false }],
+    })))
+    assert.match(rendered, /^- src\/a\.ts:3 ✓$/mu)
+    assert.match(rendered, /^- src\/b\.ts:8$/mu, 'a name match is unmarked, not marked with something else')
+    assert.match(rendered, /^- src\/c\.ts:9$/mu)
+    assert.equal(rendered.split('\n').filter(line => line.startsWith('- ') && line.endsWith(' ✓')).length, 1, 'the mark is on the one certain row, and on no other')
+    const legend = '(✓ = resolved by a same-file declaration or an import clause; unmarked rows are name matches.)'
+    assert.equal(rendered.split('\n').filter(line => line === legend).length, 1, 'the legend is printed exactly once')
+    const lines = rendered.split('\n')
+    assert.equal(lines[lines.indexOf(legend) - 1], '- src/c.ts:9', 'the legend follows the references list directly')
+    assert.ok(lines.indexOf(legend) < lines.indexOf('its file imports (1):'), 'and comes before everything that is not a reference')
+  })
+
+  it('prints no legend when no row carries the mark', () => {
+    // A legend for a symbol the answer never used is a line spent on nothing.
+    const rendered = text(renderImpact({ symbol: 'shared' }, impact({ referencing: [ref('src/a.ts', 3, 'alpha')] })))
+    assert.doesNotMatch(rendered, /✓/u)
+    assert.doesNotMatch(rendered, /name matches/u)
+  })
+
+  it('keeps the legend after the truncation sentence of a cut list', () => {
+    const rendered = text(renderImpact({ symbol: 'shared' }, impact(
+      { referencing: [{ ...ref('src/a.ts', 3, 'alpha'), narrowed: true }], total: 664, truncated: true },
+      { references: { shown: 1, total: 664, truncated: true } },
+    )))
+    const lines = rendered.split('\n')
+    const legend = lines.findIndex(line => line.startsWith('(✓'))
+    assert.ok(legend > lines.findIndex(line => line.startsWith('TRUNCATED: 663 more reference')), 'the cut is said first, then what the mark means')
+  })
+})
+
+/** A caller node, with the fields a case does not name set to the unremarkable. */
+const node = (id: string, over: Partial<CallerNode> & { children?: CallerNode[] } = {}): CallerNode => ({
+  id, name: id.split(':').pop() ?? id, kind: 'function', path: id.split('#')[0] ?? id, line: 1, ...over, children: over.children ?? [],
+})
+
+describe('renderImpact — the caller tree', () => {
+  const base = impact({})
+
+  it('prints the tree as an outline, two spaces deeper per level', () => {
+    const tree = {
+      depth: 3, nodes: 4, truncated: false,
+      roots: [
+        node('src/b.ts#function:run', { line: 9, children: [
+          node('src/c.ts#function:step', { line: 3, children: [node('src/d.ts#function:leaf', { line: 7 })] }),
+          node('src/e.ts#function:other', { line: 1 }),
+        ] }),
+      ],
+    }
+    const rendered = text(renderImpact({ symbol: 'shared', depth: 3 }, { ...base, callers: tree }))
+    assert.match(rendered, /^Callers up to depth 3 \(4 node\(s\)\):$/mu)
+    assert.match(rendered, /^- src\/b\.ts:9 function run$/mu)
+    assert.match(rendered, /^  - src\/c\.ts:3 function step$/mu)
+    assert.match(rendered, /^    - src\/d\.ts:7 function leaf$/mu)
+    assert.match(rendered, /^  - src\/e\.ts:1 function other$/mu)
+  })
+
+  it('ends a cycle with (see above) instead of walking it again', () => {
+    const rendered = text(renderImpact({ symbol: 'shared', depth: 2 }, {
+      ...base,
+      callers: { depth: 2, nodes: 2, truncated: false, roots: [node('src/b.ts#function:run', { line: 9, children: [node('src/util.ts#function:shared', { line: 9, repeated: true })] })] },
+    }))
+    assert.match(rendered, /^  - src\/util\.ts:9 function shared \(see above\)$/mu)
+  })
+
+  it('states the node-budget cut in the heading, at the count it stopped', () => {
+    const rendered = text(renderImpact({ symbol: 'shared', depth: 2 }, {
+      ...base,
+      callers: { depth: 2, nodes: 60, truncated: true, roots: [node('src/b.ts#function:run', { line: 9 })] },
+    }))
+    assert.match(rendered, /^Callers up to depth 2 \(60 node\(s\) — TRUNCATED at 60\):$/mu)
+  })
+
+  it('states a per-symbol cut on the row whose callers were cut, and the top level\u2019s in the heading', () => {
+    // Two different cuts in two different places: the node budget stops the whole
+    // walk (heading), a per-symbol cut leaves ONE caller with some of its callers
+    // listed (that caller's row).
+    const rendered = text(renderImpact({ symbol: 'shared', depth: 2 }, {
+      ...base,
+      callers: {
+        depth: 2, nodes: 13, truncated: false, callers: 300,
+        roots: [node('src/b.ts#function:run', { line: 9, callers: 45, children: [node('src/c.ts#function:step', { line: 3 })] })],
+      },
+    }))
+    assert.match(rendered, /^Callers up to depth 2 \(13 node\(s\) — 1 of 300 caller\(s\) at the top level\):$/mu)
+    assert.match(rendered, /^- src\/b\.ts:9 function run — 45 caller\(s\), 1 shown$/mu)
+    assert.doesNotMatch(rendered, /TRUNCATED/u, 'the node budget was not what cut this tree')
+  })
+
+  it('says nothing about a tree the default depth did not ask for', () => {
+    assert.doesNotMatch(text(renderImpact({ symbol: 'shared' }, base)), /Callers up to depth/u)
+  })
+})
+
+describe('the answers without a v5 field render exactly as before', () => {
+  // The regression these literals pin: every new segment is conditional on a
+  // new field, so a value with none of them must come out byte for byte as the
+  // previous renderer drew it. The strings below were produced by HEAD's
+  // `tool-text.ts` on these same values (rendered side by side before this
+  // suite was written), not typed from memory.
+  const target = { id: 'src/util.ts#function:shared', name: 'shared', kind: 'function', path: 'src/util.ts', line: 9, parent: undefined }
+
+  it('impact: a complete answer', () => {
+    const rendered = text(renderImpact({ symbol: 'shared' }, impact({
+      referencing: [ref('src/a.ts', 3, 'alpha'), ref('src/b.ts', 8)],
+      imports: ['src/lib.ts'],
+      related: [group('implements', [ref('src/c.ts', 1, 'Impl')])],
+    })))
+    assert.equal(rendered, [
+      'codegraph_impact: function shared — src/util.ts:9',
+      'referenced from 2 reference(s) across 2 file(s):',
+      '- src/a.ts:3',
+      '- src/b.ts:8',
+      'its file imports (1):',
+      '- src/lib.ts',
+      'implements this (1):',
+      '- src/c.ts:1 (Impl)',
+    ].join('\n'))
+  })
+
+  it('impact: a cut answer, both cuts', () => {
+    const rendered = text(renderImpact({ symbol: 'shared' }, impact({
+      freshness: 'stale', note: 'older than the working tree', target,
+      referencing: Array.from({ length: 3 }, (_, i) => ref(`src/f${String(i)}.ts`, i + 1)),
+      imports: ['src/dep1.ts', 'src/dep2.ts', 'src/dep3.ts'],
+      related: [],
+      truncated: true, total: 664,
+    }, { references: { shown: 3, total: 664, truncated: true }, imports: { shown: 2, total: 300, truncated: true } })))
+    assert.equal(rendered, [
+      'codegraph_impact: function shared — src/util.ts:9',
+      'note: older than the working tree',
+      'referenced from 664 reference(s) — 3 shown, across 3 file(s):',
+      '- src/f0.ts:1',
+      '- src/f1.ts:2',
+      '- src/f2.ts:3',
+      'TRUNCATED: 661 more reference(s) exist. This is a SAMPLE, not the complete list — verify with a text search before concluding anything about callers.',
+      'its file imports (2 of 300):',
+      '- src/dep1.ts',
+      '- src/dep2.ts',
+      '- src/dep3.ts',
+      "TRUNCATED: the imports list is a sample — 298 more import(s) exist. Do not read it as the file's complete dependency set.",
+    ].join('\n'))
+  })
+
+  it('impact: no direct callers', () => {
+    const rendered = text(renderImpact({ symbol: 'shared' }, impact({ referencing: [], imports: [], total: 0 })))
+    assert.equal(rendered, [
+      'codegraph_impact: function shared — src/util.ts:9',
+      'referenced from 0 reference(s) across 0 file(s):',
+      'No direct callers found. That is NOT "safe to change": a call through an interface, a dynamic dispatch or a variable holds no name to resolve, so it leaves no edge. Verify with a text search.',
+    ].join('\n'))
+  })
+
+  it('context: a symbol with siblings, calls, callers, imports and a document', () => {
+    const rendered = text(renderContext({
+      freshness: 'current', note: undefined,
+      symbol: { id: 'src/a.ts#function:alpha', name: 'alpha', kind: 'function', path: 'src/a.ts', line: 1, parent: undefined },
+      siblings: [
+        { id: 'src/a.ts#function:beta', name: 'beta', kind: 'function', path: 'src/a.ts', line: 10, parent: undefined },
+        { id: 'src/a.ts#method:Widget.add', name: 'add', kind: 'method', path: 'src/a.ts', line: 20, parent: 'Widget' },
+      ],
+      calls: [{ kind: 'references', line: 3, name: 'beta', path: 'src/a.ts' }, { kind: 'references', line: 4, name: 'gamma', path: undefined }],
+      calledBy: [{ kind: 'references', line: 7, path: 'src/c.ts', name: undefined }],
+      imports: ['src/lib.ts'],
+      documents: [{ path: 'docs/guide.md', line: 3 }],
+      truncated: false,
+    }, 40))
+    assert.equal(rendered, [
+      'codegraph_context: function alpha — src/a.ts:1',
+      'same file (2):',
+      '- function beta — src/a.ts:10',
+      '- method Widget.add — src/a.ts:20',
+      'calls made from here:',
+      '- beta at line 3',
+      '- gamma at line 4',
+      'called by:',
+      '- src/c.ts:7',
+      'imports:',
+      '- src/lib.ts',
+      'described in:',
+      '- docs/guide.md:3',
+    ].join('\n'))
+  })
+
+  it('find: a short answer', () => {
+    const rendered = text(renderFind({
+      freshness: 'current', note: undefined, truncated: false,
+      symbols: [
+        { id: 'src/a.ts#function:cheap', name: 'cheap', kind: 'function', path: 'src/a.ts', line: 1, parent: undefined, references: 2 },
+        { id: 'src/b.ts#function:busy', name: 'busy', kind: 'function', path: 'src/b.ts', line: 1, parent: undefined, references: 482 },
+      ],
+    }))
+    assert.equal(rendered, [
+      'codegraph_find: 2 match(es)',
+      '- function cheap — src/a.ts:1 — 2 call site(s) (id: src/a.ts#function:cheap)',
+      '- function busy — src/b.ts:1 — 482 call site(s) (id: src/b.ts#function:busy) (large: prefer `codegraph_impact` over searching)',
+    ].join('\n'))
   })
 })

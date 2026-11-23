@@ -17,6 +17,7 @@ import {
   hasNegation,
   isGeneratedHead,
   isGeneratedPath,
+  isGeneratedShape,
   isIgnored,
   parseGitignore,
 } from '../src/ignore.ts'
@@ -176,5 +177,51 @@ describe('isGeneratedHead', () => {
   it('says nothing for an ordinary source file or for an empty head', () => {
     assert.equal(isGeneratedHead('SYM alpha\nCALL beta\n'), false)
     assert.equal(isGeneratedHead(''), false)
+  })
+})
+
+describe('isGeneratedShape', () => {
+  /** A head of `lines` lines of `width` characters, the last one without a newline. */
+  const head = (lines: number, width: number): string =>
+    Array.from({ length: lines }, (_, index) => `${'x'.repeat(width - 1)}${index === lines - 1 ? '' : '\n'}`).join('')
+
+  it('reads a bundle by its line lengths, with no name and no banner to go by', () => {
+    // The case both other rules miss: committed build output whose file name is
+    // ordinary and whose first lines carry no generator banner.
+    assert.equal(isGeneratedShape(head(6, 700)), true, 'an average line of 700 is a bundler')
+    assert.equal(isGeneratedShape(head(1, 4_096)), true, 'one line that fills the whole head')
+  })
+
+  it('leaves a hand-written file alone, long literal included', () => {
+    assert.equal(isGeneratedShape(head(80, 48)), false, 'an average line of 48 is a person')
+    // A 3,000-character inline fixture under an otherwise normal head: the
+    // average stays a person's, which is why the rule reads the average and not
+    // the longest line.
+    assert.equal(isGeneratedShape(`${'y'.repeat(3_000)}\n${head(60, 45)}`), false)
+    assert.equal(isGeneratedShape(''), false)
+  })
+
+  it('never judges a document: prose is written one paragraph per line', () => {
+    assert.equal(isGeneratedShape(head(5, 900), true), false, 'a README with long paragraphs is still a README')
+  })
+
+  it('is applied by the walk to source files and not to documents', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { scanProject } = await import('../src/indexer.ts')
+    const { removeTree } = await import('../src/remove-tree.ts')
+    const root = mkdtempSync(join(tmpdir(), 'dshcg-shape-'))
+    try {
+      mkdirSync(join(root, 'src'))
+      writeFileSync(join(root, 'src', 'bundle.ts'), head(6, 700))
+      writeFileSync(join(root, 'src', 'hand.ts'), head(80, 48))
+      writeFileSync(join(root, 'README.md'), head(5, 900))
+      const scan = scanProject(root)
+      assert.deepEqual([...scan.generated].sort(), ['src/bundle.ts'], 'the bundle is reported, never silently dropped')
+      assert.deepEqual(scan.files.map(file => file.path).sort(), ['README.md', 'src/hand.ts'])
+    } finally {
+      await removeTree(root)
+    }
   })
 })

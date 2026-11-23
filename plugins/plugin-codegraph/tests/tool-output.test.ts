@@ -19,10 +19,14 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { describe, it } from 'node:test'
+import { after, describe, it } from 'node:test'
 import { readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
+import { validateJsonSchemaValue, type JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import { dropUndefined, type ContextResult, type FindResult, type ImpactResult, type Referrer } from '../src/query.ts'
+import { apply } from '../src/index.ts'
 
 /** The exact shape a `current`, unremarkable `find` answer has. */
 const findAnswer = (): FindResult => ({
@@ -189,5 +193,140 @@ describe('the three tool answers survive the snapshot', () => {
     // schema row breaks here.
     const referrer: Referrer = { path: 'a.ts', line: 4, kind: 'references', name: 'caller' }
     assert.deepEqual(Object.keys(referrer).sort(), ['kind', 'line', 'name', 'path'])
+  })
+})
+
+/**
+ * The registered schemas, as `apply` left them, read once.
+ *
+ * Hand-built values here rather than a live graph: the question is whether the
+ * schema DECLARES a field, which a real answer can only answer for the fields
+ * that graph happens to produce. Every field the v5 columns added gets a value
+ * that carries it and nothing else, so a missing schema row fails the one case
+ * that names it. (`answers.test.ts` runs the real tools through the same
+ * schemas for the shape a graph actually produces.)
+ */
+let schemas: Map<string, JsonSchemaNode> | undefined
+/** The DSH home this suite found, restored once every case has run. */
+const previousHome = process.env.DSH_HOME
+after(() => {
+  if (previousHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousHome
+})
+function registeredSchemas(): Map<string, JsonSchemaNode> {
+  if (schemas !== undefined) return schemas
+  // A home that does not exist: `apply` lists known projects on a timer, and the
+  // real home's graphs are none of this suite's business. Restored in `after`,
+  // after that timer has had every chance to fire against the fake.
+  process.env.DSH_HOME = join(tmpdir(), 'dsh-cg-tool-output-no-such-home')
+  const found = new Map<string, JsonSchemaNode>()
+  const ctx = {
+    tools: { register(tool: { name: string, output: { schema: JsonSchemaNode } }): () => void { found.set(tool.name, tool.output.schema); return () => {} } },
+    systemPrompt: { context(): () => void { return () => {} } },
+    on(): () => void { return () => {} },
+    effect(body: () => () => void): void { body() },
+    inject(_deps: readonly string[], _callback: (scope: unknown) => void): void { /* no connection carrier */ },
+  }
+  apply(ctx as never)
+  schemas = found
+  return found
+}
+
+/** Validate one value against one tool's registered schema, after the strip the kernel applies. */
+function problems(tool: 'codegraph_find' | 'codegraph_impact' | 'codegraph_context', value: unknown): string[] {
+  const schema = registeredSchemas().get(tool)
+  assert.ok(schema !== undefined, `${tool} is registered`)
+  return validateJsonSchemaValue(schema, JSON.parse(JSON.stringify(dropUndefined(value))))
+}
+
+describe('every field the v5 columns add is declared by its schema', () => {
+  it('find: a row may carry a signature', () => {
+    assert.deepEqual(problems('codegraph_find', {
+      freshness: 'current', note: undefined, truncated: false,
+      symbols: [{ id: 'a.ts#function:f', name: 'f', kind: 'function', path: 'a.ts', line: 1, parent: undefined, references: 1, signature: 'function f(): void' }],
+    }), [])
+    // And nothing else: the doc is NOT a find field, which is exactly how the
+    // first detail read failed — the row spread `doc: ""` into the answer.
+    assert.notEqual(problems('codegraph_find', {
+      freshness: 'current', truncated: false,
+      symbols: [{ id: 'a.ts#function:f', name: 'f', kind: 'function', path: 'a.ts', line: 1, parent: undefined, references: 1, doc: '' }],
+    }).length, 0)
+  })
+
+  it('impact: a reference may carry the confidence flag and the caller id', () => {
+    const base = {
+      freshness: 'current', note: undefined,
+      target: { id: 'a.ts#function:f', name: 'f', kind: 'function', path: 'a.ts', line: 1, parent: undefined },
+      imports: [], truncated: false, total: 1, candidates: [], related: [],
+    }
+    assert.deepEqual(problems('codegraph_impact', {
+      ...base,
+      referencing: [
+        { path: 'a.ts', line: 4, kind: 'references', name: 'caller', narrowed: true, callerId: 'a.ts#function:caller' },
+        { path: 'b.ts', line: 2, kind: 'references', name: undefined },
+      ],
+    }), [])
+  })
+
+  it('impact: the tests group', () => {
+    assert.deepEqual(problems('codegraph_impact', {
+      freshness: 'current', note: undefined, target: undefined, referencing: [], imports: [], truncated: false, total: 0, candidates: [],
+      related: [],
+      tests: { files: ['tests/a.test.ts'], total: 3 },
+    }), [])
+  })
+
+  it('impact: the caller tree, three levels deep, with every optional node field', () => {
+    const leaf = { id: 'd.ts#function:leaf', name: 'leaf', kind: 'function', path: 'd.ts', line: 1, children: [], repeated: true }
+    const mid = { id: 'c.ts#function:mid', name: 'mid', kind: 'method', path: 'c.ts', line: 3, children: [leaf], callers: 40 }
+    const root = { id: 'b.ts#function:root', name: 'root', kind: 'function', path: 'b.ts', line: 9, children: [mid] }
+    assert.deepEqual(problems('codegraph_impact', {
+      freshness: 'current', note: undefined, target: undefined, referencing: [], imports: [], truncated: true, total: 0, candidates: [], related: [],
+      callers: { depth: 3, nodes: 3, truncated: true, roots: [root], callers: 300 },
+    }), [])
+    // The innermost `children` is an open array by design (`depth` is clamped to
+    // 3, so it only ever holds `[]`); what the schema does refuse is a node
+    // field it does not know, at any level.
+    assert.notEqual(problems('codegraph_impact', {
+      freshness: 'current', target: undefined, referencing: [], imports: [], truncated: false, total: 0, candidates: [], related: [],
+      callers: { depth: 3, nodes: 2, truncated: false, roots: [{ ...root, children: [{ ...mid, signature: 'x' }] }] },
+    }).length, 0)
+  })
+
+  it('context: a file outline with its level, its cut and a row\u2019s head and summary', () => {
+    const file = {
+      freshness: 'current', note: undefined, siblings: [], calls: [], calledBy: [], imports: [], documents: [], truncated: true,
+      file: {
+        path: 'src/a.ts', detail: 'names', cut: 22,
+        symbols: [{ id: 'src/a.ts#function:f', name: 'f', kind: 'function', path: 'src/a.ts', line: 1, parent: undefined, references: 3, exported: true, signature: 'function f(): void', doc: 'Does.' }],
+        reExports: [],
+      },
+    }
+    assert.deepEqual(problems('codegraph_context', file), [])
+    // The level is required: a value without it would render at a level the
+    // first line cannot name.
+    const { detail: _detail, ...withoutDetail } = file.file
+    assert.notEqual(problems('codegraph_context', { ...file, file: withoutDetail }).length, 0)
+  })
+
+  it('context: a symbol whose siblings and calls carry a head', () => {
+    assert.deepEqual(problems('codegraph_context', {
+      freshness: 'current', note: undefined,
+      symbol: { id: 'a.ts#function:f', name: 'f', kind: 'function', path: 'a.ts', line: 1, parent: undefined },
+      siblings: [{ id: 'a.ts#function:g', name: 'g', kind: 'function', path: 'a.ts', line: 5, parent: undefined, signature: 'function g(x: number): number' }],
+      calls: [{ kind: 'references', line: 3, name: 'g', path: 'a.ts', signature: 'function g(x: number): number' }],
+      calledBy: [], imports: [], documents: [], truncated: false,
+    }), [])
+  })
+})
+
+describe('the registered schemas refuse an undeclared key', () => {
+  it('is live: a made-up field on a find row is refused', () => {
+    // The control for the suite above. If the validator accepted anything, every
+    // "declared" assertion would pass without proving a thing.
+    assert.notEqual(problems('codegraph_find', {
+      freshness: 'current', truncated: false,
+      symbols: [{ id: 'x', name: 'n', kind: 'k', path: 'p', line: 1, parent: undefined, references: 0, madeUp: true }],
+    }).length, 0)
   })
 })

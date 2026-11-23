@@ -292,3 +292,39 @@ export function isGeneratedHead(head: string): boolean {
   }
   return false
 }
+
+/**
+ * An average line longer than this, over the head, is machine-written.
+ *
+ * About seven times the longest average line length measured on hand-written
+ * source (roughly 70). A bundle that was committed WITHOUT a `.min.` in its name
+ * and WITHOUT a banner is the case the two rules above cannot see, and it is the
+ * expensive one: measured on a real repository, 25 such files held 90% of the
+ * definitions, 86% of the edges and 92% of the unresolved calls of a 335-file
+ * graph, and their one- and two-letter names collided with real symbols so the
+ * project-wide name rule gave up on calls it could have linked.
+ */
+export const GENERATED_AVG_LINE_CHARS = 500
+
+/**
+ * Does the SHAPE of a file's head say a machine wrote it?
+ *
+ * The banner rule reads words; this reads line lengths. A bundler writes one
+ * line of thousands of characters, where a person writes dozens. The average
+ * over the whole head is what separates them: a long literal inside an
+ * otherwise normal file (a test fixture's inline snapshot) moves the average
+ * far less than a threshold that is seven times a person's line.
+ *
+ * Documents are exempt, by the caller's word: prose is written one paragraph
+ * per line, and a README with long paragraphs is exactly what this rule would
+ * otherwise call generated.
+ *
+ * @param head - the first {@link GENERATED_HEAD_BYTES} of the file, decoded.
+ * @param document - true when the file is a document, which this rule never judges.
+ * @returns true when the head's lines average {@link GENERATED_AVG_LINE_CHARS} or more.
+ */
+export function isGeneratedShape(head: string, document = false): boolean {
+  if (document || head === '') return false
+  const lines = head.split(/\r?\n/u).length
+  return head.length / lines >= GENERATED_AVG_LINE_CHARS
+}

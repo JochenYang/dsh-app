@@ -66,6 +66,26 @@ reader actually has about an interface. **A signature is not a call** either:
 project: 142 `extends`, 182 `implements` and 25,561 `type_refs`, for about one
 second of extra index time.
 
+Three columns were added with schema 5, and all three say what a declaration IS
+rather than where it is:
+
+| Column | Holds | Read by |
+|---|---|---|
+| `symbols.signature` | the declaration's head on one line — what it takes and returns, without its body (`normalizeSignature` in `parse.ts`); `''` when nothing survives | the outline and `find` rows, the request pack |
+| `symbols.doc` | the first sentence of the comment block directly above (`docComment`); a Python docstring when there is no comment | the outline rows at the finest detail |
+| `edges.narrowed` | `1` when the reference was resolved by a same-file declaration or by an import clause, `0` when only the name matched project-wide (`linkFor`'s three layers) | the `✓` on an `impact` row |
+
+They are deliberately OUTSIDE `symbolColumns()`: `toSymbolView` spreads a row
+whole and every tool's output schema is `additionalProperties: false`, so a
+column that rides into the view unannounced fails the whole answer. Each reader
+asks for them by name.
+
+Measured on this repository before the columns existed (478 TypeScript files,
+15,189 declarations): 41% of declarations have a comment on the line directly
+above, and 72% of those comments sit one level up from the declaration (inside
+its `export` or `lexical` wrapper) — a reader that looks only at the
+declaration's own previous sibling stores `''` for seven docs in ten.
+
 ## 2. Which module decides what
 
 | Module | Owns | Never does |
@@ -74,7 +94,7 @@ second of extra index time.
 | `src/languages.ts` | which extensions map to which grammar, the download + sha512 check, and which three grammars the plugin builds itself (§11) | parse |
 | `src/parse.ts` | the per-language extraction tables (`GRAMMAR_SHAPES`) and the three-layer name resolution (`linkFor`) | touch the disk |
 | `src/search.ts` | how a query string becomes filters, and which words a multi-word query is made of | query a database, or index anything |
-| `src/ignore.ts` | `.gitignore` matching and the generated-file verdict, as pure functions over strings | walk a tree |
+| `src/ignore.ts` | `.gitignore` matching and the generated-file verdict — by name, by banner, or by the SHAPE of the head's lines — as pure functions over strings | walk a tree |
 | `src/sfc.ts` | the code region of a Vue/Svelte/Astro component (a `<script>` block, or Astro's `---` frontmatter), masked into its own line positions | parse anything |
 | `src/sql.ts` | the SQL scanner: `CREATE` keywords and the objects a statement names | parse SQL properly, or resolve schemas |
 | `src/schema.ts` | the block scanner behind Prisma and GraphQL SDL, and their two keyword/reference tables | parse either language, or resolve a type to a declaration |
@@ -87,6 +107,12 @@ second of extra index time.
 | `src/routes.ts` | the settings page's and the pages' HTTP surface | compute index state |
 | `src/client/page.tsx` | the sidebar page: every project, then one project's graph | own a second copy of the graph surface (it reuses `GraphPanel`) |
 | `src/index.ts` | tool registration and the composition | — |
+| `src/overview-state.ts` | which overview text a session gets, across assemblies: the failure / status / full rules (§8b-2) | read a graph or a clock it was not handed |
+| `src/grep-note.ts` | the one line appended after a search the model made itself, and the per-session "already told" rule (§8d) | listen to anything, or decide whether the graph is current |
+| `src/prefetch.ts` | the request pack: the tokens a request names, their strict resolution, the text and its budget (§8e) | listen to anything, read a switch, or decide whether the graph is current |
+| `src/budget.ts` | the source slice's budget (§9b) and the outline's: the detail ladder, the 1,200-token list budget, how many rows survive (§8f) | render a row, or read a graph |
+| `src/switches.ts` | the environment switches — their names, the `0`/`false` convention, which ones are wired (§12) | read anything but the environment |
+| `src/usage.ts` | what the model-facing features did per project, counted in memory for `/status` (§12) | write a file, or reach a prompt |
 | `src/refresh.ts` | the debounce that turns a `tools/result` into one change CHECK per project | own a queue, a database, or a verdict |
 | `src/tool-text.ts` | what the three tools SAY (`renderFind` / `renderImpact` / `renderContext`) | read a graph, a queue or a clock |
 | `src/queue.ts` | serialisation, the state machine, the read-only change decision, the compensating pass a mid-pass change owes, and cancelling a deleted project's work | write to a graph, or decide staleness from Git |
@@ -459,25 +485,32 @@ already in context, so "what is this project" has nothing left to explore.
 
 Three properties make it safe to run on every turn:
 
-- **Bounded** — five entry candidates, five hubs, three languages, ~14 lines. This
-  is context spent on every turn; an unbounded list would cost more than the reading
-  it saves.
-- **Complete enough to stop, down to the line.** The entry rows carry the start
-  symbol's LINE (`apps/api/src/main.ts (starts at function bootstrap:34)`). Measured
-  in a real session before that: the model read a row saying only `… (starts at
-  function bootstrap)`, then ran glob plus four reads, and answered with
-  `main.ts:34` — five tool calls for a number the block already knew. A row that
-  answers "which file" but not "where in it" leaves exactly enough missing to justify
-  the exploration it was meant to replace.
+- **Bounded** — five to twelve entry candidates, as many hubs, three languages,
+  five directories, ~16 lines. This is context spent on every turn; an unbounded
+  list would cost more than the reading it saves.
+- **Complete enough to stop.** The entry rows name the start symbol
+  (`apps/api/src/main.ts (starts at function bootstrap)`), the hub rows print a
+  copyable id, and one line says which top-level directories hold the project. A
+  row that answers "which file" but not "what is it" leaves exactly enough missing
+  to justify the exploration it was meant to replace. The entry rows USED TO carry
+  the start symbol's LINE as well, for a measured reason: a model that read only
+  `(starts at function bootstrap)` ran glob plus four reads and answered with
+  `main.ts:34` — five tool calls for a number the block already knew. That reason
+  was outweighed in 2026-11 (§8b-2): the line moves whenever one is inserted above
+  it, and every move re-sent the whole snapshot. The outline
+  (`codegraph_context("<path>")`) returns every line in one call.
 - **Silent when it cannot back itself up** — no graph, or a graph with no files,
   contributes `''`. "0 files" would read as a fact about the project rather than about
   the pass. An `indexing` pass contributes a BOUNDED STATUS instead (§8b-1): silence
   there read as "this project has no graph", in exactly the window a session asks its
-  first orientation question. A `failed` pass says so with its recorded reason instead
-  of asserting a shape: it is terminal until a human retries, so any shape it left has
-  no bounded age.
+  first orientation question — and only for the FIRST index; once the project has a
+  complete block, a re-index keeps it (§8b-2). A `failed` pass says so with its
+  recorded reason instead of asserting a shape: it is terminal until a human retries,
+  so any shape it left has no bounded age.
 - **Evaluated per assembly** — a fresh graph, a re-index or a new session all land
   without a restart.
+- **Stable under edits** (§8b-2) — the block changes only when the project's shape
+  really did.
 
 The overview can report `stale` one observation late, and only for the HEAD half:
 `text` must return synchronously while deciding staleness from Git needs
@@ -577,6 +610,59 @@ ships with and without that plugin, and naming another plugin's tool is how one
 plugin starts failing when the other is absent: the model calls a tool nothing
 registered.
 
+### 8b-2. Stable under edits: three rules and a session's own text
+
+The block is a runtime-context snapshot, and the kernel appends a NEW snapshot
+whenever the whole text changes and retires nothing (every earlier copy stays in
+the conversation). That makes any churn in this text expensive in proportion to
+how long the session runs. Measured on 234 real sessions before this round
+(`scripts/usage-replay.mjs` reproduces the table): 35 sessions carried the block;
+they re-pushed the snapshot 354 times, 280 of them because the block's OWN text had
+changed, and those re-reads come to about 51 million tokens. The 274 recoverable
+diffs broke down as: the headline's counts 229 times (`~440 edges` became `~450`
+after one edit — two significant digits move at every unit below a hundred), hub
+rows 138 times (ordered by reference count, so `~34`/`~35` reordering and `9` →
+`~10` both changed the row), entry rows 82 times (a line number shifting, a new
+file entering the list), and the status flip 32 times (a re-index turned the whole
+block into one sentence and back).
+
+Rendering removes most of the causes (`prompt.ts`):
+
+- **Counts are rungs, not rounded numbers** (`ladderRung`): below 5 exact, then the
+  nearest of 1–2–5 per decade in log distance (`~20`, `~50`, `~500`, `~5k`). A
+  rung moves only when the project really changed size. The exact numbers are one
+  `codegraph_context` call away, which is the call the block exists to encourage.
+- **Hubs are chosen and ordered by rung** — every candidate snapped to the same
+  ladder, then rung descending and id ascending. The set moves only when a symbol
+  crosses a rung; the order no longer depends on the counts within one.
+- **Entry rows carry no line number and no symbol count**, and are ordered by
+  class then path. One inserted line above an entry's start used to re-send the
+  block; the outline returns every line in one call.
+- **A layout line** (`Top-level layout (indexed files): plugins ~500, test ~100 …`)
+  says which directories hold the project — rung descending, name ascending, at
+  most five, only with two or more directories to name. The counts come from
+  `projectLayout` as exact numbers, so bucketing and ordering have one home.
+
+What rendering cannot fix is the text changing because the project DID change, or
+because the queue changed state. `overview-state.ts` decides that, per assembly,
+with the clock injected:
+
+| the candidate | what the session gets |
+|---|---|
+| a `failure` sentence | exactly that, every time; nothing is recorded — a failed pass is terminal until a human retries, and showing the previous shape would have the model edit against a graph the plugin says not to trust |
+| a `status` sentence (first index, or a re-index) | the text THIS session was last shown; a session never shown a block gets the project's latest complete block; a project with none gets the status sentence — the first-index window it was written for |
+| a complete block | the first one a session is offered, always; after that, a changed block is adopted only when the session's last change is at least five minutes old (`minIntervalMs`), otherwise the session keeps what it has and takes whatever is newest at the first assembly after the interval — delayed, never dropped |
+
+The session's own text outranks the project's in the `status` row on purpose: a
+session inside its interval is reading an older block, and handing it the
+project's newest one there would be followed by the next complete assembly taking it
+back — one flip per re-index, the thing the rule removes. `changes(cwd)` counts
+adopted changes per project and feeds `/status` (`§12`).
+
+What this costs: a session can read a block up to five minutes older than the
+graph. The tools report freshness on every answer, so the cost is a stale
+orientation, never a stale fact acted on as current.
+
 ### 8c. What the graph is FOR, in evidence
 
 The plugin is not a step every task must pass through. It is the cheapest path when
@@ -603,6 +689,190 @@ So "did the model call a codegraph tool" is a diagnostic, not a success metric. 
 rename task where `grep` wins is the tool being correctly not chosen — the plugin
 earns its place on "who calls this", "what does this file define", and "what is this
 symbol's neighbourhood", which keyword search cannot answer at all.
+
+### 8d. The note after a search the model made itself
+
+The one place the plugin writes into ANOTHER tool's answer. Measured on this
+machine's 234 real sessions: the model reached for `grep` 1,942 times and for
+`codegraph_*` six, and in one session `codegraph_find` answered a name with "5
+call site(s)" and the model then read the same file five times to work out which
+function each call sat in. Telling it the graph exists does not move it at the
+moment it plans (§8c); the graph goes instead to the moment it already chose.
+
+`grep-note.ts` is pure — `searchNote(graph, pattern)` answers one line or
+`undefined`, `SearchNoteMemory.shouldNote(session, name)` answers once per session —
+and `index.ts` owns every gate. The line is`codegraph: "<name>" is declared once in this project — <kind> at <path>:<line>
+(<signature>) — with N reference(s) from M file(s). \`codegraph_impact("<name>")\`
+lists each reference with the function that contains it.` — the position (the fact
+a read was for), the counts, and the next call, under 320 characters, stepping down
+by dropping the signature, then the pointer, then the whole line as the path grows.
+
+The rules, and why each is a rule and not a preference:
+
+- **Certain or silent.** The pattern must be one bare identifier the graph declares
+  EXACTLY once — the same test `resolveSymbol` applies, which is why the pointer
+  names the symbol and not its id (the id would carry the path a second time). 71%
+  of this repository's declarations share their name; a line about the wrong `store`
+  is worse than none. Matching is case-sensitive, as the search was.
+- **Any search call, at most five notes per outer call.** A `run_code` sub-dispatch
+  counts too, on purpose: with the PTC executor selected — the configuration the
+  live check ran in — a model-direct native call is refused as `UNKNOWN_TOOL` and
+  EVERY search is a sub-dispatch, whose contexts the executor ferries to the outer
+  result. The plan first scoped the note to model-direct calls, which in that
+  configuration is never. The cap (`MAX_NOTES_PER_CALL`) is counted per OUTER
+  call, keyed by the outer execution's `parent` token that every one of its
+  sub-dispatches carries — so two outer calls running side by side cannot reset
+  each other's count, and the entry leaves with the execution. It keeps a script
+  that loops over fifty names from appending fifty lines; a name the cap skipped
+  has not been "told about" and keeps its turn for a later call, and only a note
+  actually appended counts.
+- **A current graph with no check pending.** A line number from a graph an edit has
+  just outrun is the one thing a note must never give; the same honesty rule as the
+  tools (§9).
+- **An `accept` of a result that is not an error**, with the downstream decision's
+  own `additionalContexts` kept in front of the note. The listener never throws: it
+  runs inside the tool pipeline, where an exception would fail a successful search.
+- **Once per session and name**, after the note exists — a name that produced
+  nothing has not been "told about" and must not spend its turn.
+- **`DSH_APP_CODEGRAPH_GREP_NOTE=0` turns it off** (§12); `/status` counts `grepNotes`.
+
+The note is a USER-role message, so what goes into it is held to a higher standard
+than a tool row: the identifier is bare by construction, and the signature it
+prints has its comments stripped by a quote-aware scan — a string literal in a
+default (`"src/**/*.ts"`) is the declaration's fact and stays — and its control
+characters replaced (`normalizeSignature`, §1). Prose planted in a comment must
+not arrive under the user's role as if the harness had said it.
+
+It is an experiment with a counter, not a settled feature (plan D3): the note can
+be wrong in the ways a name is wrong — a unique name that is also a prose word, or
+one whose unreconciled edges inflate the count — and the replay script plus
+`grepNotes` decide whether it stays. The source kind is `dsh-app-codegraph`, so a
+session log can tell the note from the search it rode on.
+
+### 8e. The request pack: the declarations a request names, before the plan
+
+The overview answers "what is this project"; the pack answers "what are THESE" —
+the files and identifiers a request names outright. Measured on the same 234
+sessions: 25% of the 452 human messages carry a code-shaped token, and the strict
+gate (a file the graph holds, or a name with exactly one declaration) fires on 9%
+— 45% of the long ones, mostly delegation briefs, where a plan is actually made.
+
+`prefetch.ts` is pure: `requestTokens(request)` finds the tokens (paths with a
+code extension; camelCase, PascalCase, snake_case and SCREAMING_SNAKE_CASE names;
+at most 14), `buildPrefetchPack(graph, request)` resolves each strictly (a path is
+a file and only a file — exact, then a UNIQUE suffix; a name is a symbol only when
+exactly one declaration carries it) and renders at most 3 files with an 8-row
+outline and 3 symbols, under 1,700 characters, rows cut before items, the last
+item before the first. One sentence frames it as background, not instructions, and
+names the one next call for a symbol; a symbol row carries no id, because every
+name in a pack is unique by construction and the id would repeat the path. The
+token pattern is LINEAR by construction — a capital always opens the next hump
+(`[a-z0-9]*` inside a hump, never `[a-zA-Z0-9]*`, and no tail after the last
+hump): the ambiguous form took 580 ms on `aAAAA…_` at 26 letters and hours at
+forty, on the kernel's event loop, from one pasted line.
+
+`index.ts` owns the wiring and every gate, and the shape is plugin-memory's (its
+request-relevant cards): `agent/inbox/claimed` remembers the request of a `user`
+message per session — what the harness injects through the same inbox (a runtime
+context, a skill catalog, a notice) is not a new question, and neither is a
+whitespace-only message — and a second runtime context (`dsh-app:codegraph:request`,
+order 61, `interpolate: false`) reads it at assembly. The kernel appends that
+context only when its text changes, so the steps of one turn cost nothing.
+
+The rules that are not preferences:
+
+- **Only a `current` graph with no check pending before a pack is FIRST built** —
+  a pack is a promise that these are the declarations as they stand. A project on
+  its first turn gets no pack; the overview carries the indexing sentence instead.
+  A pack already sent is HELD through a re-index, though: it rides the same
+  snapshot as the overview, so dropping it while the index runs and restoring it
+  after is two whole-snapshot re-pushes per editing turn. The next `current`
+  assembly rebuilds it, and a real change lands once.
+- **Counted once per request.** The provider runs on every assembly, so
+  `prefetchAttached` / `prefetchSkipped` move the first time a request meets a
+  current graph, never per step.
+- **`DSH_APP_CODEGRAPH_PREFETCH=0` turns it off** (§12).
+- A lowercase word (`helper`, `run`) is not a token, on purpose: it is how prose
+  spells a word. The calibration pattern lacked SCREAMING_SNAKE_CASE and missed
+  every `MAX_RETRIES`; adding it (here and in the replay script together) moved
+  the strict gate from 40 to 41 of 452 messages.
+
+What it can get wrong: a unique-suffix file that is not the one meant (`a.ts`
+when one file so named exists), a camelCase word that is a product's name (six are
+stopped), a stack trace pasted into the request (which is probably wanted). The
+ceiling of every miss is the budget, and the framing sentence already says the
+files decide. `prefetchAttached` and the replay script watch it.
+
+### 8f. The outline's detail ladder and the token budget
+
+A file outline used to print names only, so the model read the file to learn what
+the names meant. It now prints what the graph holds of each declaration — the
+normalized head (`symbols.signature`, §1) and, when there is room, the first
+sentence of its doc comment — and pays for it out of a budget:
+`budget.ts`'s `planOutline` picks the level, `tool-text.ts`'s `outlineRow` is both
+the row and the unit the budget measures, so the two cannot disagree about what a
+row costs.
+
+| Declarations in the file | Level | A row is |
+|---|---|---|
+| ≤ 25 | `full` | the signature, then the doc sentence |
+| 26–60 | `signatures` | the signature |
+| more | `names` | the name |
+
+The list is capped at 4,800 characters (≈ 1,200 tokens, `ANSWER_LIST_CHARS`): a
+level that does not fit is lowered one step; a `names` list that still does not fit
+keeps the longest prefix — the order is exported first, then most-referenced, so
+what is cut is the tail — and never drops below one row. The first line says what
+happened: `· detail: signatures · ~812/1200 tokens`, and `· 31 row(s) cut to fit
+the budget…` when rows went; `file.detail` and `file.cut` carry the same facts in
+the JSON, and a cut counts as a truncation (§8b). `detail` is an argument
+(`names` / `signatures` / `full`, default `auto`): an explicit level is where the
+ladder STARTS, never a promise, because a `full` list of ninety rows is the read
+the budget exists to replace.
+
+Measured on this repository's `src/main`, with real syntax: a 23-declaration file
+stays `full` at ~881 tokens (65% of reading it); a 46-declaration file falls to
+`names` at ~1,085 (35%) — a signature row is ~150 characters once the id and the
+line are on it, so 46 of them already exceed the budget; an 87-declaration file is
+`names`, cut to 56 rows, at the 1,200 cap (9% of the file). Every one of the 58
+files measured stayed under the cap.
+
+The same columns reach the other lists: `codegraph_find` leads each row with the
+signature when it answers ten rows or fewer; `codegraph_context` on a symbol
+carries signatures on its siblings (≤ 25) and on its calls (≤ 15), and a call whose
+target resolves uniquely shows the target's signature. `names` rows carry no
+`[exported]` mark — the order already puts exports first, and the mark is 11
+characters a row.
+
+### 8g. `codegraph_impact`: which references are certain, which tests to run, who calls the callers
+
+Three additions to the one answer the model uses for "what breaks if I change this":
+
+- **A confidence mark per reference row.** `✓` means the edge was narrowed — the
+  name resolved through a same-file declaration or an import clause
+  (`edges.narrowed`, §1); an unmarked row is a name match. The legend prints only
+  when a `✓` appeared. Before this, a hub's 664 rows looked equally certain, and
+  the only way to tell the ten real call sites from the 654 `store` variables was
+  to open the files.
+- **The test files that reference it.** A separate group after the reference list:
+  `Tests that reference this (15 of 22 file(s)) — run these first:`, cut at 15
+  files and saying so (`TRUNCATED: 7 more test file(s) exist`). "Which tests
+  cover this" was a glob plus a read; now it is one line in the answer that
+  already lists the references. The test shape is `*.test.*` / `*.spec.*` /
+  `*.e2e.*`, a `tests/` or `__tests__/` directory, and the `*Tests` / `*Test`
+  suffix for the languages that spell it that way.
+- **A caller tree, on request.** `depth` (default 1, at most 3) expands each
+  caller's own callers as an indented tree: 12 callers per symbol per level, 60
+  nodes in all, each symbol once (`(see above)` where a cycle returns — and the
+  asked symbol is a caller like any other, so a self-recursive function lists
+  itself at depth 1 and `(see above)` only from depth 2 on, never a pointer to
+  nothing at the top), and a count where a cut happened — `300 caller(s), 12
+  shown` on that node, `TRUNCATED at 60` in the title when the cap was reached.
+  Depth 1 is the default because a tree is only worth its tokens when the change
+  is structural; the JSON carries `callers` only when `depth` was passed.
+
+The count on a node is deliberately not folded into the title: a reader meets the
+cut where it happened, on the row whose children are missing.
 
 ## 9. Freshness
 
@@ -768,7 +1038,7 @@ with no rows, and nothing marks it as incomplete. The next open rebuilds it, so 
 state is transient — but a query issued during it answers from an empty graph, and
 `indexing` is the only signal.
 
-### 10c. The five ways an answer is incomplete, and what each now says
+### 10c. The six ways an answer is incomplete, and what each now says
 
 Every one of these was measured, and each used to read as a complete answer.
 
@@ -779,6 +1049,7 @@ Every one of these was measured, and each used to read as a complete answer.
 | the name is declared several times, so no edge was ever built | "no unambiguous symbol matched" | the declarations that share it, their ids, and "ambiguity is not absence" |
 | the call goes through an interface, a dispatch or a variable, so no edge exists | an empty list | "no direct callers found — that is NOT safe to change" |
 | the symbol has hundreds of callers, so searching for them is expensive | the declaration only | `482 call site(s) — prefer codegraph_impact over searching` |
+| the file the symbol lives in was skipped as generated output | "no symbol matched", `current` | `The index skipped N file(s) as generated output … a name that lives in one of them is not in this answer` |
 
 The second row is a different failure from the first: `truncated: true` was honest
 about the cut and silent about the SHAPE. Measured, `impact` on a symbol with 664
@@ -802,6 +1073,13 @@ times, because no answer said which was which.
 
 The rule the tools now follow: a result that cannot be trusted says which way it is
 untrustworthy, and names the next step.
+
+The sixth row is the generated-file rule's bill (§12): the rule is a shape, and a
+hand-written file with machine-long lines is caught with the bundles. Before the
+count travelled with every answer, "no symbol matched" on such a file read as
+final. The number is kept in `meta.project` (`generatedSkipped`), read as 0 for a
+graph written before the field existed — that read runs against the OLD blob just
+before a rebuild, and a strict one would drop the project on upgrade.
 
 ### 10d. What this plugin is, in one sentence
 
@@ -955,3 +1233,57 @@ load. To repeat the load check by hand: load each `.wasm` (from `grammars/` and
 `grammars-optional/`) with `web-tree-sitter` and parse one real sample per language,
 asserting `rootNode.hasError === false` — a load failure throws, a version skew parses
 into ERROR nodes, and the two are different bugs.
+
+## 12. Switches, counters and the replay scripts
+
+**Generated by shape.** A bundle committed without `.min.` in its name and without
+a banner is invisible to the two rules in `ignore.ts`, and it is the expensive
+miss: measured on a real repository, 25 such files held 90% of the definitions, 86%
+of the edges and 92% of the unresolved calls of a 335-file graph, and their
+one-letter names collided with real symbols. `isGeneratedShape` reads the head's
+LINE LENGTHS: an average of 500 or more characters is a bundler (a person writes
+about 70). The average, not the longest line — a 3,000-character inline fixture
+under an otherwise normal head stays a person's file. Documents are exempt by the
+walker's word: prose is written one paragraph per line. The verdict is reached
+during the walk like the banner one, because `projectChanged` never parses and the
+two callers of the walk have to agree. The rule is a SHAPE, not a verdict — a
+hand-written file with machine-long lines (a long SQL statement, an embedded blob)
+is caught with the bundles — so the count of files skipped this way is kept
+(`meta.project.generatedSkipped`) and every tool answer says so (§10c), where
+silence would make "no such symbol" read as final.
+
+**Switches are environment variables, and the settings page says so.** Each one
+turns OFF a default-on behaviour a user may want gone on one machine: the source
+slice in `codegraph_context` (`DSH_APP_CODEGRAPH_SOURCE`), the request pack
+(`DSH_APP_CODEGRAPH_PREFETCH`), the search note (`DSH_APP_CODEGRAPH_GREP_NOTE`).
+`switches.ts` is their only home — the names, the convention (`0` or `false` is
+off; absent, empty or anything else is on, so a typo cannot switch something on by
+accident), and `WIRED_SWITCHES`, the list of switches whose behaviour exists. A
+switch that gates nothing must not be on that list: "on" beside a feature that is
+not there is a lie the page would tell on every render. `GET /status` reports the
+wired ones with their variable and live state, and the settings page lists each
+with its variable (selectable as one piece), a sentence, and On/Off — a switch
+nobody can find is a switch nobody can turn.
+
+**Counters** (`usage.ts`) are per project, in memory, since the process started:
+how many times the pushed overview's text changed, how many calls each tool got,
+how many requests got a pack or were skipped, how many searches got a note. They
+exist because the session log records what a tool ANSWERED, not what the plugin
+DECIDED — "the block changed 24 times in one session" leaves no tool call behind —
+and a threshold tuned without them is tuned blind. `/status` carries one row per
+project, every key present.
+
+**The replay scripts** read the kernel's session logs and print counts only — never
+a message, never a card, never anything a person typed:
+
+| Script | Answers |
+|---|---|
+| `scripts/usage-replay.mjs` | who carried the overview and who called a tool; how big each answer was; how often snapshots were re-pushed and WHICH LINE CLASS changed (`headline` / `hub` / `entry` / `status` …, by multiset difference so an inserted line is not "every line below it changed"); how the model reads (native and inside `run_code`, repeats); the multiplier — every tool answer × the steps after it |
+| `scripts/prefetch-replay.mjs` | the request pack's gate on real messages: how many carry a code-shaped token, how many resolve a file or a uniquely declared identifier, split by message length, and the pack size that would follow |
+
+Both depend on the kernel's log format (multi-frame zstd, `session.v4.jsonl`), and
+the decoder lives in ONE place, the repository's `scripts/lib/session-log.mjs`,
+shared with the memory plugin's own scripts — a second copy would be the drifting
+duplicate. `--since YYYY-MM-DD` windows, `--json` prints the same data as an
+object, and a `--sessions` directory that does not exist exits 2: a wrong path
+should be heard, not read as an all-zero green.
