@@ -534,9 +534,13 @@ const PATH_BODY = String.raw`[^\s'"<>;,\n()|]*(?:[ \t]+${PATH_RUN})*(?:[\\/][^\s
  *  path, a `file://` URL, a `~user/…` path (`~/…` is the user's own home and
  *  stays readable) — each with the continuation above — or, on its own, a
  *  POSIX path of at least two segments. `https://` is not a drive path: its
- *  `p:/` is preceded by a letter. */
+ *  `p:/` is preceded by a letter. A POSIX run may carry backslashes: a
+ *  backslash is a legal character in a POSIX filename, and the store root's
+ *  SIBLING on a POSIX host (`<root>ory\x.md`, a Windows tail after a POSIX
+ *  root) must be cut whole like any other path — stopping the run at the
+ *  backslash left `\x.md` on screen, which is what the Linux CI run caught. */
 const ABSOLUTE_PATH = new RegExp(
-  String.raw`(?:(?:(?<!\w)[A-Za-z]:[\\/]|\\\\|file:\/\/|~[A-Za-z0-9_.-]+\/)${PATH_BODY}|(?<![\w~./\\-])\/[^\s/'"<>\\()]+(?:\/[^\s'"<>\\()]+)+)`,
+  String.raw`(?:(?:(?<!\w)[A-Za-z]:[\\/]|\\\\|file:\/\/|~[A-Za-z0-9_.-]+\/)${PATH_BODY}|(?<![\w~./\\-])\/[^\s/'"<>()]+(?:\/[^\s'"<>()]+)+)`,
   'gu',
 )
 

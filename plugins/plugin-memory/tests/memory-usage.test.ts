@@ -131,12 +131,16 @@ function writeLog(root: string, name: string, buffer: Buffer): string {
 }
 
 test('a multi-frame zstd log is read to its last frame', { skip }, () => {
-  // The regression this pins: one decompress call over the whole file returns
-  // the FIRST frame only, so a naive reader sees a fraction of the session.
+  // The regression this pins: on Node 24 one decompress call over the whole
+  // file returns the FIRST frame only, so a naive reader sees a fraction of the
+  // session; on Node 26 the same call returns every frame — and throws away
+  // all of them when the tail is torn (see the next test). The reader must not
+  // depend on either: whatever the naive read answers is a PREFIX of the truth.
   const lines = fixtureLines()
   const whole = multiFrame(lines, 1)
-  assert.equal(zstdDecompressSync(whole).toString('utf8'), lines[0], 'the naive read stops after frame one')
+  const naive = zstdDecompressSync(whole).toString('utf8')
   const decoded = decompressFrames(whole)
+  assert.ok(decoded.text.startsWith(naive), 'the naive read is a prefix of what the reader answers')
   assert.equal(decoded.frames, lines.length)
   assert.equal(decoded.truncated, false)
   assert.equal(decoded.text, lines.join(''))

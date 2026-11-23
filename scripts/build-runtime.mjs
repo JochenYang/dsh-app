@@ -456,14 +456,29 @@ async function downloadNodeBinary(platform, arch, destDir) {
   console.log(`$ verified ${sumsName} sha256 against ${sumsFrom}`)
   await writeFile(archivePath, buf)
   // Extract to a temp dir then move just the node binary into destDir.
-  // Windows: MSYS tar mangles drive-letter paths and bsdtar-on-win is flaky
-  // for zip, so use PowerShell Expand-Archive via cmd. mac/linux: system tar
+  // Windows goes through .NET directly, the same per-entry extraction the
+  // primary runtime uses (build-primary-runtime.mjs `extractZip`): on the
+  // windows-latest runner image `Expand-Archive` answers "Cannot find an
+  // overload for ExtractToDirectory and the argument count: 3" from inside the
+  // PowerShell Archive module — measured 2026-11-23 on both Windows runtime
+  // cells — and answers it WITHOUT failing the step, so the archive is simply
+  // never written and the rename below is what fails. mac/linux: system tar
   // auto-detects gz/xz.
   const extractDir = path.join(destDir, 'extract')
   await rm(extractDir, { recursive: true, force: true })
   await mkdir(extractDir, { recursive: true })
   if (platform === 'win32') {
-    execFileSync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${archivePath}' -DestinationPath '${extractDir}' -Force`], { stdio: 'inherit' })
+    const ps = (value) => `'${value.replace(/'/gu, "''")}'`
+    const script = 'Add-Type -AssemblyName System.IO.Compression.FileSystem; '
+      + `$zip = [IO.Compression.ZipFile]::OpenRead(${ps(archivePath)}); `
+      + 'try { foreach ($entry in $zip.Entries) { '
+      + `$target = Join-Path ${ps(extractDir)} $entry.FullName; `
+      + 'if ($entry.Name -eq "") { continue } '
+      + '$dir = Split-Path -Parent $target; '
+      + 'if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }; '
+      + '[IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true) } } '
+      + 'finally { $zip.Dispose() }'
+    execFileSync('powershell', ['-NoProfile', '-Command', script], { stdio: 'inherit' })
   } else {
     execFileSync('tar', ['-xf', archivePath, '-C', extractDir], { stdio: 'inherit' })
   }

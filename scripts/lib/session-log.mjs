@@ -97,12 +97,26 @@ const REASON_HEADS = [
 ]
 
 /**
- * Decompress a multi-frame zstd file.
+ * Decompress a multi-frame zstd file, one frame per decode.
+ *
+ * The frame boundary is the next frame magic (or the end of the file), and the
+ * decode itself is the judge: a slice cut at a magic that turned up INSIDE
+ * compressed data is an incomplete frame and throws, so the next magic is
+ * tried. Nothing here depends on how the Node underneath treats a multi-frame
+ * buffer, because that differs: Node 24 answers `{ info: true }` over a whole
+ * file with one frame per call, Node 26 decodes every frame in one call — and
+ * throws on a torn tail BEFORE handing back anything, so a reader built on
+ * either behaviour loses the whole session at the last bad write. One frame
+ * per decode behaves the same on both, and `bytesWritten` then names the
+ * frame's own size (measured on 24.9 and 26.13): what is left of the slice is
+ * padding between frames, and a decode that produces nothing is a frame
+ * header with no block behind it — a write torn at the header, which 24.9
+ * answers with an empty buffer and 26 with an error.
+ *
  * @param {Buffer} buffer - the whole file.
  * @returns {{ text: string, frames: number, truncated: boolean }} every frame
  *   that decoded, joined; `truncated` when bytes were skipped or a frame would
- *   not decode (a crash mid-write leaves a partial last frame) — the frames
- *   before it are kept.
+ *   not decode (a crash mid-write leaves a partial last frame).
  */
 export function decompressFrames(buffer) {
   const parts = []
@@ -118,17 +132,45 @@ export function decompressFrames(buffer) {
       at = next
       continue
     }
+    let end = buffer.indexOf(MAGIC_BYTES, at + 4)
     let decoded
-    try {
-      decoded = zstdDecompressSync(buffer.subarray(at), { info: true })
-    } catch {
+    let consumed = 0
+    let stop = -1
+    for (;;) {
+      stop = end < 0 ? buffer.length : end
+      try {
+        const info = zstdDecompressSync(buffer.subarray(at, stop), { info: true })
+        decoded = Buffer.from(info.buffer)
+        consumed = info.engine.bytesWritten
+        break
+      } catch {
+        if (end < 0) {
+          stop = -1
+          break
+        }
+        end = buffer.indexOf(MAGIC_BYTES, end + 4)
+      }
+    }
+    if (stop < 0) {
+      // Every candidate end failed, the whole remainder included: a torn frame.
+      // The walk stops here, as it always has: a file whose FIRST frame is
+      // unreadable must read as unreadable, not as "no memory was used" with a
+      // few later frames counted (memory-usage pins exactly that).
       truncated = true
       break
     }
-    const consumed = decoded.engine.bytesWritten
-    if (consumed <= 0) throw new Error(`zstd frame at offset ${String(at)} consumed no input`)
-    parts.push(decoded.buffer)
-    at += consumed
+    if (decoded.length === 0) {
+      // Nothing decoded: a header with no block (a torn write) or a header the
+      // library cannot read. 24.9 answers both with an empty buffer where 26
+      // throws, and the old whole-remainder read threw on both — so the walk
+      // ends here on every Node, which keeps "a file whose first frame cannot
+      // be read is unreadable" true (memory-usage pins it).
+      truncated = true
+      break
+    }
+    if (consumed > 0 && at + consumed < stop) truncated = true // padding between frames
+    parts.push(decoded)
+    at = consumed > 0 ? at + consumed : stop
   }
   return { text: Buffer.concat(parts).toString('utf8'), frames: parts.length, truncated }
 }
