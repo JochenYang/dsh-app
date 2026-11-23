@@ -85,16 +85,16 @@
 
 | # | 类目 | 内容 | 状态 |
 |---|------|------|------|
-| W9 | P2 · 一致性 | `plugin-codegraph/src/routes.ts:318` `GET /graph` 对未知 cwd 触发 `reindex`：**不绕过队列**（`void options.reindex(...)` 就是 `queue.request`），但把索引范围放到了「任意 cwd」而非「已 adopt 项目」`[复核]`（自 P1 下调：无提权含义，落库不出本机） | [–] |
+| W9 | P2 · 一致性 | `plugin-codegraph/src/routes.ts:318` `GET /graph` 对未知 cwd 触发 `reindex`：**不绕过队列**（`void options.reindex(...)` 就是 `queue.request`），但把索引范围放到了「任意 cwd」而非「已 adopt 项目」`[复核]`（自 P1 下调：无提权含义，落库不出本机） | [x] |
 | W21 | P2 · 防漂移 | `plugin-archives/src/routes.ts:471` 删除走 `rm(dirname(resolveCurrentLog(id)))` 且不校验目录名；三道栅栏（已归档 / 在内核列表 / 无活动）挡掉了任意 id，但主路径完全信任 resolver 的返回形状，内核布局变化会连带删同项目其它会话；同文件 fallback 反而有校验 `[复核]`（自 P1 下调：当前布局下不可触发） | [x] |
 | W23 | P2 | `plugin-market/src/routes.ts:1303` `/uninstall` 缺 `@dsh-app/` 守卫（`/toggle:1021` 有），面板卸载按钮未对 `pkg.suite` 禁用 `[复核]` | [x] |
 | W24 | P2 | `plugin-rewind`：`recorder.ts:106` 无上限、`quarantine.ts` 零保留策略、`index.ts:1100` 预览载荷无上限（一次重建 dist 可让 plan 返回数百 MB）、`trees.ts:457` `inFlight.clear()` 清掉别的会话的持有 | [~] |
-| W25 | P2 | `plugin-memory/src/light-sweep.ts:81` 每对相似卡整份同步重写 `distill-state.json`（30 卡最坏 435 次），且阻塞 `memory_save` 返回路径 | [–] |
-| W26 | P2 | `plugin-codegraph`：`store.ts:276` 损坏库重建时句柄未关即 unlink；`graph-view.ts:126` 边在过滤前 `LIMIT` 且不并入 truncated；`queue.ts:562` `status()` 每次全量构造；`index.ts:457` 每次工具调用 `await gitHead()` spawn | [–] |
+| W25 | P2 | `plugin-memory/src/light-sweep.ts:81` 每对相似卡整份同步重写 `distill-state.json`（30 卡最坏 435 次），且阻塞 `memory_save` 返回路径 | [x] |
+| W26 | P2 | `plugin-codegraph`：`store.ts:276` 损坏库重建时句柄未关即 unlink；`graph-view.ts:126` 边在过滤前 `LIMIT` 且不并入 truncated；`queue.ts:562` `status()` 每次全量构造；`index.ts:457` 每次工具调用 `await gitHead()` spawn | [x] |
 | W27 | P2 | `plugin-ppt`/`plugin-pdf`：`writeFile` 非原子（`writeFileAtomic` 已导入未用）；渲染不看 `exec.signal`；`${target}.${pid}.tmp` 非唯一且失败不清理；`templates.ts:150` 首次扫描失败永久缓存空目录；`pdfd/read.ts:24` 单次可返回 2MB 文本；`index.ts:234` 返回插件安装绝对路径 | [~] |
 | W28 | P2 | `plugin-mcp/src/mount.ts:129`、`plugin-hooks/src/mount.ts:36` `chains` 只增不删（已 settled 的 Promise 永留） | [x] |
-| W29 | P2 | `plugin-client-ui` 性能：`whale-background.ts:495` 250ms 无条件 `getComputedStyle`+重建填色表；`settings-nav.ts:60` body 级 `characterData` 观察者被流式输出打满；`models-advanced/section.tsx:194` 每次 render 全量 clone + stringify | [–] |
-| W30 | P2 | `plugin-market/src/client/{confirm-dialog,skill-detail}.tsx` 自绘 mask+card，违反 `plugins/AGENTS.md` §6（应用 `Modal`+`Button`）；`styles.ts:364,417,474` `.dshMkt-cardFoot` 定义三次互相冲突 | [–] |
+| W29 | P2 | `plugin-client-ui` 性能：`whale-background.ts:495` 250ms 无条件 `getComputedStyle`+重建填色表；`settings-nav.ts:60` body 级 `characterData` 观察者被流式输出打满；`models-advanced/section.tsx:194` 每次 render 全量 clone + stringify（2026-11-23 核对：whale 轮询已合并为一次 `getComputedStyle`、settings-nav 观察者已按帧合并；`cloneDraft` 仍在每次 render 执行，轻微，未做） | [~] |
+| W30 | P2 | `plugin-market/src/client/{confirm-dialog,skill-detail}.tsx` 自绘 mask+card，违反 `plugins/AGENTS.md` §6（应用 `Modal`+`Button`）；`styles.ts:364,417,474` `.dshMkt-cardFoot` 定义三次互相冲突 | [x] |
 | W31 | P2 | 测试缺口：`plugin-client-ui` 的 `models-advanced/*` 无覆盖（W13 全落在这里）、`plugin-hooks` 的 `native.ts` 四个拦截器无覆盖（W19）、`plugin-market` 的 `/uninstall` `/toggle` `/update` 无路由级测试 | [~] |
 | W35 | P2 | `plugin-rewind/src/snapshots.ts:197,238-243`：隔离槽名是 `${stamp}-${Math.abs(hash(path))}`，`hash` 为 32 位 `31*h+c`。同一毫秒内两条路径的 `|hash|` 相同即复用同一槽，`created`/`replaced` 与 manifest 被覆盖——隔离副本丢失且无痕迹。`Math.abs` 让 `h` 与 `-h` 撞车，碰撞面翻倍 `[复核]` | [x] |
 | W36 | P2 · 可用性 | `plugin-sidebar/src/git-routes.ts:172-177`：`gitEnv()` 只传 `PATH`+`HOME`（防父进程污染，正确），但 macOS 从 Finder 启动的 PATH 不含 `/opt/homebrew/bin`，`execFile('git')` 得 ENOENT → Git 标签页报 `git-missing`。不是注入面，是可用性 `[复核]` | [x] |
@@ -106,7 +106,7 @@
 | # | 类目 | 内容 | 状态 |
 |---|------|------|------|
 | W32 | OPT | `plugin-presets` 导出 zip 内含明文 `.credentials.yaml`（注释写明有意，仅靠响应头提示）——是产品决策，需用户/Guard 裁决后再定 | [!] |
-| W33 | OPT | `plugin-codegraph` 的 `graphs` Map 无淘汰（每个打开过的项目各留一个 SQLite 句柄） | [–] |
+| W33 | OPT | `plugin-codegraph` 的 `graphs` Map 无淘汰（每个打开过的项目各留一个 SQLite 句柄） | [x] |
 | W34 | OPT | nit 批量清扫：未使用导入、注释里的 order 陈旧（`maintenance/section.tsx:3`、`client.ts:326`）、市场 `api.ts:41` 非 JSON 抛裸 `SyntaxError`、UTF-16 截断切出代理对、`detect.ts` 文档与代码不符等 | [–]（不做理由：不影响行为，随下一次触碰该文件时顺手） |
 
 ## Phases
@@ -226,3 +226,5 @@
 | 6 全局复查 | 2026-11-01 | `.devflow/suite-review-backlog/review-final.md` | 第四轮是整批改动的全局复查（reviewer，只读）。两条 P1 都指向本轮新加的 `MAX_OPEN_GRAPHS`：淘汰让「图谱没打开」多了第二种含义（被淘汰），而 `changed` 与 `freshnessOf` 仍按旧含义读它 → 没变的项目答 `indexing` 且每次切回排一次全量 pass；淘汰按插入序是 FIFO 而非 LRU。两处已改为走 `graphFor`，并给命中分支加 touch。另修：`skills.ts` 超限时 `cancel()` 而非只 `releaseLock`（与 `catalog.ts` 一致）、两个 changeset 的 `shell` 改 `none`、删掉 `catalog-contract` 里硬编码版本的橡皮章断言与 `graph-view` 的死变量、recorder 的 `trim` 暴露 `trimmedThroughSeq` 并让 `coverageOf` 判 `partial`，补一条 trim 用例（rewind 191）。 |
 
 | 7 真机启动 | 2026-11-01 | `scratch/dev-kernel-0.2.1-rc.5/runtime` 上的 `npm run dev` | 14 个插件 lib 全部按新版本重建 → 内核 host `ready (web transport)` 于 `127.0.0.1:7712` → renderer 建立两条 ESTABLISHED 连接（页面已加载并连上内核），进程无 crash、日志无 error。**界面行为仍需人工确认**：代码图谱对未 adopt 项目显示「还没有图谱」、市场确认弹层的 Esc/遮罩/焦点返回、模型设置的请求头表格、记忆归档清空。 |
+
+| 8 账本同步 | 2026-11-23 | 对照代码逐条核对（W29 三个子项、W30 两个对话框与 `.dshMkt-cardFoot` 定义次数、W25 的「一次写入」注释、W9 的 `notAdopted` 分支） | 状态列按「本轮完成度」段回填：W9、W25、W26、W30、W33 → `[x]`；W29 → `[~]`（两项已做，`cloneDraft` 每次 render 未做）。W32 仍待裁决；另核实「备份不含凭据库时导出与导入两头都不说」并补上提示（`changesets/presets-todo-notices.md`）——这与 W32 的明文导出决定无关。 |

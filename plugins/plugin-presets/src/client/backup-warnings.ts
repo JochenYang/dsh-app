@@ -25,6 +25,23 @@ export interface BackupWarning {
 export const BACKUP_WARNINGS_HEADER = 'x-dsh-backup-warnings'
 
 /**
+ * The response header the host sets when the exported archive carries NO
+ * credential store — the exporting machine had none. The mirror image of the
+ * warnings header: that one says the zip holds keys, this one says a restore
+ * elsewhere will have none to restore.
+ */
+export const BACKUP_NO_CREDENTIALS_HEADER = 'x-dsh-backup-credentials-absent'
+
+/**
+ * Whether the export answer says the archive carries no credential store.
+ * Only the host's own `1` counts; anything else reads as "not said".
+ * @param header - the raw header value, or null when the host set none.
+ */
+export function backupCredentialsAbsent(header: string | null): boolean {
+  return header === '1'
+}
+
+/**
  * Decode the export answer's warning header. A malformed header must never
  * fail a successful export — the standing warning in the section intro still
  * covers the risk — so every malformed shape answers `[]`.

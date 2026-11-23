@@ -350,14 +350,14 @@ function restoreTargetOf(home: string, profile: string, rel: string): string {
  *
  * @param home - the dsh home root.
  * @param profile - the profile whose patch layer and manifest are packed.
- * @returns the archive payload (manifest.json not included) plus the
- *   content-scan warnings.
+ * @returns the archive payload (manifest.json not included), the content-scan
+ *   warnings, and whether the credential store was ABSENT on this machine.
  * @throws PresetPackageError with codes `too-many-files`, `too-large`, `io`.
  */
 export async function collectConfigBackup(
   home: string,
   profile: string,
-): Promise<{ files: BackupFile[], warnings: SecretWarning[] }> {
+): Promise<{ files: BackupFile[], warnings: SecretWarning[], credentialsAbsent: boolean }> {
   const files: BackupFile[] = []
   const warnings: SecretWarning[] = []
   const add = (rel: string, path: string, required = false): void => {
@@ -492,7 +492,7 @@ export async function collectConfigBackup(
       text: `the configuration backup is over the ${String(Math.floor(MAX_BACKUP_TOTAL_BYTES / 1024 / 1024))} MB total-size cap; it cannot be exported`,
     })
   }
-  return { files, warnings }
+  return { files, warnings, credentialsAbsent: !files.some((file) => file.rel === CREDENTIALS_REL) }
 }
 
 /**
@@ -500,15 +500,17 @@ export async function collectConfigBackup(
  * memory.
  * @param home - the dsh home root.
  * @param profile - the profile whose patch layer and manifest are packed.
- * @returns the archive bytes (≤ MAX_BACKUP_ZIP_BYTES) plus the content-scan
- *   warnings the route surfaces to the user.
+ * @returns the archive bytes (≤ MAX_BACKUP_ZIP_BYTES), the content-scan
+ *   warnings the route surfaces to the user, and whether the credential store
+ *   was absent — a restore elsewhere then lands with no API keys, which the
+ *   user is told at export rather than at the first failed request.
  * @throws PresetPackageError with codes from {@link collectConfigBackup} or `too-large`.
  */
 export async function packConfigBackup(
   home: string,
   profile: string,
-): Promise<{ bytes: Uint8Array, warnings: SecretWarning[] }> {
-  const { files, warnings } = await collectConfigBackup(home, profile)
+): Promise<{ bytes: Uint8Array, warnings: SecretWarning[], credentialsAbsent: boolean }> {
+  const { files, warnings, credentialsAbsent } = await collectConfigBackup(home, profile)
   const manifest = {
     formatVersion: BACKUP_FORMAT_VERSION,
     kind: BACKUP_KIND,
@@ -528,7 +530,7 @@ export async function packConfigBackup(
       text: `the packed configuration backup is over the ${String(Math.floor(MAX_BACKUP_ZIP_BYTES / 1024 / 1024))} MB cap; it cannot be exported`,
     })
   }
-  return { bytes, warnings }
+  return { bytes, warnings, credentialsAbsent }
 }
 
 /** Shape of the manifest a config backup carries. */
@@ -675,6 +677,13 @@ export interface RestoreOutcome {
   readonly written: number
   /** How many members were already identical and skipped. */
   readonly unchanged: number
+  /**
+   * True when the archive carried no credential store. Nothing of this machine's
+   * keys was touched in that case — the store is only ever written by a member
+   * that names it — but a machine that had none still has none, and the import
+   * report is the one place that can say so.
+   */
+  readonly credentialsAbsent: boolean
 }
 
 /** Archive-safe timestamp for the pre-overwrite sidecar copies. */
@@ -825,7 +834,13 @@ export async function restoreConfigBackup(
   // Committed: the stage only ever held staging copies and set-aside olds.
   await removeTree(stage)
   for (const item of planned) report.push({ path: item.rel, action: 'written' })
-  return { files: report, backups, written: planned.length, unchanged: skipped.length }
+  return {
+    files: report,
+    backups,
+    written: planned.length,
+    unchanged: skipped.length,
+    credentialsAbsent: !files.some((file) => file.rel === CREDENTIALS_REL || file.rel === LEGACY_CREDENTIALS_REL),
+  }
 }
 
 /**

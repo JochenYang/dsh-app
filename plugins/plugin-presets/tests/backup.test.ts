@@ -304,9 +304,22 @@ describe('packConfigBackup (content-level secret scan)', () => {
     // plaintext keys — not a reason to fail the export.
     const home = scratchHome('scan-credentials')
     writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  KEY: sk-abcdefghijklmnopqrstuv\n', 'utf8')
-    const { bytes, warnings } = await packConfigBackup(home, 'web')
+    const { bytes, warnings, credentialsAbsent } = await packConfigBackup(home, 'web')
     assert.deepEqual(warnings, [{ rel: 'credentials.yaml', rule: 'sk' }])
     assert.ok(Object.keys(unzipSync(bytes)).includes('credentials.yaml'))
+    assert.equal(credentialsAbsent, false)
+  })
+
+  it('says so when the machine has no credential store at all', async () => {
+    // Absent is fine — a user with nothing configured has nothing to back up —
+    // but it used to be SILENT: the archive simply had no store, and a fresh
+    // machine that imported it had providers and no keys.
+    const home = scratchHome('no-credentials')
+    writeFileSync(join(home, 'settings.yaml'), 'agent-default-model: gateway/example-model\n', 'utf8')
+    const { bytes, warnings, credentialsAbsent } = await packConfigBackup(home, 'web')
+    assert.equal(credentialsAbsent, true)
+    assert.deepEqual(warnings, [])
+    assert.ok(!Object.keys(unzipSync(bytes)).includes('credentials.yaml'))
   })
 })
 
@@ -464,6 +477,22 @@ describe('restoreConfigBackup (conflicts, overwrite, patch backup)', () => {
     assert.equal(readFileSync(join(home, 'settings.yaml'), 'utf8'), 'agent-default-model: gateway/example-model\n')
     assert.equal(readFileSync(join(home, 'AGENTS.md'), 'utf8'), '# House rules\n')
     assert.equal(readFileSync(join(home, 'hooks', 'hooks.json'), 'utf8'), '{"hooks":{}}\n')
+    assert.equal(outcome.credentialsAbsent, true, 'this archive carries no store, and the report says so')
+  })
+
+  it('an archive without a credential store never touches the importer\u2019s own keys', async () => {
+    // Measured: the import succeeded and said nothing about keys; the machine's
+    // own store was in fact untouched (good), but a machine with none stayed
+    // without — the one case the report now names.
+    const files = unpackConfigBackup(zipSync({
+      'manifest.json': VALID_MANIFEST,
+      'settings.yaml': strToU8('agent-default-model: gateway/example-model\n'),
+    }))
+    const home = scratchHome('restore-keeps-keys')
+    writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  KEY: sk-LOCAL-KEY-0123456789abcdef\n', 'utf8')
+    const outcome = await restoreConfigBackup(home, 'web', files, true)
+    assert.equal(outcome.credentialsAbsent, true)
+    assert.equal(readFileSync(join(home, '.credentials.yaml'), 'utf8'), 'version: 1\nrefs:\n  KEY: sk-LOCAL-KEY-0123456789abcdef\n')
   })
 
   it('sidecars the previous host settings file before replacing it', async () => {

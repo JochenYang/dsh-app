@@ -251,7 +251,7 @@ export function registerBackupRoutes(connectionFetch: HostConnectionFetch, deps:
       requestBody: 'buffered',
       fetch: async () => {
         try {
-          const { bytes, warnings } = await packConfigBackup(deps.home, deps.profile)
+          const { bytes, warnings, credentialsAbsent } = await packConfigBackup(deps.home, deps.profile)
           // Secret-shaped content no longer refuses the export — the
           // credential store rides on purpose — so the scan hits travel with
           // the answer: base64 JSON in a header, decoded by the client into
@@ -263,6 +263,10 @@ export function registerBackupRoutes(connectionFetch: HostConnectionFetch, deps:
               Buffer.from(JSON.stringify(warnings), 'utf8').toString('base64'),
             )
           }
+          // The other half of the same honesty: a machine with no credential
+          // store exports an archive that restores with no API keys, and the
+          // download is the last moment to say so.
+          if (credentialsAbsent) response.headers.set('x-dsh-backup-credentials-absent', '1')
           return response
         } catch (error: unknown) {
           if (error instanceof PresetPackageError) return failPackage(error)
@@ -285,6 +289,7 @@ export function registerBackupRoutes(connectionFetch: HostConnectionFetch, deps:
             unchanged: outcome.unchanged,
             files: outcome.files,
             backups: outcome.backups,
+            credentialsAbsent: outcome.credentialsAbsent,
           })
         } catch (error: unknown) {
           if (error instanceof Error && error.message === 'payload-too-large') {

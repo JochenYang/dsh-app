@@ -127,5 +127,8 @@ export function apply(ctx: ClientContext): void {
   // fiber. ---
   const t = ctx.locale.bind(TODO_NS)
   ctx.effect(() => mountReminderToastHost(t), 'dsh-app plugin-todo: reminder host')
-  ctx.effect(() => startReminderWatch(), 'dsh-app plugin-todo: reminder watch')
+  // The same ring also reaches the desktop while the window is hidden (see
+  // `client/reminders.ts` `WatchHooks`): the notice cannot be seen there, and a
+  // reminder that rings into a minimised window rings for nobody.
+  ctx.effect(() => startReminderWatch({ t }), 'dsh-app plugin-todo: reminder watch')
 }

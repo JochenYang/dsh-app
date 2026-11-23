@@ -25,7 +25,7 @@ workflow/ralph、subagent(spawn/fork)、web 检索、审批、权限预设、轨
 | P2 | [session-search.md](session-search.md) | 会话全文检索（sqlite 后端 + UI） |
 | P3 | [schedule-reminders.md](schedule-reminders.md) | Schedule 会话内定时提醒 |
 | — | [code-quality-enhancements.md](code-quality-enhancements.md) | 验收钩子（已停止投入，等效替代为原生 Hook 用户自配） |
-| — | [desktop-shell-experience.md](desktop-shell-experience.md) | plugin-brand 落地 / 诊断中心 / 首启补全 |
+| — | [desktop-shell-experience.md](desktop-shell-experience.md) | plugin-brand 落地 / 诊断中心 / 首启补全（partial：主体已完成，余项见文内） |
 | P2 | [kernel-package-set.md](kernel-package-set.md) | 内核交付改为包集（profile 自持核心，rc 线镜像与解压激活退场） |
 | — | [dev-process-tooling.md](dev-process-tooling.md) | PR CI / 套件冒烟探针 / 版本对齐脚本 |
 

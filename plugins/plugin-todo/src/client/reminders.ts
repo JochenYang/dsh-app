@@ -16,6 +16,10 @@
  *   it, and publishes the due task into the store.
  * - {@link subscribeReminder} — the store the mounted host renders from.
  *
+ * And one reach beyond the window: the tick that publishes a notice also raises a
+ * system notification when the window is hidden (`WatchHooks`), because the notice
+ * it just published is the one thing a minimised window cannot show.
+ *
  * The board is refreshed at most every {@link REFRESH_MS}: the file is local and
  * small, but a read every tick would be six file reads a minute for a reminder that
  * fires once a day.
@@ -25,6 +29,8 @@
 
 import { applyBoard, boardState, refreshBoard } from './board.ts'
 import { toggleTask, updateTaskReminder } from './api.ts'
+import { notifyDesktop } from './desktop-notify.ts'
+import type { Translate } from './translate.ts'
 import type { TodoItem } from '../wire.ts'
 
 /** How often the watcher looks. */
@@ -148,11 +154,52 @@ function setShown(item: TodoItem | undefined, waiting = 0): void {
 const dismissed = new Set<string>()
 
 /**
- * Start the watcher.
+ * True when the window is hidden. Chromium reports that for a minimised window,
+ * one hidden to the tray, one fully covered by another, one on another virtual
+ * desktop, and a locked screen alike — which is the right set: every one is a
+ * state in which the user cannot see the in-app notice.
+ */
+const windowHidden = (): boolean => typeof document !== 'undefined' && document.visibilityState === 'hidden'
+
+/**
+ * What the watcher needs from its environment to reach OUTSIDE the app.
  *
+ * The in-app notice cannot be seen while the window is hidden, and a reminder
+ * that rings into a minimised window rings for nobody — so the same ring also
+ * raises an operating-system notification, through the shell's desktop action
+ * (`desktop-notify.ts`). Both the state and the call are injectable so the rule
+ * is testable without a DOM or a shell: "only while hidden, once per ring".
+ */
+export interface WatchHooks {
+  /** The dictionary seat: the notification's title and body are copy, not data. */
+  readonly t: Translate
+  /** True when the window is hidden; defaults to `document.visibilityState`. */
+  readonly hidden?: () => boolean
+  /** Raise a system notification; answers whether the shell took it. Defaults to {@link notifyDesktop}. */
+  readonly notify?: (title: string, body: string) => Promise<boolean>
+}
+
+/**
+ * Start the watcher.
+ * @param hooks - the dictionary seat and, for tests, the two environment seams.
  * @returns the disposer that stops it.
  */
-export function startReminderWatch(): () => void {
+export function startReminderWatch(hooks: WatchHooks): () => void {
+  /**
+   * Tell the desktop about a notice that was just published, if the window is
+   * hidden. One call per publication: the watcher publishes only while nothing is
+   * shown, and a closed or snoozed notice never republishes the same ring.
+   *
+   * The body is a COUNT, never the task's text: the notification lands in the
+   * desktop's own store — the notification centre's history, a lock screen —
+   * outside what this app controls, so the wording stays with the in-app notice.
+   */
+  const announce = (item: TodoItem, waiting: number): void => {
+    if (!(hooks.hidden ?? windowHidden)()) return
+    const title = hooks.t(isLateReminder(item, Date.now()) ? 'todo.reminder.toastLateTitle' : 'todo.reminder.toastTitle')
+    const body = hooks.t('todo.reminder.notifyBody', { count: waiting + 1 })
+    void (hooks.notify ?? notifyDesktop)(title, body)
+  }
   const tick = (): void => {
     const now = Date.now()
     if (now - lastRefresh > REFRESH_MS) {
@@ -173,7 +220,10 @@ export function startReminderWatch(): () => void {
     }
 
     const due = dueReminders(items, now, dismissed)
-    if (due.length > 0) setShown(due[0], due.length - 1)
+    if (due.length > 0) {
+      setShown(due[0], due.length - 1)
+      announce(due[0], due.length - 1)
+    }
   }
   const timer = setInterval(tick, TICK_MS)
   tick()

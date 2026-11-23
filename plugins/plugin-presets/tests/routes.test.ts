@@ -3,7 +3,7 @@
 // into the "this zip holds plaintext keys" notice. Run by the plugin's own
 // scripts/test.mjs (esbuild-bundled, node --test).
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { unzipSync } from 'fflate'
@@ -11,9 +11,11 @@ import { scratchDir } from './scratch.ts'
 
 import { registerBackupRoutes } from '../src/routes.ts'
 import type { HostConnectionFetch, ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
-import { BACKUP_WARNINGS_HEADER, decodeBackupWarnings } from '../src/client/backup-warnings.ts'
+import { BACKUP_NO_CREDENTIALS_HEADER, BACKUP_WARNINGS_HEADER, backupCredentialsAbsent, decodeBackupWarnings } from '../src/client/backup-warnings.ts'
+import { packConfigBackup } from '../src/backup.ts'
 
 const ROUTE = '/api/plugins/dsh-app/plugin-presets/config-export'
+const IMPORT_ROUTE = '/api/plugins/dsh-app/plugin-presets/config-import'
 
 /** Minimal registry mock: keeps the routes the plugin registers. */
 function registryMock(): { fetch: HostConnectionFetch, routes: Map<string, ConnectionFetchRoute> } {
@@ -83,6 +85,53 @@ test('no warning header when nothing secret-shaped rides', async () => {
   const response = await exportAnswer(home)
   assert.equal(response.status, 200)
   assert.equal(response.headers.get(BACKUP_WARNINGS_HEADER), null)
+})
+
+test('a machine with no credential store says so on the export answer', async () => {
+  // Measured: this export succeeded with no notice at all, and the archive it
+  // wrote restored on a fresh machine as provider settings and no keys — found
+  // out at the first failed request, not at the import that caused it.
+  const home = scratchHome('nokeys')
+  writeFileSync(join(home, 'settings.yaml'), 'limits:\n  tokenLimit: 4096\n', 'utf8')
+  const response = await exportAnswer(home)
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get(BACKUP_NO_CREDENTIALS_HEADER), '1')
+  assert.ok(!Object.keys(unzipSync(new Uint8Array(await response.arrayBuffer()))).includes('credentials.yaml'))
+})
+
+test('the absent-credentials header is absent when the store rides', async () => {
+  const home = scratchHome('haskeys')
+  writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  KEY: sk-abcdefghijklmnopqrstuv\n', 'utf8')
+  const response = await exportAnswer(home)
+  assert.equal(response.headers.get(BACKUP_NO_CREDENTIALS_HEADER), null)
+})
+
+test('backupCredentialsAbsent reads only the host\u2019s own 1', () => {
+  assert.equal(backupCredentialsAbsent('1'), true)
+  assert.equal(backupCredentialsAbsent(null), false)
+  assert.equal(backupCredentialsAbsent(''), false)
+  assert.equal(backupCredentialsAbsent('0'), false)
+  assert.equal(backupCredentialsAbsent('true'), false)
+})
+
+test('the import answer says when the archive carried no credential store, and leaves the machine\u2019s own', async () => {
+  const exporter = scratchHome('import-exporter')
+  writeFileSync(join(exporter, 'settings.yaml'), 'agent-default-model: gateway/example-model\n', 'utf8')
+  const { bytes } = await packConfigBackup(exporter, 'web')
+  const home = scratchHome('import-target')
+  writeFileSync(join(home, '.credentials.yaml'), 'version: 1\nrefs:\n  KEY: sk-LOCAL-KEY-0123456789abcdef\n', 'utf8')
+  const { fetch, routes } = registryMock()
+  await registerBackupRoutes(fetch, { home, profile: 'web' })
+  const route = routes.get(IMPORT_ROUTE)
+  assert.ok(route !== undefined)
+  const response = await route.fetch(new Request(`http://127.0.0.1${IMPORT_ROUTE}?overwrite=1`, {
+    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: Buffer.from(bytes),
+  }))
+  assert.equal(response.status, 200)
+  const body = await response.json() as { ok: boolean, value?: { credentialsAbsent?: boolean } }
+  assert.equal(body.value?.credentialsAbsent, true)
+  assert.equal(readFileSync(join(home, '.credentials.yaml'), 'utf8'), 'version: 1\nrefs:\n  KEY: sk-LOCAL-KEY-0123456789abcdef\n',
+    'a member that is not in the archive never writes its target')
 })
 
 test('decodeBackupWarnings tolerates every malformed shape without throwing', () => {

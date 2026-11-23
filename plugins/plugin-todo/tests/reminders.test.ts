@@ -11,12 +11,48 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dueReminder, dueReminders, isLateReminder } from '../src/client/reminders.ts'
-import type { TodoItem } from '../src/wire.ts'
+import { applyBoard } from '../src/client/board.ts'
+import { dismissReminder, dueReminder, dueReminders, isLateReminder, shownReminder, startReminderWatch } from '../src/client/reminders.ts'
+import type { TodoItem, TodoSnapshot } from '../src/wire.ts'
 
 /** An open task with a reminder at `reminderAt`. */
 function armed(id: string, reminderAt: number, extra: Partial<TodoItem> = {}): TodoItem {
   return { id, text: id, day: '2026-05-04', createdAt: 1, done: false, reminderAt, ...extra }
+}
+
+const snapshotOf = (items: readonly TodoItem[]): TodoSnapshot => ({ today: '2026-05-04', items, daily: {}, lists: [] })
+
+/** The dictionary seat as a test sees it: the key, then the params it was handed. */
+const t = (key: string, params?: Record<string, string | number>): string => (params === undefined ? key : `${key} ${JSON.stringify(params)}`)
+
+/**
+ * Run the watcher's first tick over `items` with the window hidden or shown, and
+ * collect what it told the desktop.
+ *
+ * The notice that tick publishes stays in the module's store, so it is dismissed
+ * through the real path afterwards — which writes the "seen" flag back, hence the
+ * fetch stand-in answering the same board for every call.
+ */
+async function ringsWhile(hidden: boolean, items: readonly TodoItem[]): Promise<string[]> {
+  const told: string[] = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true, value: snapshotOf(items) }), {
+    status: 200, headers: { 'content-type': 'application/json' },
+  })) as typeof fetch
+  try {
+    applyBoard(snapshotOf(items))
+    const dispose = startReminderWatch({
+      t,
+      hidden: () => hidden,
+      notify: async (title, body) => { told.push(`${title} | ${body}`); return true },
+    })
+    dispose()
+    const shownId = shownReminder()?.item.id
+    if (shownId !== undefined) await dismissReminder(shownId)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  return told
 }
 
 test('a due, open, unseen task is the one that rings', () => {
@@ -90,4 +126,27 @@ test('isLateReminder calls a next-day notice late and an on-time one not', () =>
   assert.equal(isLateReminder(item, Date.parse('2026-11-05T11:30:00+08:00')), true)
   assert.equal(isLateReminder({ id: 'x', text: 'x', day: '2026-11-04', createdAt: 1, done: false }, Date.now()), false,
     'an unarmed task is never late')
+})
+
+test('a ring reaches the desktop only while the window is hidden, and only once', async () => {
+  // The in-app notice cannot be seen in a minimised window, so that is the one
+  // state in which the same ring also becomes a system notification; a visible
+  // window already shows the notice and a second copy would be noise.
+  const now = Date.now()
+  const due = armed('desktop-due', now - 1_000, { text: 'file the invoice' })
+  const hidden = await ringsWhile(true, [due])
+  // A COUNT, never the task's text: the notification lands in the desktop's own
+  // store (notification history, lock screen), outside what the app controls.
+  assert.deepEqual(hidden, ['todo.reminder.toastTitle | todo.reminder.notifyBody {"count":1}'])
+  assert.ok(!hidden[0]?.includes('file the invoice'))
+  const visible = await ringsWhile(false, [armed('desktop-visible', now - 1_000, { text: 'water the plant' })])
+  assert.deepEqual(visible, [], 'a visible window is told nothing')
+})
+
+test('the notification carries the late title and the waiting count the notice shows', async () => {
+  const now = Date.now()
+  const late = armed('desktop-late', now - 3 * 60 * 60 * 1000, { text: 'renew the certificate' })
+  const behind = armed('desktop-behind', now - 1_000, { text: 'call the bank' })
+  const told = await ringsWhile(true, [late, behind])
+  assert.deepEqual(told, ['todo.reminder.toastLateTitle | todo.reminder.notifyBody {"count":2}'])
 })

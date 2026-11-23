@@ -1,43 +1,39 @@
 # 桌面壳体验（plugin-brand 落地 / 诊断中心 / 首启补全 / 工作区直达）
 
-- Status: active
+- Status: partial
+- 核对日期：2026-11-23（本文件此前标 active 且内容停在立项时的状态；以下按代码与真机核对）
 
 > 桌面壳相对"浏览器开 dsh web"的差异化都在这一层。plugin-brand 是多数项的前置地基。
 
-## 1. plugin-brand 落地（前置项，最先做）
+## 1. plugin-brand 落地（✅ 按实际形态完成；原设计两项不再需要）
 
-现状：`plugins/plugin-brand/src/index.ts:27-40` 三个 TODO（settings namespace、
-app-info 服务、desktop bridge remotes），套件里唯一的空壳。
+现状（`plugins/plugin-brand/src/index.ts`）：桌面桥的 host 半边已完整——动作路由与
+Connection 路由都在。`open-in-folder` / `pick-directory` 由内核自己的 seam 执行；
+`notify` / `save-text-as` / `open-logs` / `about-info` / 办公负载与配置检查由 shell 执行，
+路由把坐标交给页面、由页面从 app origin 调用（`shell-actions.ts`）。诊断读取（日志尾、
+导出事实）也在。真机上 `npm start -- --remote-debugging-port=<p> <目录>` 验证过
+`[workspace] launch folder … → ok`。
 
-**方案**（按原设计收口，见 AGENTS.md §6）：
-1. **app-info 服务**：shell 经 server spawn 时注入版本信息（或 host route 读取
-   manifest + shell 版本文件）→ client 可显示"DSH APP x.y.z / 内核 dsh a.b.c"，
-   更新卡片文案获得真实版本号。
-2. **settings namespace `brand`**：shell 级偏好（更新渠道偏好、遥测开关占位、
-   onboarding 标记）走 dsh-settings 体系而非自造 IPC。
-3. **desktop bridge remotes**：`openInFolder(path)`（资源管理器定位）、
-   `saveTextAs(name, content)`（native 另存为——轨迹导出等后续功能的地基）、
-   `notify(title, body)`（系统通知——schedule-reminders V2 的依赖）、
-   `focusSession(sessionId)`（通知点击跳转的雏形）。
-   全部过 trusted-host fence；client 侧经正常 dsh API seam 调用（消灭专用 IPC）。
+原设计中**两项不再需要**（`docs/agents/known-gaps.md` 第 1 条）：
 
-**验收**：设置页"关于"显示真实双版本；"打开日志目录"按钮经 bridge 打开资源管理器。
+1. **app-info 服务**：三个事实（shell 版本、内核版本、渠道）已经经 shell 的 `about-info`
+   动作到达客户端，「关于」页显示真实的双版本（`plugin-client-ui/src/client/about/`）。
+   不需要 host 侧再提供一个服务；源码头部的 TODO 过时，未改（改 src 要带版本号与
+   changeset，而它没有行为变化）。
+2. **settings namespace `brand`**：内核的设置域是「按 profile 里的插件条目投影它的
+   `Config` schema」（`dsh-settings` 的 `SettingsForms`），没有独立命名空间的注册 API；
+   套件里也没有任何 shell 级偏好需要经它存。没有消费者，不做。
 
-## 2. 诊断中心（用户支持刚需）
+**桥的 remotes 现状**：`openInFolder`（原生动作）✅；`saveTextAs`（诊断导出）✅；
+`notify` ✅——shell 实现（`src/main/index.ts` 的 Electron `Notification`）与路由都在，
+2026-11-23 起有待办提醒作为第一个调用方（窗口隐藏时）；`focusSession`（通知点击跳转）
+未做，是 `notify` 的后续项。
 
-现状：排障 = 让用户翻 `<userData>/logs`（server.ts tee 的日志）+ 手动描述现象。
+## 2. 诊断中心（✅）
 
-**方案**：设置页"诊断"section（order 14）：
-- 状态卡：shell 版本、内核 active/previous 版本、渠道、上次内核检查时间、
-  server 运行时长与重启次数（index.ts 已有这些内部状态，补一个 IPC/服务读出）；
-- 日志：最近 200 行实时 tail（host route 读日志文件尾）+ "打开日志目录"（bridge）；
-- 导出诊断包：脱敏 zip（日志 + current.json + 系统信息；redact 规则复用
-  server.ts 的 credential 片段过滤），一键另存（bridge）；
-- 快捷操作：重启 server / 检查内核更新（托盘已有能力的 UI 化）。
-
-**MVP**：状态卡 + 日志 tail + 打开日志目录。**V2**：诊断包导出。
-**验收**：模拟一次 crash restart 后，诊断页能看到重启计数与最近错误行；
-导出的 zip 经 redaction 复查无 `api[key|_key]/authorization/token` 命中。
+设置页「诊断」section 已有：桌面功能状态卡、内核日志尾（200 行）、诊断导出（脱敏包，
+经 `save-text-as`）、办公负载行。状态卡里的重启计数仍无来源（`plugin-brand/src/index.ts`
+头部注明）。
 
 ## 3. 首启体验补全（✅ 已完成）
 
@@ -49,11 +45,14 @@ app-info 服务、desktop bridge remotes），套件里唯一的空壳。
 - 失败路径文案分层：`updater.allSourcesFailed` / `updater.integrityFailed` /
   `kernel.artifactMissing` / `kernel.integrityFailed` 各自可行动。
 
-## 4. 工作区直达（待验证的体验项）
+## 4. 工作区直达（部分）
 
-- `dsh-app.exe <path>` 启动即打开该工作区（🔴 V1：读 `src/main/index.ts`/`window.ts`
-  确认现有 argv 处理与 dsh web 的 workspace 打开 URL 形态）；
-- 托盘菜单"最近工作区"（shell 记录最近打开的 workspace 路径，点击 → 聚焦/新开会话）；
-- Windows 资源管理器右键"在 DSH APP 中打开"（安装器注册表项，NSIS 配置）。
+- `dsh-app.exe <path>` 启动即打开该工作区：✅（`src/main/workspace-launch.ts`
+  `pickWorkspaceArg`，裸目录参数即工作区；2026-11-23 在 pi / cindy 两个目录上实跑过）；
+- 托盘菜单"最近工作区"：未做（想法，未排期）；
+- Windows 资源管理器右键"在 DSH APP 中打开"（NSIS 注册表项）：未做（想法，未排期）。
 
-**验收**：带路径启动直接落到该工作区会话；托盘最近列表打开正确路径。
+## 余项
+
+`focusSession`（通知点击聚焦会话）、托盘最近工作区、资源管理器右键菜单、诊断卡的重启计数来源。
+都不是缺陷，没有排期；要做时从本节取。

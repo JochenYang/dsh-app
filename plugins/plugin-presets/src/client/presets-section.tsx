@@ -21,7 +21,7 @@ import type { HostText } from '../wire.ts'
 import { ConfirmDialog } from './confirm-dialog.tsx'
 import { NS } from './locales.ts'
 import { hostMessage, type Translate } from './messages.ts'
-import { BACKUP_WARNINGS_HEADER, decodeBackupWarnings } from './backup-warnings.ts'
+import { BACKUP_NO_CREDENTIALS_HEADER, BACKUP_WARNINGS_HEADER, backupCredentialsAbsent, decodeBackupWarnings } from './backup-warnings.ts'
 
 /** Props delivered by the slot outlet: the `t` seat of this page's namespace. */
 export type PresetsSectionProps = PropsLocale<typeof NS>
@@ -265,15 +265,21 @@ export function PresetsSection({ t }: PresetsSectionProps): ReactNode {
       const file = `dsh-config-backup-${localDateStamp()}.zip`
       // The archive carries the credential store by design, so the host
       // reports every secret-shaped file it packed; the notice is where the
-      // user learns the zip holds plaintext keys.
+      // user learns the zip holds plaintext keys. A machine with no store at
+      // all exports an archive that restores with no keys — said here, at the
+      // download, instead of at the first failed request on the other machine.
       const warnings = decodeBackupWarnings(response.headers.get(BACKUP_WARNINGS_HEADER))
-      setNotice(warnings.length === 0
-        ? t('presets.backup.export.done', { file })
-        : `${t('presets.backup.export.done', { file })} ${t('presets.backup.export.secrets', {
+      const noCredentials = backupCredentialsAbsent(response.headers.get(BACKUP_NO_CREDENTIALS_HEADER))
+      const done = t('presets.backup.export.done', { file })
+      const secrets = warnings.length === 0
+        ? ''
+        : ` ${t('presets.backup.export.secrets', {
           list: warnings
             .map((warning) => t('presets.host.backupSecretContent', { rel: warning.rel, rule: warning.rule }))
             .join(t('presets.list.separator')),
-        })}`)
+        })}`
+      const absent = noCredentials ? ` ${t('presets.backup.export.noCredentials')}` : ''
+      setNotice(`${done}${secrets}${absent}`)
     } catch (failure) {
       setError(failureText(failure, t))
     } finally {
@@ -304,14 +310,18 @@ export function PresetsSection({ t }: PresetsSectionProps): ReactNode {
       if (!response.ok) {
         throw new Error((await errorReasonOf(response, t)).message)
       }
-      const body = (await response.json()) as { ok: boolean, value?: { written: number, unchanged: number, backups: readonly string[] } }
+      const body = (await response.json()) as { ok: boolean, value?: { written: number, unchanged: number, backups: readonly string[], credentialsAbsent?: boolean } }
       if (body.ok === true && body.value !== undefined) {
-        const { written, unchanged, backups } = body.value
+        const { written, unchanged, backups, credentialsAbsent } = body.value
         // Clause fragments: each locale's fragment carries its own separator,
         // and the sentence is the written part plus this tail.
         const parts = [t('presets.backup.restore.written', { written })]
         if (unchanged > 0) parts.push(t('presets.backup.restore.unchanged', { unchanged }))
         if (backups.length > 0) parts.push(t('presets.backup.restore.backedUp'))
+        // An archive without a credential store touched none of this machine's
+        // keys (the store is only ever written by a member that names it), but a
+        // machine that had none still has none — the report is where it shows.
+        if (credentialsAbsent === true) parts.push(t('presets.backup.restore.noCredentials'))
         setNotice(`${parts.join('')}${t('presets.backup.restore.tail')}`)
       } else {
         throw new Error(t('presets.import.unknown'))
