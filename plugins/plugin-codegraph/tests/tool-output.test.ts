@@ -20,7 +20,6 @@
 
 import { strict as assert } from 'node:assert'
 import { after, describe, it } from 'node:test'
-import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
@@ -72,37 +71,6 @@ describe('dropUndefined', () => {
     assert.equal(dropUndefined(1), 1)
     assert.equal(dropUndefined('x'), 'x')
     assert.deepEqual(dropUndefined([1, 2]), [1, 2])
-  })
-})
-
-describe('one quantity, one label', () => {
-  it('never labels a call-site count as a file count', () => {
-    // The defect this pins, read out of the code rather than asserted around it:
-    // `codegraph_impact` rendered `referenced from ${rows.length} file(s)` where
-    // rows were EDGES, so a symbol with 664 call sites across 110 files was
-    // announced as "664 file(s)". The overview had the same shape one layer up
-    // (203 distinct callers vs 664 call sites).
-    //
-    // The renderer now lives in `tool-text.ts` as a pure function, so the rule is
-    // asserted on REAL output in `tool-text.test.ts`. What this case still guards is
-    // the shape of the source: the template that named the wrong quantity must not
-    // come back, and both counts must still be published with their own noun.
-    const source = readFileSync(new URL('../src/tool-text.ts', import.meta.url), 'utf8')
-    assert.doesNotMatch(
-      source,
-      /referencing\.length\)\} file\(s\)/u,
-      'a call-site count must not be labelled as a file count',
-    )
-    // And the two counts it DOES publish are both present, each with its own noun.
-    assert.match(source, /reference\(s\) across/u)
-    assert.match(source, /file\(s\):/u)
-  })
-
-  it('counts the same edges in the overview and in impact', () => {
-    // The cross-face half: the overview's hub row and `codegraph_impact` must be
-    // counting the same rows, because the model reads one and then asks the other.
-    const overviewSource = readFileSync(new URL('../src/prompt.ts', import.meta.url), 'utf8')
-    assert.match(overviewSource, /call site\(s\)/u, 'the hub row names the same noun impact uses')
   })
 })
 

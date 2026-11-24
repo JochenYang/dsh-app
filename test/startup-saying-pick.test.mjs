@@ -122,7 +122,7 @@ test('one entry, none, and the default source', () => {
   assert.ok(drawn === 'a' || drawn === 'b', `unexpected draw ${String(drawn)}`)
 })
 
-test('the wish is drawn once per start, never per push', () => {
+test('source rule: the wish is drawn once per start, never per push', () => {
   const shell = readFileSync(SHELL, 'utf8')
   const calls = shell.match(/pickSaying\(/gu) ?? []
   assert.equal(calls.length, 1, 'exactly one draw site may exist in the shell')
@@ -141,12 +141,11 @@ test('the wish is drawn once per start, never per push', () => {
     'push() must send the constant, and send nothing for an empty wish list')
 })
 
-test('the pushed field is one string again', () => {
+test('source rule: the pushed wish is one field, never the array it replaced', () => {
+  // The array shape (`sayings`) rotated the line on a timer. The field's TYPE is
+  // the compiler's to check; what no type sees is the old shape coming back.
   const shell = readFileSync(SHELL, 'utf8')
-  assert.match(shell, /^ {2}saying: string$/mu, 'StartupView.saying must be a single string')
   assert.doesNotMatch(shell, /sayings/u, 'the array shape is gone from the shell')
-  assert.match(shell, /type StartupPush = Omit<StartupView, 'brand' \| 'theme' \| 'skeleton' \| 'digest' \| 'saying'>/u,
-    'the push-owned key set must exclude saying, and nothing else')
 })
 
 test('the page writes the pushed line and nothing else moves it', () => {

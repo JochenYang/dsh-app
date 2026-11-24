@@ -449,9 +449,11 @@ test('W2 the snapshot fingerprint follows CONTENT, not card counts', async () =>
   const store = root.projectFor('D:\\proj\\fingerprint')
   await saveSized(store, 'card-a', 40)
   const before = auditRoot(root.dir).total.fingerprint
+  const length = store.list()[0]!.body.length
   await saveSized(store, 'card-a', 40, 'convention')
   const after = auditRoot(root.dir).total.fingerprint
-  assert.equal(store.list()[0]!.body.length, store.list()[0]!.body.length)
+  // The premise, so that the fingerprint below moved on CONTENT alone.
+  assert.equal(store.list()[0]!.body.length, length, 'the rewrite keeps the length')
   assert.notEqual(before, after, 'same length, different content → different fingerprint')
 })
 

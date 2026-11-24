@@ -30,11 +30,3 @@ test('the web line never gets a copy: its host composes the home layer itself', 
 test('the frames line gets one: its host is handed this file alone', () => {
   assert.equal(homeRowsInProfilePatch({ transport: 'frames' }), true)
 })
-
-test('dev follows the same rule as production', () => {
-  // The signature no longer takes `isDev` — this test is the guard that nobody
-  // adds it back: a forced copy is a duplicate row in every older boot that
-  // reads the same profile.
-  assert.equal(homeRowsInProfilePatch.length, 1)
-  assert.deepEqual(Object.keys({ transport: 'web' }), ['transport'])
-})

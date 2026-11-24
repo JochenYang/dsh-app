@@ -252,7 +252,7 @@ test('skill reference: the hint names the mode and the manual token', () => {
   assert.match(text, new RegExp(SKILL_TOKEN))
 })
 
-test('skill reference: the client registers the source and no CSS skin remains', () => {
+test('source rule: skill reference: the client registers the source and no CSS skin remains', () => {
   assert.equal(existsSync(join(pluginRoot, 'src', 'client', 'skill-chip.ts')), false)
   const client = readFileSync(join(pluginRoot, 'src', 'client.ts'), 'utf8')
   assert.match(client, /ctx\.inject\(\['inputTriggers'\]/)

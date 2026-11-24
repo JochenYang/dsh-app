@@ -1,8 +1,11 @@
 // The Windows update path: silent install, one interruption, and a notice that
 // says what landed. Each rule is a spawn argument, a dialog that must stay gone,
 // or a file that must survive a deferral — none of it is callable without
-// Electron, so the shapes are pinned here the way platform-view.test.mjs pins
-// its own windows.
+// Electron, so every case here is a source rule (docs/agents/testing.md): it
+// asserts the shape `updater.ts` and the installer hooks must keep. A rule is
+// kept only where removing what it names would bring the defect back; the
+// behaviour the copy promises is checked separately, through the dictionary
+// (`t`), at the bottom of this file.
 //
 // Why these particular rules: the flow shipped a copy that claimed "downloads
 // and installs silently" while spawning a visible NSIS wizard, asked the same
@@ -20,7 +23,7 @@ const require = createRequire(import.meta.url)
 const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'updater.ts'), 'utf8')
 const { t } = require('../dist/shared/locale.js')
 
-test('the windows install is silent, asks nothing, and relaunches the app', () => {
+test('source rule: the windows install is silent, asks nothing, and relaunches the app', () => {
   // `--updated` skips the pages and the running-app prompt; `/S` is silent;
   // `--force-run` is what makes an assisted installer start the app again (only
   // `${Silent} && ${isForceRun}` does that in installSection.nsh). The hooks
@@ -42,7 +45,7 @@ test('the windows install is silent, asks nothing, and relaunches the app', () =
   assert.ok(!hooks.includes('dshInstFilesShow'), 'no themed NSIS page')
 })
 
-test('the post-download confirmation is gone, leaving the task gate and a countdown', () => {
+test('source rule: the post-download confirmation is gone, leaving the task gate and a countdown', () => {
   // The decision was already made at the availability prompt; a second
   // "install now" DIALOG was the one that made the flow feel manual. The label
   // survives as a countdown button (start now, skip the wait), not as a prompt.
@@ -63,10 +66,7 @@ test('the post-download confirmation is gone, leaving the task gate and a countd
   assert.match(source, /chosen === INSTALL_NOW_ACTION/u)
 })
 
-test('a deferred install keeps its bytes instead of deleting them', () => {
-  assert.match(source, /async function rememberCachedInstaller/u)
-  assert.match(source, /async function cachedInstallerMatches/u)
-  assert.match(source, /async function pruneCachedInstaller/u)
+test('source rule: a deferred install keeps its bytes instead of deleting them', () => {
   // The two deferral paths (active tasks, countdown cancel) must return without
   // removing the ~250 MB installer; only the cache record's expiry or a
   // completed install may delete it.
@@ -76,7 +76,7 @@ test('a deferred install keeps its bytes instead of deleting them', () => {
   assert.match(source, /sha512Base64\(dest\) === sha512/u)
 })
 
-test('the next boot names the installed version and links to its release', () => {
+test('source rule: the next boot names the installed version and links to its release', () => {
   assert.match(source, /t\('updater\.updatedToast', \{ app: APP_NAME, version: current \}\)/u)
   // The notice opens the IN-APP changelog: a mainland user cannot reach the
   // GitHub release page, and the sheet's own external link is the mirror.
@@ -87,13 +87,13 @@ test('the next boot names the installed version and links to its release', () =>
   assert.match(source, /t\('updater\.rollbackDoneToast', \{ app: APP_NAME, version: current \}\)/u)
 })
 
-test('macOS and Linux install silently and relaunch explicitly', () => {
+test('source rule: macOS and Linux install silently and relaunch explicitly', () => {
   // BaseUpdater only honours `isForceRunAfter` when silent; stating both keeps
   // the three platforms on one contract instead of the autoRun default.
   assert.match(source, /autoUpdater\.quitAndInstall\(true, true\)/u)
 })
 
-test('an already-downloaded installer skips the availability prompt next time', () => {
+test('source rule: an already-downloaded installer skips the availability prompt next time', () => {
   // The user's "later" is a decision, not a request to be asked again: the next
   // check (startup or manual) goes straight to the install countdown and reuses
   // the bytes. The digest is re-checked, so a stale or tampered file still

@@ -13,9 +13,11 @@
  * placeholder, which carries no such requirement.
  *
  * The validator lives in the kernel RUNTIME tree, which is not a dependency of
- * this package. When no runtime tree is present the test reports that it cannot
- * run rather than passing silently — the same convention
- * `test/plugin-kernel-imports.test.mjs` uses for an absent kernel.
+ * this package. When no runtime tree is present the suite reports that it cannot
+ * run — as a SKIP, which the runner counts — rather than passing silently. The
+ * first version registered a case that only logged "SKIPPED"; node:test counted
+ * it as a pass, so every run without a runtime tree (CI's plugin suites run
+ * before the runtime is built) showed five absent cases as one green one.
  */
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -45,10 +47,9 @@ function findRuntime() {
 const runtime = findRuntime()
 
 if (runtime === null) {
-  test('persistence gate cannot run (no kernel runtime tree present)', () => {
-    console.log('plugin-rewind persistence gate: SKIPPED — no runtime tree found.')
-    console.log('Extract a runtime with: tar -xzf runtime-dist/dsh-runtime-*.tgz -C scratch/kernel-api-probe/rt-full')
-  })
+  test('persistence gate needs a kernel runtime tree', {
+    skip: 'no runtime tree found; extract one with: tar -xzf runtime-dist/dsh-runtime-*.tgz -C scratch/kernel-api-probe/rt-full',
+  }, () => {})
 } else {
   // Import through file URLs directly: `pathname` on Windows yields a leading
   // slash (`/D:/...`) which then resolves as a bogus `D:\D:\...` path.

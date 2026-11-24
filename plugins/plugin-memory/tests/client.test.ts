@@ -70,7 +70,7 @@ test('the confirmation composes the host primitives instead of redrawing them', 
   }
 })
 
-test('the cancel button holds the initial focus, and the destructive one never does', () => {
+test('source rule: the cancel button holds the initial focus, and the destructive one never does', () => {
   // The hand-rolled dialog put React `autoFocus` on the DELETE button: Enter on
   // a dialog opened from the keyboard deleted the card. `data-modal-autofocus`
   // is the primitive's documented seat (React autoFocus runs before the modal
@@ -82,9 +82,7 @@ test('the cancel button holds the initial focus, and the destructive one never d
   const cancel = dialog.slice(outline, primary)
   const confirm = dialog.slice(primary)
   assert.match(cancel, /data-modal-autofocus=/)
-  assert.match(cancel, /onClick=\{onClose\}/)
   assert.doesNotMatch(confirm, /data-modal-autofocus/)
-  assert.match(confirm, /onClick=\{onConfirm\}/)
   // The JSX attribute, specifically: `autoFocus` inside a comment (this
   // dialog's header explains why it is not used) is not a usage.
   const attribute = /[\s<]autoFocus(?=[\s=>/]|\/>)/u
@@ -149,7 +147,7 @@ test('the delete confirmation says the card can be restored, and quotes nothing 
   }
 })
 
-test('every refusal the routes can answer has copy, and no mapping points at a code the host never sends', () => {
+test('source rule: every refusal the routes can answer has copy, and no mapping points at a code the host never sends', () => {
   // The host sends a code, the client owns the sentence. A code with no
   // mapping falls back to the host's English diagnostic — the wrong language
   // for this page; a mapping for a code that does not exist is dead copy.
@@ -167,7 +165,7 @@ test('every refusal the routes can answer has copy, and no mapping points at a c
   }
 })
 
-test('the attached-cards and external-index lines come from the latest sample only, and only when the host sent the fields', () => {
+test('source rule: the attached-cards and external-index lines come from the latest sample only, and only when the host sent the fields', () => {
   // The request-relevant card bodies ride OUTSIDE the section and the other
   // tool's index rides inside it; the host reports both as optional fields.
   // Most assemblies have neither: a line reading "0 attached" beside the

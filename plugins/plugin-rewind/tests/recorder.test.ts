@@ -210,7 +210,7 @@ test('restoring a CREATED file moves it away instead of deleting it', async () =
   await rm(dir, { recursive: true, force: true })
 })
 
-test('removing a created file never renames — a quarantine on another volume must work', async () => {
+test('source rule: removing a created file never renames — a quarantine on another volume must work', async () => {
   // The quarantine lives under `$DSH_HOME`; the workspace does not have to share
   // its volume (this machine: `$DSH_HOME` on `C:`, the project on `D:`). `rename`
   // across volumes fails with `EXDEV`, so a "move it away" written as a rename

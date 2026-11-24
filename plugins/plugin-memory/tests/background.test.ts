@@ -1164,7 +1164,7 @@ test('host apply: the request-relevant cards ride as a runtime context, picked f
   const agent = { session: { header: { cwd: PROJECT_CWD } } }
 
   // No request yet, or an assembly without an agent: nothing is contributed.
-  assert.equal(sectionText({ agent }), sectionText({ agent }), 'the section assembles without a request')
+  assert.match(sectionText({ agent }), /- lesson-a0 \[/u, 'the section still assembles without a request')
   assert.equal(contextText({ agent }), '')
   assert.equal(contextText({}), '')
 

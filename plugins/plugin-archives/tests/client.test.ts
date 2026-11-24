@@ -87,7 +87,7 @@ test('the new inputs are the host controls, not hand-drawn ones', () => {
   assert.doesNotMatch(section, /type="checkbox"/)
 })
 
-test('stopFirst travels with the delete request, and only when it was ticked', () => {
+test('source rule: stopFirst travels with the delete request, and only when it was ticked', () => {
   const section = source('client/archives-section.tsx')
   // The host refuses a non-boolean, and an always-present `false` would read as a
   // decision the user never made.
@@ -99,7 +99,7 @@ test('stopFirst travels with the delete request, and only when it was ticked', (
   assert.match(section, /<Checkbox\n\s*checked=\{stopFirst\}/)
 })
 
-test('the batch and sweep confirmations are the modal, with their counts', () => {
+test('source rule: the batch and sweep confirmations are the modal, with their counts', () => {
   const section = source('client/archives-section.tsx')
   // Every irreversible action the page grew in this round opens the modal: the
   // batch purge and the retention sweep name their counts, sessions and bytes.
@@ -109,7 +109,7 @@ test('the batch and sweep confirmations are the modal, with their counts', () =>
   assert.match(section, /archives\.retention\.confirm\.body/)
 })
 
-test('a transient result is announced through the host toast primitive', () => {
+test('source rule: a transient result is announced through the host toast primitive', () => {
   const section = source('client/archives-section.tsx')
   // The same rule the dialogs follow: an announcement is `Toast`, and a banner of
   // this page's own would get the tokens right and the fade, layering and portal
@@ -131,10 +131,9 @@ test('a transient result is announced through the host toast primitive', () => {
   // A CONDITION the page is in is NOT a banner: it stays inline, because a banner
   // that clears itself reads as the condition clearing with it.
   assert.match(section, /archives\.retention\.malformed/)
-  assert.match(section, /dshar_notice dshar_noticeWarn/)
 })
 
-test('a skipped id renders the sessions it was about and the host diagnostic', () => {
+test('source rule: a skipped id renders the sessions it was about and the host diagnostic', () => {
   const section = source('client/archives-section.tsx')
   // Both fields were carried by the host and dropped on the floor: a counted reason
   // does not say WHICH sessions a tree refusal covered, and `detail` is the only

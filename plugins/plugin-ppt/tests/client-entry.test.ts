@@ -6,9 +6,11 @@
  *
  * The client half imports react/react-dom, which are browser-provided
  * externals (peer dependencies, not installed here), so these assertions read
- * the sources and the bundle instead of importing them; the DOM-free bar rules
- * have their own suite (office-bar), and the capsule's two-state contract and
- * toggle semantics have theirs (capsule-state).
+ * the sources and the bundle instead of importing them: they are source rules
+ * (docs/agents/testing.md), kept where removing what they name brings a retired
+ * seat or a launcher path back. The DOM-free bar rules have their own suite
+ * (office-bar), and the capsule's two-state contract and toggle semantics have
+ * theirs (capsule-state).
  *
  * @module @dsh-app/plugin-ppt/tests/client-entry
  */
@@ -31,14 +33,10 @@ function sourceFiles(): string[] {
   return walk(join(pluginRoot, 'src'))
 }
 
-test('client entry: the office bar is mounted from the session selection and no retired occurrence is claimed', () => {
+test('source rule: client entry: the office bar is mounted from the session selection and no retired occurrence is claimed', () => {
   const client = readFileSync(join(pluginRoot, 'src', 'client.ts'), 'utf8')
   assert.match(client, /mountPptOfficeBar\(ctx\.uiSession\.adapter\.current, seat\)/)
   assert.match(client, /export const inject = \['locale', 'uiSession'\]/)
-  // The capsule's copy is this plugin's own namespace, registered with (and
-  // disposed by) this client fiber, and the injected tree carries the seat.
-  assert.match(client, /ctx\.locale\.register\(PPT_NS, \{ zh: pptZh, en: pptEn \}\)/)
-  assert.match(client, /t: ctx\.locale\.bind\(PPT_NS\), locale: ctx\.locale/)
   assert.doesNotMatch(client, /slots\.register|slots\.inject/)
   assert.doesNotMatch(client, /conversation\.session\.header/)
   assert.doesNotMatch(client, /conversation\.composer\.dock/)
@@ -49,7 +47,6 @@ test('client entry: the office bar is mounted from the session selection and no 
   const bar = readFileSync(join(pluginRoot, 'src', 'client', 'office-bar.ts'), 'utf8')
   assert.match(bar, /COMPOSER_CARD_SELECTOR = 'div\[data-composer-card\]'/)
   assert.match(bar, /OFFICE_BAR_CLASS = 'dshOfficeBar'/)
-  assert.match(bar, /new MutationObserver/)
 
   for (const file of sourceFiles()) {
     const source = readFileSync(file, 'utf8')
@@ -68,20 +65,8 @@ test('client entry: the office bar is mounted from the session selection and no 
   )
 })
 
-test('client entry: the capsule is one toggle with a dropdown and no launcher path', () => {
+test('source rule: client entry: the capsule has no launcher path and keeps the explicit way out', () => {
   const entry = readFileSync(join(pluginRoot, 'src', 'client', 'ppt-entry.tsx'), 'utf8')
-  // Two states: the label expression and the caret both key off the mode.
-  assert.match(entry, /state\.label/)
-  assert.match(entry, /state\.caret &&/)
-  assert.match(entry, /toggle\.enabled/)
-  // Unbound decisions park; bound ones persist through the host route.
-  assert.match(entry, /pendingTemplate\.set\(/)
-  assert.match(entry, /pendingTemplate\.clear\(\)/)
-  assert.match(entry, /pptModeApi\.setMode\(sessionId, update\)/)
-  assert.match(entry, /pendingTemplate\.consume\(\)/)
-  // The suite is mutually exclusive: the capsule stands down when superseded.
-  assert.match(entry, /useOfficeSupersede\(/)
-  assert.match(entry, /removeSkillReference\(bindingRef\.current\)/)
   // No template is ever seeded by the turn-on itself.
   assert.doesNotMatch(entry, /DEFAULT_PICK|dsh-blue-professional/)
   // The panel keeps the explicit way out (its copy rides the dictionary).

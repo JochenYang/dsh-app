@@ -8,8 +8,9 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
@@ -67,7 +68,10 @@ test('probe-drag mirrors DESKTOP_CHROME_CSS rule for rule', () => {
 // surface clear of the window buttons by hand — and the right dock's tab strip,
 // padded 140px on the right while its buttons ended 2px from the native zone, left
 // 337px of empty strip in front of them (the reported "uncoordinated" look).
-test('the shell publishes the caption markers the kernel\'s layout keys on', () => {
+// A source rule: the markers are assignments in an injected script that no test
+// can run against a native window, so what is checked is that the shell writes
+// each of them. The sampler further down IS run (see `sample()` below).
+test('source rule: the shell publishes the caption markers the kernel\'s layout keys on', () => {
   // Comments are stripped first: the prose above names every one of these
   // identifiers, and an assertion that cannot tell code from a comment would pass
   // on a comment alone — the failure mode this whole file exists to prevent.
@@ -154,25 +158,71 @@ test('the image lightbox\'s close control clears the caption band', () => {
 //
 // So the walk must STOP at the frame — anything inside it is page content, not
 // something covering the caption.
-test('the strip sampler prefers an overlay, then the kernel\'s caption token', () => {
+//
+// The sampler is RUN here, inside the wrapper the shell injects, against a page
+// this file describes. Matching its source text instead (what this file used to
+// do) could not tell the token branch from a dead one: `toRgbColor` may be
+// named anywhere in the function and still never be reached.
+
+/**
+ * Run the injected sampler against a page this test describes.
+ *
+ * @param {object} page
+ * @param {Array<object|string>} [page.stack] what `elementFromPoint` returns,
+ *   innermost first: an element spec, or `'body'`.
+ * @param {string} [page.caption] the kernel's caption token, as declared on body.
+ * @param {string} [page.documentCaption] the same token, declared on
+ *   documentElement only.
+ * @returns the colour the sampler hands the shell.
+ */
+function sample({ stack = [], caption = '', documentCaption = '' } = {}) {
   const shell = readFileSync(path.join(ROOT, 'src/main/window.ts'), 'utf8')
-  // Comments stripped: the prose above names every identifier here (and mentions
-  // the token before the loop), so indexOf on the raw text would measure comments.
-  const sampler = literal(shell, 'const SAMPLE_FN').replace(/^\s*\/\/.*$/gmu, '')
-  assert.match(sampler, /--dsw-specific-sidebar-fill/u,
-    'the caption band is painted by a pseudo-element; only the kernel\'s own token names its colour')
-  // The overlay walk exists, and it is bounded by the frame and the body.
-  assert.match(sampler, /let covering = null/u, 'overlays above the frame must be considered')
-  assert.match(sampler, /el === document\.body \|\| el === frame/u, 'the overlay walk must stop at the frame and the body, or a layout wrapper counts as a cover')
-  assert.match(sampler, /el\.contains\(frame\)/u, 'a box merely CONTAINING the frame is a wrapper, never a painted cover')
-  // Order: the bounded overlay walk runs before the token, and the token before
-  // the unbounded fallback walk.
-  const overlayAt = sampler.indexOf('let covering = null')
-  const tokenAt = sampler.indexOf('--dsw-specific-sidebar-fill')
-  const fallbackAt = sampler.indexOf('el2 = document.elementFromPoint')
-  assert.ok(overlayAt !== -1 && tokenAt !== -1 && fallbackAt !== -1, 'all three branches must exist')
-  assert.ok(overlayAt < tokenAt, 'an overlay covering the strip wins over the caption token')
-  assert.ok(tokenAt < fallbackAt, 'the token wins over the unbounded fallback walk (the marker is Windows-only)')
+  // The template as a STRING: its `\\(` is `\(` once evaluated, and its two
+  // interpolations only decide where the page is sampled — the fake document
+  // below answers every point alike.
+  const script = literal(shell, 'const SAMPLE_FN')
+    .replace(/\\\\/gu, '\\')
+    .replace(/\$\{WINDOW_CONTROLS_WIDTH\}/gu, '0')
+    .replace(/\$\{OVERLAY_HEIGHT\}/gu, '0')
+  const frame = {}
+  const body = { background: 'rgb(21, 21, 23)', token: caption, parentElement: null }
+  const documentElement = { background: '', token: documentCaption }
+  const elements = stack.map((entry) => {
+    if (entry === 'body') return body
+    // `containsFrame`: a plain layout wrapper, which merely holds the frame.
+    const { containsFrame, ...painted } = entry
+    return { parentElement: null, background: 'rgba(0, 0, 0, 0)', token: '', contains: () => containsFrame === true, ...painted }
+  })
+  elements.forEach((element, index) => { element.parentElement = elements[index + 1] ?? null })
+  const document = {
+    body,
+    documentElement,
+    querySelector: (selector) => (selector.includes('_frame') ? frame : null),
+    elementFromPoint: () => elements[0] ?? null,
+  }
+  const getComputedStyle = (element) => ({
+    backgroundColor: element.background ?? '',
+    getPropertyValue: (name) => (name === '--dsw-specific-sidebar-fill' ? element.token ?? '' : ''),
+  })
+  // The same wrapper the shell injects (`SAMPLE_SCRIPT` in window.ts).
+  return vm.runInNewContext(`(function () {${script} return sample(); })()`, { document, window: { innerWidth: 1200 }, getComputedStyle })
+}
+
+test('the strip sampler prefers an overlay, then the kernel\'s caption token', () => {
+  // 1. An element that PAINTS over the sample point wins: it is what is visible
+  // there, whatever the frame would have drawn.
+  assert.equal(sample({ stack: [{ background: 'rgb(35, 35, 36)' }], caption: '#1b1b1c' }), 'rgb(35, 35, 36)')
+  // ...unless it is the frame, the body, or a plain box that merely CONTAINS the
+  // frame (a layout wrapper — never the painted surface).
+  assert.equal(sample({ stack: [{ background: 'rgb(1, 2, 3)', containsFrame: true }], caption: '#1b1b1c' }), 'rgb(27, 27, 28)')
+  assert.equal(sample({ stack: ['body'], caption: '#1b1b1c' }), 'rgb(27, 27, 28)')
+  // A transparent element paints nothing there, so the walk goes on past it.
+  assert.equal(sample({ stack: [{}, { background: 'rgb(35, 35, 36)' }], caption: '#1b1b1c' }), 'rgb(35, 35, 36)')
+  // 2. Otherwise the kernel's own caption token.
+  assert.equal(sample({ caption: '#1b1b1c' }), 'rgb(27, 27, 28)')
+  // No token (a kernel that predates it, or a window without the marker): the
+  // plain page walk, which is correct there because nothing paints over the strip.
+  assert.equal(sample({ stack: [{ background: 'rgb(9, 9, 9)' }] }), 'rgb(9, 9, 9)')
 })
 
 // The sampler must hand the shell rgb() NUMBERS, and the failure mode this pins was
@@ -182,11 +232,12 @@ test('the strip sampler prefers an overlay, then the kernel\'s caption token', (
 // painted the strip `#010101` — reported as "completely pure black in dark theme" —
 // while "#f9fafb" failed to parse at all and fell back to `#ffffff`.
 test('the sampler normalizes its colour to rgb() before the shell parses it', () => {
-  const shell = readFileSync(path.join(ROOT, 'src/main/window.ts'), 'utf8')
-  const sampler = literal(shell, 'const SAMPLE_FN')
-  // The token branch must go through a hex parser, not return the raw property.
-  assert.match(sampler, /toRgbColor/u, 'the token value is hex; it must be converted before it leaves the sampler')
-  // Reading the hex PAIRS (slice + base 16) is what makes it a real conversion.
-  assert.match(sampler, /parseInt\(h\.slice\(i, i \+ 2\), 16\)/u, 'the conversion must read hex pairs')
-  assert.match(sampler, /return caption;/u, 'the converted token is what gets returned')
+  assert.equal(sample({ caption: '#1b1b1c' }), 'rgb(27, 27, 28)')
+  assert.equal(sample({ caption: '#f9fafb' }), 'rgb(249, 250, 251)')
+  assert.equal(sample({ caption: '#abc' }), 'rgb(170, 187, 204)')
+  // It is read from BODY, where the theme presenter declares it. With nothing
+  // covering the strip and no token on body, the sampler must fall through to
+  // the page's own background — a reader that looked at documentElement instead
+  // would find the token declared there and answer with the caption colour.
+  assert.equal(sample({ documentCaption: '#1b1b1c' }), 'rgb(21, 21, 23)')
 })

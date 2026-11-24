@@ -152,7 +152,7 @@ test('a quoted preference is unquoted like the settings document\'s is', () => {
   assert.equal(parseThemePreferenceFromPatch(text), 'dark')
 })
 
-test('the window path RESOLVES the persisted preference, not just the OS one', () => {
+test('source rule: the window path RESOLVES the persisted preference, not just the OS one', () => {
   // Every parser above passed while the splash still ignored all of them: the
   // module that owns the window called `applyWindowTheme()` and never called
   // `applyThemePreference()`, so the setting was read correctly by every unit

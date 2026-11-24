@@ -207,8 +207,8 @@ test('a file seen but not copied is never created, and its change is reported', 
 })
 
 test('a manifest entry recorded as unreadable is not treated as created either', async () => {
-  // The capture's read-failure branch writes into `uncaptured` (see the source
-  // assertion below); this pins what a manifest carrying one means.
+  // The capture's read-failure branch records the entry (see the source rule
+  // below); this pins what a manifest carrying one means.
   const { root, home } = scratch()
   writeFileSync(join(root, 'locked.txt'), 'CONTENT')
   await captureWorkspace(home, 's', 1, root, limits())
@@ -223,11 +223,14 @@ test('a manifest entry recorded as unreadable is not treated as created either',
   assert.equal(diff.restore.length, 0, 'it is not a removal, and there is nothing to write back')
   assert.deepEqual(diff.uncapturedChanged, [join(root, 'locked.txt')], 'a change to it is reported')
   await cleanup(root, home)
+})
 
+test('source rule: a file the capture cannot read is recorded as uncaptured, never dropped', () => {
+  // No fixture makes `readFile` fail on a file `stat` can see on every platform
+  // this suite runs on, so the branch is asserted where it is written.
   // Normalised at the read: a CRLF checkout (Windows, `core.autocrlf=true`)
   // leaves a `\r` at every line end, so a pattern that spans two lines with
-  // `\n` never matches there while CI's LF checkout stays green. This asserts
-  // on the code's shape, not on its line endings.
+  // `\n` never matches there while CI's LF checkout stays green.
   const source = readFileSync(new URL('../src/trees.ts', import.meta.url), 'utf8').replace(/\r\n/gu, '\n')
   const code = source
     .replace(/\/\*[\s\S]*?\*\//gu, '')
@@ -384,7 +387,7 @@ test('a collection overlapping two captures deletes nothing they stored', async 
   await cleanup(root, home)
 })
 
-test('the manifest commit and the collection pass share one gate', () => {
+test('source rule: the manifest commit and the collection pass share one gate', () => {
   // A TIMING property is what closes the blob-loss window, and no test can force the
   // interleaving through the public API (see the case above). So the two structural
   // facts that close it are pinned as source text — the same idiom this suite uses

@@ -5,8 +5,9 @@
  * plugin's `inject`; reading an undeclared one throws
  * `cannot get property "remote.commands" without inject`. That failure is
  * invisible to a type check and to a registration-only smoke test — the plugin
- * activates, the popup opens, and every pick then throws at click time. These
- * tests pin the declaration to the reads, so dropping one fails here.
+ * activates, the popup opens, and every pick then throws at click time. The
+ * declaration is compared with the reads below, on the source — `apply` cannot
+ * be mounted — so dropping one fails here.
  */
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -25,22 +26,10 @@ function declaredInject(): string[] {
   return [...match[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
 }
 
-test('remote is declared, because the command call path reads ctx.remote', () => {
-  // `ctx.get('remote')` is the recall executor; without the declaration cordis
-  // throws on the property read.
-  assert.match(source, /ctx\.get\('remote'\)/)
-  assert.ok(declaredInject().includes('remote'), `inject must name "remote": ${declaredInject().join(', ')}`)
-})
-
 test('the dotted sub-service is declared too, as the kernel names it', () => {
   // The error text names `remote.commands`, and the kernel's own ui-commands
   // declares both forms.
   assert.ok(declaredInject().includes('remote.commands'))
-})
-
-test('sessions is declared, because the projection lookup reads ctx.sessions', () => {
-  assert.match(source, /ctx\.get\('sessions'\)/)
-  assert.ok(declaredInject().includes('sessions'))
 })
 
 test('slots and locale stay declared', () => {
@@ -60,7 +49,7 @@ test('every ctx.get() service is covered by the declaration', () => {
   }
 })
 
-test('the composer face is read from uiSession, never from the raw binding', () => {
+test('source rule: the composer face is read from uiSession, never from the raw binding', () => {
   // The two are different objects and the difference is invisible to every
   // other gate. `sessions.binding(id)` returns the raw Controller binding
   // (`session`, `eventSource`, no props); the composer's `inputActions` exists
@@ -70,10 +59,8 @@ test('the composer face is read from uiSession, never from the raw binding', () 
   // sentence about the composer becomes a lie — measured on a real machine as
   // "composer prefill skipped: the binding publishes no inputActions.setDraft".
   assert.ok(declaredInject().includes('uiSession'), 'inject must name "uiSession"')
-  assert.match(source, /ctx\.get\('uiSession'\)/)
-  assert.match(source, /uiSession\?\.bindingSource\?\.\(\{ sessionId, binding: owner \}\)/)
-  // And the raw read must be gone: it is the read that silently returned
-  // undefined instead of throwing.
-  assert.doesNotMatch(source, /binding\.props\?\.inputActions/)
-  assert.doesNotMatch(source, /binding\?\.props/)
+  // The raw read must stay gone: it is the read that silently returned undefined
+  // instead of throwing.
+  assert.doesNotMatch(source, /binding\.props\?\.inputActions/u)
+  assert.doesNotMatch(source, /binding\?\.props/u)
 })

@@ -393,8 +393,6 @@ describe('contract drift guard: the parser, the schema and the doc', () => {
     // `isStoreDocument` needs an install command, and its sniff literal is the
     // install command pattern's own prefix.
     assert.deepEqual(readsIn('isStoreDocument', 'row'), ['install'])
-    assert.equal(IMPL.includes("record.install.trim().startsWith('dsh plugin ')"), true,
-      'src/catalog.ts: the store sniff no longer keys on a `dsh plugin ` command')
     assert.equal(String(def('installCommand').pattern).startsWith('^dsh plugin '), true,
       'the install command pattern must start where the store sniffer looks')
     assert.equal((def('storeRow').required as string[]).includes('install'), true)
@@ -826,17 +824,17 @@ describe('contract semantics: what each declared field does', () => {
     assert.equal(explicit?.category, 'Canonical')
   })
 
-  it('binds the npm grammar, the http(s) prefix and the install command to the parser', () => {
+  it('binds the npm grammar and the install command to the parser, and publishes an http(s) prefix', () => {
     assert.equal(def('npmPackageName').pattern, PACKAGE_NAME_PATTERN.source,
       'the published npm grammar must be the parser\'s own PACKAGE_NAME_PATTERN')
-    // The URL rule is stated in catalog.ts as a literal regex; derive it from
-    // the source text so a change there fails here rather than passing.
-    const urlLiteral = '^https?:\\/\\/'
-    assert.equal(IMPL.includes(urlLiteral), true, 'src/catalog.ts no longer states the http(s) URL rule as before')
-    const implUrl = new RegExp(urlLiteral)
+    // The published URL pattern is a prefix rule: it must judge a sample exactly
+    // as a bare `^https?://` does. (An earlier version also asserted that
+    // catalog.ts spells that literal in its source, and then judged the schema
+    // against the same literal copied here — the copy agreeing with itself.)
+    const prefix = /^https?:\/\//u
     for (const sample of ['https://a.example.com/x', 'http://a.example.com', 'https://', 'javascript:alert(1)', 'ftp://a.example.com', 'HTTPS://a.example.com']) {
-      assert.equal(new RegExp(String(def('httpUrl').pattern)).test(sample), implUrl.test(sample),
-        `the published URL pattern must judge ${JSON.stringify(sample)} exactly as the parser does`)
+      assert.equal(new RegExp(String(def('httpUrl').pattern)).test(sample), prefix.test(sample),
+        `the published URL pattern must judge ${JSON.stringify(sample)} exactly as an http(s) prefix does`)
     }
     // The command pattern is the parser's target grammar, so every command it
     // accepts names a target the install chain can act on, and every command

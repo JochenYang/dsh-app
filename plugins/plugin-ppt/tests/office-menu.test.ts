@@ -277,9 +277,11 @@ test('the module keeps the framework runtimes out of its own imports', () => {
 //
 // The client entry imports react and the primitives package, which are
 // browser-provided externals not installed for a node run, so the wiring is
-// read from the source and the built bundle rather than imported.
+// read from the source and the built bundle rather than imported: these are
+// source rules (docs/agents/testing.md), kept where a removed line would bring
+// back the defect its comment records.
 
-test('the client entry registers both sources inside the trigger scope', () => {
+test('source rule: the client entry registers both sources inside the trigger scope', () => {
   const client = readFileSync(join(pluginRoot, 'src', 'client.ts'), 'utf8')
   // One scope, two sources: the mode chip and the menu group. Registering
   // outside `scope.effect` would leak the source for the plugin's whole lifetime.
@@ -293,15 +295,14 @@ test('the client entry registers both sources inside the trigger scope', () => {
   )
 })
 
-test('the client entry hands the menu the real ranker, the bound seat and the glyph factory', () => {
+test('source rule: the client entry hands the menu the real ranker, the bound seat and the glyph factory', () => {
   const client = readFileSync(join(pluginRoot, 'src', 'client.ts'), 'utf8')
-  assert.match(client, /import \{ rankByName \} from '@deepseek-ai\/dsh-client-ui-primitives'/)
   assert.match(client, /rank: rankByName/)
   assert.match(client, /iconFor: officeMenuIcon/)
   assert.match(client, /t: ctx\.locale\.bind\(PPT_NS\)/)
 })
 
-test('an absent trigger pipeline registers nothing, so no empty group can appear', () => {
+test('source rule: an absent trigger pipeline registers nothing, so no empty group can appear', () => {
   const client = readFileSync(join(pluginRoot, 'src', 'client.ts'), 'utf8')
   // The guard precedes both registrations: a missing service must leave the
   // menu exactly as the kernel built it, not add a group with no rows.

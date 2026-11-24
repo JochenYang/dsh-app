@@ -7,17 +7,24 @@
 // review: the session payload is untrusted input, the bounds come from the page,
 // the page NAME is a whitelist, and the app preload exposes exactly one key.
 //
+// Two kinds of case live here. Most call the exported functions, or run a built
+// preload, and assert on what comes back. The ones titled `source rule:` assert
+// the shape of a source file instead: they guard wiring in `index.ts` and
+// `updater.ts`, which cannot be booted in a test, and are tripwires for the
+// defects their comments record (docs/agents/testing.md, "Source rules").
+//
 // Run after the build: node --test test/   (or: npm test)
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { test } from 'node:test'
+import vm from 'node:vm'
 
 const require = createRequire(import.meta.url)
 const { readPlatformSession } = require('../dist/main/desktop-host.js')
 const {
-  isAppFrame, mergePlatformCookies, platformBounds, platformClientHeaders, platformClientMetadata, platformPage, platformPartition,
+  PLATFORM_IPC, isAppFrame, mergePlatformCookies, platformBounds, platformClientHeaders, platformClientMetadata, platformPage, platformPartition,
 } = require('../dist/main/platform-view.js')
 
 // ------------------------------------------------------------ app-frame check
@@ -246,57 +253,203 @@ test('an unknown account gets a throwaway partition, never a shared one', () => 
 })
 
 // ------------------------------------------------------------ exposed surface
+//
+// Both preloads RUN here. Each built file is evaluated in a fresh context against
+// a fake `electron` module, and the assertions are about what it exposed and what
+// that exposure does. Matching the built text instead (what this section used to
+// do) cannot tell a guard that is present from one that is neutralised: measured,
+// `process.isMainFrame || true` in the platform preload left every text assertion
+// green while a subframe could ask for the credential.
 
-test('the app preload exposes the marker and the platform bridge, nothing else', () => {
-  const built = readFileSync(path.join(import.meta.dirname, '..', 'dist', 'main', 'account-preload.js'), 'utf8')
+const DIST = path.join(import.meta.dirname, '..', 'dist', 'main')
+const PLATFORM = 'https://platform.deepseek.com'
+
+/**
+ * Evaluate a built preload the way Electron would, against a fake `electron`.
+ *
+ * The fake answers `require('electron')` with ONLY the members a test hands in,
+ * so a preload that reaches for any other member fails here instead of in a page.
+ *
+ * @param {string} file - the built preload, under `dist/main`.
+ * @param {object} globals - what the preload reads from its document and process.
+ * @param {object} electron - the fake module's members.
+ * @returns the exposures by name, and the context the preload ran in.
+ */
+function runPreload(file, globals, electron) {
+  const exposed = new Map()
+  const sandbox = {
+    console,
+    ...globals,
+    exports: {},
+    module: { exports: {} },
+    require: (id) => {
+      assert.equal(id, 'electron', `${file} must require nothing but electron`)
+      return {
+        contextBridge: { exposeInMainWorld: (name, value) => { exposed.set(name, value) } },
+        ...electron,
+      }
+    },
+  }
+  vm.runInNewContext(readFileSync(path.join(DIST, file), 'utf8'), sandbox)
+  return { exposed, sandbox }
+}
+
+/** The app preload on one document: what it exposed, and what it asked for. */
+function runAppPreload({ protocol = 'dsh-app:', hostname = 'app' } = {}) {
+  const invokes = []
+  const { exposed } = runPreload('account-preload.js', { location: { protocol, hostname } }, {
+    ipcRenderer: {
+      invoke: (...args) => { invokes.push(args); return Promise.resolve() },
+      // A synchronous channel blocks the page; the fake refuses one outright.
+      sendSync: () => { throw new Error('the app preload used a synchronous channel') },
+    },
+  })
+  return { exposed, invokes }
+}
+
+test('the app preload exposes the marker and the platform bridge, nothing else', async () => {
+  const { exposed, invokes } = runAppPreload()
   // Exactly two exposures: the account marker, and the three-operation bridge
   // that turns the account section's usage / top-up links into an in-app view.
-  const exposures = [...built.matchAll(/exposeInMainWorld\(\s*([A-Za-z_$][\w$.]*|'[^']*')/gu)]
-    .map((match) => match[1])
-  assert.equal(exposures.length, 2, `expected exactly two exposures, saw ${JSON.stringify(exposures)}`)
-  assert.deepEqual(exposures, ['exports.MARKER_KEY', "'dshPlatform'"])
-  assert.match(built, /exports\.MARKER_KEY = 'dshDesktop'/)
+  assert.deepEqual([...exposed.keys()], ['dshDesktop', 'dshPlatform'])
+  // The marker is the whole switch the kernel's account UI looks for; a page that
+  // can see it must not be able to change it.
+  assert.ok(Object.isFrozen(exposed.get('dshDesktop')), 'the marker must be frozen')
+  assert.equal(exposed.get('dshDesktop').protocolVersion, 1)
   // The bridge may only ask the main process for these three things — nothing
   // else exists to reach, and this is the list a reviewer must re-check before
   // it grows: see installPlatformIpc for what each one is allowed to do.
-  const channels = [...built.matchAll(/ipcRenderer\.invoke\(\s*[A-Za-z_$][\w$.]*\.(\w+)/gu)].map((match) => match[1])
-  assert.deepEqual([...new Set(channels)].sort(), ['bounds', 'close', 'open'])
+  const bridge = exposed.get('dshPlatform')
+  assert.deepEqual(Object.keys(bridge).sort(), ['close', 'open', 'setBounds'])
+  const bounds = { x: 10, y: 20, width: 300, height: 400 }
+  await Promise.all([bridge.open('usage', bounds), bridge.setBounds(bounds), bridge.close()])
+  assert.deepEqual(invokes, [
+    [PLATFORM_IPC.open, 'usage', bounds],
+    [PLATFORM_IPC.bounds, bounds],
+    [PLATFORM_IPC.close],
+  ])
   // What it must NEVER do: send a credential to the main process, or read one
   // back. The token is main-process state and the embedded document's own
   // preload fetches it; nothing on this side has any business holding it.
-  const code = built.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/u.test(line)).join('\n')
-  assert.ok(!/sendSync/u.test(code), 'the app preload must not use a synchronous channel')
-  assert.ok(!/dsh-platform:bootstrap|platform-origin/u.test(code), 'the app preload must not touch the credential channel')
-  // No other Electron member is reachable from here.
-  const electronMembers = [...code.matchAll(/electron_\d+\.([A-Za-z_$][\w$]*)/gu)].map((match) => match[1])
-  assert.deepEqual([...new Set(electronMembers)].sort(), ['contextBridge', 'ipcRenderer'])
+  assert.ok(!invokes.some(([channel]) => channel === PLATFORM_IPC.bootstrap),
+    'the app preload must not touch the credential channel')
 })
 
-test('the platform preload scopes the credential to the view that owns it', () => {
-  const built = readFileSync(path.join(import.meta.dirname, '..', 'dist', 'main', 'platform-preload.js'), 'utf8')
-  // Three gates, all required: a main frame, an origin passed on THIS view's
-  // command line, and that origin matching the document's own.
-  assert.match(built, /process\.isMainFrame/u)
-  assert.match(built, /--dsh-platform-origin=/u)
-  assert.match(built, /location\.origin === allowedOrigin/u)
-  // The token is kept in a closure and compared on the way in, so a page cannot
-  // hand itself one, and it is never written to a global.
-  assert.match(built, /value\.origin === location\.origin/u)
-  assert.match(built, /exposeInMainWorld\('dsh'/u)
+test('the app preload exposes nothing to a document that is not the app', () => {
+  // The same window shows the splash page first: a `file:` document, which has
+  // no use for any of this. Another host on the scheme, and another scheme
+  // entirely, are refused the same way.
+  for (const page of [{ protocol: 'file:', hostname: '' }, { protocol: 'dsh-app:', hostname: 'shell' }, { protocol: 'https:', hostname: 'app' }]) {
+    assert.deepEqual([...runAppPreload(page).exposed.keys()], [], JSON.stringify(page))
+  }
 })
 
-test('the main process re-checks the FRAME, not just the webContents', () => {
-  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
-  const bootstrap = /  bootstrap\(([\s\S]*?)\n  \}\n/u.exec(source)
-  assert.ok(bootstrap !== null, 'bootstrap is the credential handoff')
-  // A same-origin SUBFRAME has the same URL as the main frame, so a URL check
-  // cannot tell them apart: identity has to be compared against the main frame.
-  assert.match(bootstrap[1], /frame !== view\.webContents\.mainFrame/u)
-  assert.match(bootstrap[1], /frame === null/u)
-  // The IPC handler must pass the frame OBJECT for that comparison to be possible.
-  const handler = /ipcMain\.on\(PLATFORM_IPC\.bootstrap,\s*\(event\)\s*=>\s*\{([\s\S]*?)\n  \}\)/u.exec(source)
-  assert.ok(handler !== null, 'the bootstrap channel is where the call arrives')
-  assert.match(handler[1], /view\.bootstrap\(event\.sender, event\.senderFrame\)/u)
+/** The snapshot the main process answers a legitimate bootstrap with. */
+const SNAPSHOT = { token: 'tok-123', origin: PLATFORM, locale: 'zh_CN' }
+
+/**
+ * The platform preload on one view: `allowedOrigin` is what the main process
+ * passed on the command line, `origin` is where the document actually is.
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.isMainFrame] whether this is the view's main frame.
+ * @param {string} [options.origin] the document's own origin.
+ * @param {string|null} [options.allowedOrigin] the command line's origin (null: none).
+ * @param {unknown} [options.bootstrap] what the main process answers, or an Error to throw.
+ * @returns what was exposed, and a way to publish a language change.
+ */
+function runPlatformPreload({ isMainFrame = true, origin = PLATFORM, allowedOrigin = origin, bootstrap } = {}) {
+  const listeners = new Map()
+  const { exposed, sandbox } = runPreload('platform-preload.js', {
+    console: { ...console, error() {} },
+    process: { isMainFrame, argv: allowedOrigin === null ? [] : [`--dsh-platform-origin=${allowedOrigin}`] },
+    location: { origin },
+  }, {
+    ipcRenderer: {
+      on: (channel, listener) => listeners.set(channel, listener),
+      sendSync: () => {
+        if (bootstrap instanceof Error) throw bootstrap
+        return bootstrap
+      },
+    },
+  })
+  return {
+    exposed,
+    sandbox,
+    dsh: exposed.get('dsh'),
+    localeChanged: (value) => listeners.get(PLATFORM_IPC.localeChanged)?.({}, value),
+  }
+}
+
+test('the platform preload hands the credential only to this view\'s own main frame', () => {
+  const own = runPlatformPreload({ bootstrap: SNAPSHOT })
+  assert.deepEqual([...own.exposed.keys()], ['dsh'])
+  assert.equal(own.dsh.displayMode, 'embedded')
+  assert.equal(own.dsh.protocolVersion, 1)
+  assert.equal(own.dsh.getAuthToken(), 'tok-123')
+  assert.equal(own.dsh.getLocale(), 'zh_CN')
+  // Three gates, all required. A subframe cannot ask for the credential, even on
+  // the right origin...
+  assert.equal(runPlatformPreload({ isMainFrame: false, bootstrap: SNAPSHOT }).exposed.size, 0, 'a subframe got a bridge')
+  // ...nor a document that navigated off the origin this view was opened on,
+  // even though the command line still names the real one...
+  assert.equal(runPlatformPreload({ origin: 'https://evil.test', allowedOrigin: PLATFORM, bootstrap: SNAPSHOT }).exposed.size, 0, 'a foreign document got a bridge')
+  // ...nor a view whose command line named no origin at all.
+  assert.equal(runPlatformPreload({ allowedOrigin: null, bootstrap: SNAPSHOT }).exposed.size, 0, 'a view with no origin got a bridge')
+})
+
+test('the token comes from the main process, and is compared on the way in', () => {
+  // A page cannot hand itself one: the bootstrap answer counts only when it
+  // carries THIS document's origin, a non-empty token and a known language.
+  for (const answer of [
+    { ...SNAPSHOT, origin: 'https://evil.test' },
+    { ...SNAPSHOT, token: '' },
+    { ...SNAPSHOT, locale: 'fr_FR' },
+    'tok-123', null, {}, [],
+  ]) {
+    const { exposed } = runPlatformPreload({ bootstrap: answer })
+    assert.equal(exposed.size, 1, JSON.stringify(answer))
+    assert.throws(() => exposed.get('dsh').getAuthToken(), /platform initialization failed/u, JSON.stringify(answer))
+  }
+})
+
+test('a bootstrap that fails keeps embedded mode, and says so on the getter', () => {
+  // Falling back to a plain web page would let it use whatever browser
+  // credentials its own session might have.
+  const { exposed } = runPlatformPreload({ bootstrap: new Error('channel closed') })
+  assert.equal(exposed.size, 1)
+  assert.throws(() => exposed.get('dsh').getAuthToken(), /platform initialization failed/u)
+  assert.throws(() => exposed.get('dsh').getLocale(), /platform locale initialization failed/u)
+})
+
+test('the token stays in the closure: nothing the page can reach holds it', () => {
+  const { sandbox, dsh } = runPlatformPreload({ bootstrap: SNAPSHOT })
+  // JSON, not a property walk: a closure-held value has no property to find, so
+  // what this rules out is the token sitting anywhere the page could name.
+  for (const [name, value] of Object.entries(sandbox)) {
+    assert.ok(!String(JSON.stringify(value)).includes('tok-123'), `${name} holds the token`)
+  }
+  for (const value of Object.values(dsh)) {
+    assert.ok(!String(JSON.stringify(value)).includes('tok-123'), 'an exposed function carries the token')
+  }
+})
+
+test('a language change from the main process reaches the page, and only a known language does', () => {
+  const { dsh, localeChanged } = runPlatformPreload({ bootstrap: SNAPSHOT })
+  const heard = []
+  const others = []
+  const unsubscribe = dsh.onLocaleChange((locale) => heard.push(locale))
+  dsh.onLocaleChange(() => { throw new Error('a listener that fails') })
+  dsh.onLocaleChange((locale) => others.push(locale))
+  localeChanged('en_US')
+  assert.deepEqual(heard, ['en_US'])
+  assert.deepEqual(others, ['en_US'], 'a failing listener must not stop the others')
+  assert.equal(dsh.getLocale(), 'en_US')
+  localeChanged('fr_FR')
+  assert.equal(dsh.getLocale(), 'en_US', 'an unknown language changes nothing')
+  unsubscribe()
+  localeChanged('zh_CN')
+  assert.deepEqual(heard, ['en_US'], 'an unsubscribed listener hears nothing')
 })
 
 // ------------------------------------------------- the session survives ordering
@@ -309,10 +462,10 @@ test('the main process re-checks the FRAME, not just the webContents', () => {
 // on a real machine). The fix keeps the session in shell state and hands it to the
 // view at creation, which makes the ORDER irrelevant rather than merely correct.
 //
-// This is a structural assertion for the same reason the theme one is: the
-// invariant is "who owns the state", and no return value shows it.
+// A source rule: the invariant is "who owns the state", it lives in `index.ts`,
+// and nothing here can boot the shell to observe it.
 
-test('the session lives in shell state, so the view cannot miss an early one', () => {
+test('source rule: the session lives in shell state, so the view cannot miss an early one', () => {
   const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
   // The shell records every publication...
   const handler = /onPlatformSession:\s*\(session\)\s*=>\s*\{([\s\S]*?)\n\s*\},/u.exec(source)
@@ -329,7 +482,7 @@ test('the session lives in shell state, so the view cannot miss an early one', (
   assert.ok(setAt !== -1 && ipcAt !== -1 && setAt < ipcAt, 'the session must be applied before the IPC surface can open a page')
 })
 
-test('a publication is not lost when it arrives before the view exists', () => {
+test('source rule: a publication is not lost when it arrives before the view exists', () => {
   const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
   // The original defect, stated as the thing that must NOT come back: applying a
   // session ONLY through an optional view, with no shell-side record. That shape
@@ -344,99 +497,32 @@ test('a publication is not lost when it arrives before the view exists', () => {
 // ------------------------------------------------- credential lifetime on exit
 //
 // A persisted partition outlives the document, so the credential has to be
-// removed rather than left for the next process. The cleanup is asynchronous,
-// which is why both install paths must AWAIT it before handing the process over:
-// a fire-and-forget clear can be lost with the process that scheduled it.
+// removed rather than left for the next process. What the VIEW clears is run in
+// platform-view-lifecycle.test.mjs; what is left here is source rules for the
+// wiring in `index.ts` and `updater.ts`, which no test can boot. The cleanup is
+// asynchronous, which is why both install paths must AWAIT it before handing the
+// process over: a fire-and-forget clear can be lost with the process that
+// scheduled it.
 
-test('the view clears its own partition, not just its document', () => {
-  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
-  const close = /  close\(\): void \{([\s\S]*?)\n  \}\n/u.exec(source)
-  assert.ok(close !== null, 'close() is where the document is destroyed')
-  // The four steps a persisted partition needs; any one missing leaves the
-  // credential reachable by a later view.
-  for (const step of [
-    /webRequest\.onBeforeSendHeaders\(null\)/u,
-    /flushStorageData\(\)/u,
-    /cleanStorage\(browserSession/u,
-    /waitForBeforeUnload: false/u,
-  ]) {
-    assert.match(close[1], step, `close() must ${String(step)}`)
-  }
-  // The clear itself: every authenticating store, and the cache/auth cache.
-  const clean = /private cleanStorage\(([\s\S]*?)\n  \}\n\}/u.exec(source)
-  assert.ok(clean !== null, 'cleanStorage is where a partition is sanitized')
-  assert.match(clean[0], /closeAllConnections\(\)/u)
-  assert.match(clean[0], /clearStorageData\(/u)
-  assert.match(clean[0], /clearCache\(\)/u)
-  assert.match(clean[0], /clearAuthCache\(\)/u)
-  // A PERSISTED partition keeps local storage (that is what makes preferences
-  // survive); a throwaway one is cleared whole. Getting this backwards silently
-  // resets every preference, or silently keeps credentials.
-  assert.match(clean[0], /isPersistent\(\)/u)
-  assert.match(clean[0], /\? \{ storages: \[[^\]]*'cookies'[^\]]*\] \}\s*: undefined/u)
-  assert.ok(!/'localstorage'/u.test(clean[0]), 'local storage must survive on a persisted partition')
-  // A failure is REPORTED, never swallowed: the caller decides whether it blocks.
-  assert.match(clean[0], /AggregateError/u)
-})
-
-test('the download refusal is registered once per session, not once per open', () => {
-  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
-  // A persisted partition is the SAME Session on every open, so a listener added
-  // per open accumulates forever (and warns once it passes ten).
-  assert.match(source, /downloadGuards = new WeakSet<Session>\(\)/u)
-  const registration = /if \(!this\.downloadGuards\.has\(browserSession\)\) \{([\s\S]{0,200}?)\n    \}/u.exec(source)
-  assert.ok(registration !== null, 'the guard must be conditional on the session')
-  assert.match(registration[1], /will-download/u)
-  // And close() must NOT remove it: the guard belongs to the session, not the view.
-  const close = /  close\(\): void \{([\s\S]*?)\n  \}\n/u.exec(source)
-  assert.ok(!/will-download/u.test(close[1]))
-})
-
-test('a disposed view refuses to be resurrected', () => {
-  const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
-  // After dispose() the credential is gone for good; a stale reference must not
-  // be able to open a signed-in page or adopt a new snapshot.
-  const open = /  async open\(owner: BrowserWindow, page: PlatformPage, bounds: PlatformBounds\): Promise<void> \{\n([\s\S]{0,300}?)\n    this\.close\(\)/u.exec(source)
-  assert.ok(open !== null)
-  assert.match(open[1], /if \(this\.disposed\) throw/u)
-  const setSession = /  setSession\(next: PlatformSession \| null\): void \{\n([\s\S]{0,300}?)const current = this\.account/u.exec(source)
-  assert.ok(setSession !== null)
-  assert.match(setSession[1], /if \(this\.disposed\) return/u)
-})
-
-test('a hidden window releases the account page and restores it on show', () => {
-  const view = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'platform-view.ts'), 'utf8')
+test('source rule: a hidden window suspends the view and a shown one resumes it', () => {
   // The embedded page is a whole renderer process for a surface nobody can see,
-  // and hiding to the tray is the state a user leaves the app in. `suspend` closes
-  // the document but REMEMBERS the page, which `resume` opens again: the client
-  // overlay above the native view has no way to learn it went away, so the pair
-  // has to travel together.
-  const suspend = /  suspend\(\): void \{([\s\S]*?)\n  \}\n/u.exec(view)
-  assert.ok(suspend !== null, 'suspend is what releases the hidden page')
-  assert.match(suspend[1], /this\.close\(\)/u)
-  assert.match(suspend[1], /this\.suspended = remembered/u)
-  const resume = /  async resume\(owner: BrowserWindow\): Promise<void> \{([\s\S]*?)\n  \}\n/u.exec(view)
-  assert.ok(resume !== null, 'resume is what puts the page back')
-  assert.match(resume[1], /this\.suspended = null/u)
-  assert.match(resume[1], /await this\.open\(owner, remembered\.page, remembered\.bounds\)/u)
-  // Any other close FORGETS the page: the user went back or signed out, and a
-  // later show must not resurrect a surface nobody asked for.
-  const close = /  close\(\): void \{([\s\S]*?)\n  \}\n/u.exec(view)
-  assert.ok(close !== null)
-  assert.match(close[1], /this\.suspended = null/u)
-  // And the window's own events are where the pair is wired.
+  // and hiding to the tray is the state a user leaves the app in. `suspend` and
+  // `resume` themselves are run in platform-view-lifecycle.test.mjs; this is the
+  // half that lives in the shell — the window's own events are where the pair is
+  // wired, and the client overlay above the native view has no way to learn the
+  // page went away.
   const shell = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
   assert.match(shell, /win\.on\('hide', \(\) => \{\s*platformView\?\.suspend\(\)/u)
   assert.match(shell, /win\.on\('show', \(\) => \{\s*void platformView\?\.resume\(win\)/u)
 })
 
-test('both install paths await the discard before replacing the process', () => {
+test('source rule: both install paths await the discard before replacing the process', () => {
   const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'updater.ts'), 'utf8')
   // Two install paths replace the process: electron-updater's quitAndInstall and
   // the Windows installer spawn. Each call site must AWAIT the discard, and the
   // discard must come first — a fire-and-forget clear can be lost with the
   // process that scheduled it. (The arguments themselves are pinned in
-  // updater-silent-install.test.mjs: both paths install silently.)
+  // updater-click-free-install.test.mjs: both paths install silently.)
   const calls = [...source.matchAll(/await discardPlatformCredentialsForRestart\(\)/gu)]
   assert.equal(calls.length, 2, `expected both install paths to await the discard, saw ${calls.length}`)
   for (const [which, handover] of [[0, /autoUpdater\.quitAndInstall\([^)]*\)/u], [1, /spawn\(dest,/u]]) {
@@ -449,7 +535,7 @@ test('both install paths await the discard before replacing the process', () => 
   assert.match(source, /let discardPlatformCredentials[\s\S]{0,200}?= null/u)
 })
 
-test('the shell wires its discard hook where the updater can find it', () => {
+test('source rule: the shell wires its discard hook where the updater can find it', () => {
   const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
   const wired = /setPlatformCredentialDiscard\(([\s\S]*?)\n/u.exec(source)
   assert.ok(wired !== null, 'the shell must hand the updater its discard operation')
@@ -464,7 +550,7 @@ test('the shell wires its discard hook where the updater can find it', () => {
 // leave it on disk for every ordinary quit, a relaunch, or a crash — which is the
 // regression this block pins. Every way this process stops must discard first.
 
-test('every way this process stops discards the credential first', () => {
+test('source rule: every way this process stops discards the credential first', () => {
   const source = readFileSync(path.join(import.meta.dirname, '..', 'src', 'main', 'index.ts'), 'utf8')
   // will-quit: awaited inside the handler, because app.exit() below it does not
   // wait for pending work.

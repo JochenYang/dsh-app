@@ -13,6 +13,10 @@
  * `prompt` field), so it is delivered once, to the page that performed the
  * recall. These tests pin that: no prefill state lives in the client, and the
  * projection carries no prompt.
+ *
+ * Every case here is a source rule (docs/agents/testing.md): the prefill runs
+ * inside the client plugin's `apply`, which no test can mount, so each guard is
+ * asserted where it is written.
  */
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -32,14 +36,14 @@ const projection = readFileSync(
   'utf8',
 )
 
-test('no prefill bookkeeping lives in the client', () => {
+test('source rule: no prefill bookkeeping lives in the client', () => {
   // Both earlier designs left state behind that a remount or reload reset.
   assert.doesNotMatch(entry, /consumedCuts/)
   assert.doesNotMatch(icon, /consumedCuts/)
   assert.doesNotMatch(icon, /consumedCut/)
 })
 
-test('the projection carries no prefill text — that is what made it repeat', () => {
+test('source rule: the projection carries no prefill text — that is what made it repeat', () => {
   // Durable state replays on reload; a prompt kept there came back forever.
   assert.doesNotMatch(projection, /lastCut/)
   assert.doesNotMatch(projection, /cutCount/)
@@ -51,18 +55,16 @@ test('the projection carries no prefill text — that is what made it repeat', (
   assert.doesNotMatch(projection, /prompt:\s*previewText|recalledText|originalText/)
 })
 
-test('the prefill reads the prompt out of the command result', () => {
-  assert.match(entry, /function recalledPrompt/)
-  assert.match(entry, /JSON\.parse\(raw\)/)
-  assert.match(entry, /prefillRecalled\(ctx, target, outcome\.text\)/)
+test('source rule: the prefill reads the prompt out of the command result', () => {
+  assert.match(entry, /prefillRecalled\(ctx, target, outcome\.text\)/u)
 })
 
-test('the prefill never discards text the user typed', () => {
+test('source rule: the prefill never discards text the user typed', () => {
   // `setDraft` replaces the whole draft, so any OTHER text still refuses.
   assert.match(entry, /if \(draft !== undefined && draft\.trim\(\) !== ''\) return 'the composer already holds text'/)
 })
 
-test('a composer already holding THIS text is success, not a failure', () => {
+test('source rule: a composer already holding THIS text is success, not a failure', () => {
   // Two writers race on one recall — the icon path (from the command result) and
   // the event observer (from `command/done`) — and either can arrive first.
   // Marking the recall handled cannot win that race, because the mark is only
@@ -77,18 +79,16 @@ test('a composer already holding THIS text is success, not a failure', () => {
   assert.ok(idempotent !== -1 && refuses !== -1 && idempotent < refuses, 'the idempotent check must precede the refusal')
 })
 
-test('a busy composer is waited for, not given up on', () => {
+test('source rule: a busy composer is waited for, not given up on', () => {
   // A hand-typed `/rewind n` submits THROUGH the composer, so its result arrives
   // while the phase machine is `submitting`. Refusing there is why that path never
   // prefilled. The write is deferred to the settle instead, with a bounded wait.
-  assert.match(entry, /function deferUntilIdle/)
-  assert.match(entry, /return deferUntilIdle\(materialized, setDraft as \(text: string\) => void, prompt\)/)
-  assert.match(entry, /input\.subscribe\(settle\)/)
-  assert.match(entry, /SETTLE_TIMEOUT_MS/)
-  assert.match(entry, /the composer never settled/)
+  assert.match(entry, /input\.subscribe\(settle\)/u)
+  assert.match(entry, /SETTLE_TIMEOUT_MS/u)
+  assert.match(entry, /the composer never settled/u)
 })
 
-test('the host sends the prompt with the success answer', () => {
+test('source rule: the host sends the prompt with the success answer', () => {
   const host = readFileSync(
     fileURLToPath(new URL('../src/index.ts', import.meta.url)),
     'utf8',

@@ -22,6 +22,33 @@ bundle non-empty, the PPT template catalog, the bundled PDF CJK font, and (with 
 really contains the resource directories the plugins declare. This is the executable answer to
 "compile-green ≠ runtime-green": the type gate cannot see across the plugin/kernel boundary, and this can.
 
+**Source rules** — a case whose title starts with `source rule:` asserts the SHAPE of a source file
+(`assert.match(source, …)`, an absence, an order of two statements), not a behaviour. It is a lint rule that
+lives in a suite because the repository has no linter for it, and it is admitted only where no test can run
+the behaviour: a React component with no mount harness, app boot in `src/main/index.ts`, Electron-bound code
+with no fake. Three conditions hold for every one of them:
+
+1. **It fails when the fix it guards is removed.** A rule that pins a comment, a type annotation, a function's
+   name, or a lazy pattern that scans past its own function is deleted instead of kept.
+2. **It is scoped to what owns the fact** — the handler, the function, the module — so a change beside it
+   cannot satisfy it.
+3. **Its title says what the source must keep, and its comment names the defect**, so a reader can tell a
+   tripwire from a test, and the day a harness can run the behaviour the rule is replaced by that test.
+
+A pin on a shipped artefact's own text — a stylesheet's declarations, an overlay row, a locale table, a
+`package.json` script — is none of these and carries no prefix: there the text IS the product, so matching it
+is the behaviour.
+
+What a text assertion cannot see, measured 2026-11 on `test/platform-view.test.mjs`: with `dispose()` no
+longer marking the instance and the preload's main-frame guard neutralised, all 26 of the cases it had then
+stayed green. A rule sees that a line exists, never that it runs. So a behaviour test is written wherever one
+can be: `test/platform-view-lifecycle.test.mjs` runs the view against a fake Electron, both preloads are
+evaluated
+against a fake `electron` module, the caption sampler is run inside a fake `document`, and
+`mountNavIconPatch` runs against five stubbed `document` members and one observer. Adding a renderer (a `react-dom` and a DOM as plugin
+devDependencies) is what would turn the remaining component rules into behaviour tests; that is a dependency
+decision, not a test fix.
+
 **CI** (`.github/workflows/ci.yml`) is the definition of done for a merge. Its `gate` job runs the
 changeset gate, the typecheck, the four static checks and both test layers; its order matters — the
 root tests run *after* the per-plugin installs because two suites resolve packages that exist only

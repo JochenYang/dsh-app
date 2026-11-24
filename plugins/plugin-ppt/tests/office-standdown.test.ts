@@ -81,7 +81,7 @@ test('office stand-down: a foreign announcement closes an active capsule without
   }
 })
 
-test('office stand-down: the fallback poll is ten seconds and the change subscription is wired', () => {
+test('source rule: office stand-down: the fallback poll is ten seconds and the change subscription is wired', () => {
   const source = readFileSync(join(pluginRoot, 'src', 'client', 'office-supersede.ts'), 'utf8')
   assert.match(source, /export const OFFICE_ACTIVE_POLL_MS = 10_000/)
   assert.match(source, /setInterval\(run, OFFICE_ACTIVE_POLL_MS\)/)

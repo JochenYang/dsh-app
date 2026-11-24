@@ -19,6 +19,11 @@
  * hex cannot follow a theme) and no backticks inside the template literal (one
  * would end the string and break the build in a place that looks like a CSS bug).
  *
+ * The stylesheet is this module's own output, so its rules are asserted as text.
+ * The cases titled `source rule:` go one step further and read the COMPONENT,
+ * which no test here mounts: they keep the class names the stylesheet targets
+ * attached to the elements it styles (docs/agents/testing.md).
+ *
  * @module plugin-codegraph/tests/styles
  */
 
@@ -159,7 +164,7 @@ describe('stylesheet', () => {
     assert.match(body, /\.dshcg_row > button\s*\{[^}]*flex:\s*0 0 auto/u, 'a control inside the project row must not shrink')
   })
 
-  it('pins the row STRUCTURE, not only the stylesheet', () => {
+  it('source rule: pins the row STRUCTURE, not only the stylesheet', () => {
     // The stylesheet fix alone is not the fix. `probe-codegraph-langs.cjs`
     // measures the CSS against a hand-written row, so deleting the
     // `.dshcg_langAction` wrapper from the component — the ORIGINAL defect
@@ -235,7 +240,7 @@ describe('the graph view root', () => {
     assert.match(file, /box-sizing:\s*border-box/u, 'the open-file root must stay inside the region')
   })
 
-  it('renders every branch inside a root that owns the height', () => {
+  it('source rule: renders every branch inside a root that owns the height', () => {
     // A fragment cannot claim a height: the first version returned `<>…</>` for
     // the overview, so the stylesheet had no node to apply the rule to.
     const tab = readFileSync(join(pluginRoot, 'src', 'client', 'graph-tab.tsx'), 'utf8')
@@ -400,7 +405,7 @@ describe('the sidebar page', () => {
 })
 
 describe('the project picker', () => {
-  it('is a dropdown, not a strip that grows with the project count', () => {
+  it('source rule: is a dropdown, not a strip that grows with the project count', () => {
     // Measured defect: `SegmentedTabs` sizes every segment to its own label, so
     // four real projects wrapped the strip and broke `dsh-rewind-plugin` and
     // `Warm-kitchen-time` onto two lines each. The number of projects is
