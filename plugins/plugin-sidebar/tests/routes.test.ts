@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { ROUTE_PREFIX as CLIENT_PREFIX } from '../src/client/api.ts'
 import { handleGitRequest, registerGitRoutes, ROUTE_PREFIX } from '../src/git-routes.ts'
-import type { GitSessionScope } from '../src/git-routes.ts'
+import type { GitRunner, GitSessionScope } from '../src/git-routes.ts'
 
 /** One captured registration: its exact path, methods and handler. */
 interface Captured {
@@ -171,5 +171,137 @@ describe('git request dispatch', () => {
     const body = await response.json() as { ok: boolean, error: { code: string } }
     assert.equal(body.ok, false)
     assert.equal(body.error.code, 'not-found')
+  })
+})
+
+/**
+ * The two output ceilings, and the difference between them.
+ *
+ * Measured on a real machine: a 5 MB single-file diff overflowed execFile's
+ * shared 4 MiB buffer and the tab answered 400 `git-error` whose detail was
+ * the first 1000 characters of the diff. Content reads therefore run on the
+ * larger ceiling (the existing MAX_DIFF_CHARS truncation bounds the answer),
+ * while `status` keeps the small one — a status list that overflows is a
+ * structural problem no larger read fixes. A fake runner stands in for the
+ * spawn, so no multi-megabyte fixture or real repository is involved.
+ */
+describe('git output ceilings', () => {
+  const MIB = 1024 * 1024
+  const STATUS_CEILING = 4 * MIB
+  const CONTENT_CEILING = 32 * MIB
+
+  /** The error node's execFile throws when a child passes maxBuffer. */
+  function maxBufferError(stdout: string): Error & { code: string, stdout: string, stderr: string } {
+    const error = new Error('stdout maxBuffer length exceeded') as Error & { code: string, stdout: string, stderr: string }
+    error.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+    error.stdout = stdout
+    error.stderr = ''
+    return error
+  }
+
+  it('reads a 5 MiB diff past the old ceiling and truncates it at MAX_DIFF_CHARS', async () => {
+    const diff = 'd'.repeat(5 * MIB)
+    const ceilings: (number | undefined)[] = []
+    const runner: GitRunner = (_cwd, _args, options) => {
+      ceilings.push(options?.maxBufferBytes)
+      return Promise.resolve(diff)
+    }
+    const response = await handleGitRequest(
+      'diff',
+      new Request(`dsh-app://app${ROUTE_PREFIX}/git/diff?cwd=${encodeURIComponent('D:\\repo')}&sessionId=live&path=pnpm-lock.yaml`),
+      scope,
+      runner,
+    )
+    assert.equal(response.status, 200)
+    const body = await response.json() as { ok: boolean, value: { text: string, truncated: boolean } }
+    assert.equal(body.value.truncated, true)
+    assert.equal(body.value.text.length, 500_000)
+    assert.deepEqual(ceilings, [CONTENT_CEILING])
+  })
+
+  it('answers a coded error, with no stdout fragment, past the content ceiling', async () => {
+    const fragment = 'diff --git a/huge.lock b/huge.lock'
+    // 33 MiB of theoretical output: the fake enforces the declared ceiling the
+    // way execFile would, without materialising the string.
+    const runner: GitRunner = (_cwd, _args, options) => {
+      const ceiling = options?.maxBufferBytes ?? STATUS_CEILING
+      return 33 * MIB > ceiling ? Promise.reject(maxBufferError(fragment)) : Promise.resolve('')
+    }
+    const response = await handleGitRequest(
+      'diff',
+      new Request(`dsh-app://app${ROUTE_PREFIX}/git/diff?cwd=${encodeURIComponent('D:\\repo')}&sessionId=live&path=pnpm-lock.yaml`),
+      scope,
+      runner,
+    )
+    assert.equal(response.status, 413)
+    const body = await response.json() as {
+      ok: boolean
+      error: { code: string, message: string, host: { code: string, text?: string } }
+    }
+    assert.equal(body.error.code, 'output-too-large')
+    assert.equal(body.error.host.code, 'git.outputTooLarge')
+    assert.ok(!JSON.stringify(body.error).includes(fragment), 'the stdout fragment must not travel as detail')
+  })
+
+  it('does not read a maxBuffer failure as "diff --no-index found differences"', async () => {
+    // `git diff --no-index` exits 1 for "differences found", and the route's
+    // inner catch turns that exit into a success carrying stdout. A killed
+    // child also leaves stdout behind, so the code check is what keeps the two
+    // apart: the maxBuffer code must escape to the outer mapping instead.
+    const fragment = 'diff --git a/untracked.bin b/untracked.bin'
+    const runner: GitRunner = (_cwd, args) => (
+      args[0] === 'rev-parse' ? Promise.resolve('D:\\repo') : Promise.reject(maxBufferError(fragment))
+    )
+    const response = await handleGitRequest(
+      'diff',
+      new Request(`dsh-app://app${ROUTE_PREFIX}/git/diff?cwd=${encodeURIComponent('D:\\repo')}&sessionId=live&path=untracked.bin&untracked=1`),
+      scope,
+      runner,
+    )
+    assert.equal(response.status, 413)
+    const body = await response.json() as {
+      ok: boolean
+      error: { code: string, message: string, host: { code: string, text?: string } }
+    }
+    assert.equal(body.error.code, 'output-too-large')
+    assert.equal(body.error.host.code, 'git.outputTooLarge')
+    assert.ok(!JSON.stringify(body.error).includes(fragment), 'the stdout fragment must not travel as detail')
+  })
+
+  it('keeps the status read on the 4 MiB ceiling', async () => {
+    const fragment = '?? node_modules/'
+    const ceilings: (number | undefined)[] = []
+    const runner: GitRunner = (_cwd, _args, options) => {
+      ceilings.push(options?.maxBufferBytes)
+      const ceiling = options?.maxBufferBytes ?? STATUS_CEILING
+      return 5 * MIB > ceiling ? Promise.reject(maxBufferError(fragment)) : Promise.resolve('')
+    }
+    const response = await handleGitRequest(
+      'status',
+      new Request(`dsh-app://app${ROUTE_PREFIX}/git/status?cwd=${encodeURIComponent('D:\\repo')}&sessionId=live`),
+      scope,
+      runner,
+    )
+    assert.equal(response.status, 413)
+    const body = await response.json() as { ok: boolean, error: { code: string, host: { code: string } } }
+    assert.equal(body.error.code, 'output-too-large')
+    assert.equal(body.error.host.code, 'git.outputTooLarge')
+    assert.deepEqual(ceilings, [STATUS_CEILING])
+  })
+
+  it('reads show on the content ceiling as well', async () => {
+    const ceilings: (number | undefined)[] = []
+    const runner: GitRunner = (_cwd, args, options) => {
+      ceilings.push(options?.maxBufferBytes)
+      return Promise.resolve(args[0] === 'log' ? 'message' : 'stat')
+    }
+    const response = await handleGitRequest(
+      'show',
+      new Request(`dsh-app://app${ROUTE_PREFIX}/git/show?cwd=${encodeURIComponent('D:\\repo')}&sessionId=live&sha=abcdef`),
+      scope,
+      runner,
+    )
+    assert.equal(response.status, 200)
+    assert.deepEqual(ceilings, [CONTENT_CEILING, CONTENT_CEILING])
   })
 })

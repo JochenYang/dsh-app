@@ -65,6 +65,9 @@ function hostMessage(
 const STANDALONE_COPY: Readonly<Record<string, SidebarKey>> = {
   'git-missing': 'sidebar.fail.gitMissing',
   'git-timeout': 'sidebar.fail.timeout',
+  // A content read the host refused to buffer (a lockfile-sized diff): the
+  // copy names the way out, so it replaces the frame instead of being framed.
+  'output-too-large': 'sidebar.fail.outputTooLarge',
   'forbidden': 'sidebar.fail.forbidden',
   // A folder that is not a repository is a STATE, not a failed operation: the
   // tab says so in one sentence instead of framing git's stderr as "Git 操作失败".

@@ -55,6 +55,29 @@ const execFileAsync = promisify(execFile)
 const MAX_DIFF_CHARS = 500_000
 const MAX_COMMIT_MESSAGE_CHARS = 20_000
 const MAX_REPO_FILES = 20_000
+/**
+ * execFile's stdout ceiling per spawn, and why there are two.
+ *
+ * A `status` list is capped where the tab can still render it: an overflow
+ * there is a structural problem (an unignored `node_modules`, a repo with tens
+ * of thousands of untracked files) that a larger read would not fix, so it
+ * keeps the small cap and answers a coded error instead. A CONTENT read (one
+ * file's diff, one commit's show) carries whole file bodies, where lockfiles
+ * and build output routinely pass 4 MiB; MAX_DIFF_CHARS already bounds what
+ * the route returns, so the larger ceiling only decides whether the read
+ * survives.
+ */
+const STATUS_MAX_BUFFER_BYTES = 4 * 1024 * 1024
+const CONTENT_MAX_BUFFER_BYTES = 32 * 1024 * 1024
+/** execFile's code for "the child wrote more than maxBuffer allowed". */
+const MAX_BUFFER_ERROR_CODE = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+/**
+ * The coded message for {@link MAX_BUFFER_ERROR_CODE}. The child was killed
+ * mid-write, so its stdout is a fragment of the output rather than a
+ * diagnostic: it must never travel as the error detail.
+ */
+const OUTPUT_TOO_LARGE_MESSAGE = 'git produced more output than this view can display; narrow the scope '
+  + '(ignore large directories such as node_modules or build output) and retry'
 /** Hard deadline for network commands (fetch/pull/push); the child gets
  * SIGTERM past it so a stalled remote cannot pin a request forever. */
 const NETWORK_TIMEOUT_MS = 120_000
@@ -192,7 +215,20 @@ interface GitRunOptions {
    * report their human verdict ("Everything up-to-date", transfer stats)
    * on stderr, unlike pull's stdout "Already up to date." */
   mergeStderr?: boolean
+  /** execFile's output ceiling for this spawn; defaults to
+   * STATUS_MAX_BUFFER_BYTES. Content reads pass CONTENT_MAX_BUFFER_BYTES. */
+  maxBufferBytes?: number
 }
+
+/**
+ * One git invocation, the seam tests replace.
+ *
+ * Production always calls {@link git}; `handleGitRequest` takes the runner as
+ * a parameter so a suite can answer with synthetic stdout — a multi-megabyte
+ * diff without a fixture on disk — while the buffer decisions stay in the
+ * route code under test.
+ */
+export type GitRunner = (cwd: string, args: string[], options?: GitRunOptions) => Promise<string>
 
 /** Run one git command; throws the execFile error on a non-zero exit and a
  * GitTimeoutError when a configured timeoutMs deadline elapses. */
@@ -203,7 +239,7 @@ async function git(cwd: string, args: string[], options: GitRunOptions = {}): Pr
       cwd,
       env: gitEnv(),
       windowsHide: true,
-      maxBuffer: 4 * 1024 * 1024,
+      maxBuffer: options.maxBufferBytes ?? STATUS_MAX_BUFFER_BYTES,
       ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs, killSignal: 'SIGTERM' as const }),
     })
     return options.mergeStderr === true ? `${stdout}${stderr}` : stdout
@@ -316,16 +352,16 @@ function isValidBranchName(value: string): boolean {
  * — callers turn that into a coded, actionable error instead of letting git
  * choke on a literal 'origin' repo-spec.
  */
-async function defaultRemote(scoped: string): Promise<string | undefined> {
-  const remotes = (await git(scoped, ['remote'])).split('\n').map(r => r.trim()).filter(r => r !== '')
+async function defaultRemote(scoped: string, run: GitRunner): Promise<string | undefined> {
+  const remotes = (await run(scoped, ['remote'])).split('\n').map(r => r.trim()).filter(r => r !== '')
   if (remotes.includes('origin')) return 'origin'
   return remotes.length === 1 ? remotes[0] : undefined
 }
 
 /** Whether the current branch tracks an upstream (plain pull/push works). */
-async function hasUpstream(scoped: string): Promise<boolean> {
+async function hasUpstream(scoped: string, run: GitRunner): Promise<boolean> {
   try {
-    await git(scoped, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
+    await run(scoped, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
     return true
   } catch {
     return false
@@ -415,25 +451,32 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
  * @param route - the exact route the carrier matched.
  * @param request - the Fetch-shaped request (query parameters carry every operand).
  * @param scope - session-cwd resolver backing the request fence.
+ * @param run - the spawn seam; production passes {@link git} (the default).
  * @returns the route's JSON envelope.
  */
-export async function handleGitRequest(route: GitRouteName, request: Request, scope: GitSessionScope): Promise<Response> {
+export async function handleGitRequest(
+  route: GitRouteName,
+  request: Request,
+  scope: GitSessionScope,
+  run: GitRunner = git,
+): Promise<Response> {
   const url = new URL(request.url)
   try {
     // --- GET routes ------------------------------------------------------
     if (route === 'status') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
-      const out = await git(cwd, ['status', '--porcelain=v1', '-z', '-uall'])
+      // Deliberately NOT the content ceiling: see STATUS_MAX_BUFFER_BYTES.
+      const out = await run(cwd, ['status', '--porcelain=v1', '-z', '-uall'], { maxBufferBytes: STATUS_MAX_BUFFER_BYTES })
       // `status --porcelain` spells every path relative to the REPOSITORY ROOT,
       // which is not the session cwd whenever the session sits in a
       // subdirectory. The client needs that same root to turn a row's path into
       // an absolute one (an image's preview URL), so it travels with the status
       // it belongs to. `/` is already normalised by git on every platform.
-      const root = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim()
+      const root = (await run(cwd, ['rev-parse', '--show-toplevel'])).trim()
       let branch = ''
       let detached = false
       try {
-        branch = (await git(cwd, ['branch', '--show-current'])).trim()
+        branch = (await run(cwd, ['branch', '--show-current'])).trim()
         detached = branch === ''
       } catch {
         detached = true
@@ -444,7 +487,7 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       let ahead: number | null = null
       let behind: number | null = null
       try {
-        const header = (await git(cwd, ['status', '-sb'])).split('\n', 1)[0] ?? ''
+        const header = (await run(cwd, ['status', '-sb'])).split('\n', 1)[0] ?? ''
         const divergence = parseBranchHeader(header)
         ahead = divergence.ahead
         behind = divergence.behind
@@ -461,7 +504,7 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       // sees two lists of the same repository spelled two different ways, and
       // every path-keyed lookup (a row's diff, an image's preview URL) resolves
       // against the wrong base for one of them.
-      const out = await git(cwd, ['ls-files', '--full-name', '-z'])
+      const out = await run(cwd, ['ls-files', '--full-name', '-z'])
       const allFiles = out.split('\u0000').filter(line => line !== '')
       const truncated = allFiles.length > MAX_REPO_FILES
       return ok({ files: truncated ? allFiles.slice(0, MAX_REPO_FILES) : allFiles, truncated })
@@ -476,8 +519,10 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       // Two structured halves: the full message (title + body) and the
       // files-touched stat. Splitting keeps the client rendering distinct
       // sections instead of one opaque blob.
-      const message = await git(cwd, ['log', '-1', '--format=%B', sha])
-      const stat = await git(cwd, ['show', '--format=', '--stat', sha])
+      // Content reads: the body is the payload, and lockfiles/build output
+      // exceed the status ceiling routinely. MAX_DIFF_CHARS bounds the answer.
+      const message = await run(cwd, ['log', '-1', '--format=%B', sha], { maxBufferBytes: CONTENT_MAX_BUFFER_BYTES })
+      const stat = await run(cwd, ['show', '--format=', '--stat', sha], { maxBufferBytes: CONTENT_MAX_BUFFER_BYTES })
       return ok({ message, stat })
     }
     if (route === 'diff') {
@@ -506,7 +551,7 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       // disk and accepts no pathspec syntax at all, so both operands are
       // resolved to absolute paths against the SAME root — resolving them
       // against the cwd would address `<cwd>/<path-from-root>` and diff nothing.
-      const root = untracked ? (await git(cwd, ['rev-parse', '--show-toplevel'])).trim() : cwd
+      const root = untracked ? (await run(cwd, ['rev-parse', '--show-toplevel'])).trim() : cwd
       if (untracked && path !== null && path !== '') {
         args.push('--', process.platform === 'win32' ? 'NUL' : '/dev/null', pathModule.resolve(root, path))
       } else if (path !== null && path !== '') {
@@ -514,7 +559,7 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       }
       let out: string
       try {
-        out = await git(cwd, args)
+        out = await run(cwd, args, { maxBufferBytes: CONTENT_MAX_BUFFER_BYTES })
       } catch (error) {
         // `git diff --no-index` uses exit code 1 to mean "differences found".
         const raw = error as { code?: number | string, stdout?: string }
@@ -526,7 +571,7 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
     }
     if (route === 'log') {
       const cwd = scopedCwd(scope, url.searchParams.get('cwd'), url.searchParams.get('sessionId'))
-      const out = await git(cwd, ['log', '--graph', '--all', '--oneline', '--decorate', '-40'])
+      const out = await run(cwd, ['log', '--graph', '--all', '--oneline', '--decorate', '-40'])
       return ok({ text: out })
     }
     // --- POST action route ----------------------------------------------
@@ -546,68 +591,68 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
         throw new GitRequestError(400, 'bad-request', 'invalid relative path')
       }
       let value: unknown = {}
-      if (op === 'stage' && path !== undefined) await git(scoped, ['add', '--', path])
-      else if (op === 'stage') await git(scoped, ['add', '-A'])
-      else if (op === 'unstage' && path !== undefined) await git(scoped, ['restore', '--staged', '--', path])
-      else if (op === 'unstage') await git(scoped, ['restore', '--staged', '--', '.'])
-      else if (op === 'restore' && path !== undefined) await git(scoped, ['restore', '--', path])
+      if (op === 'stage' && path !== undefined) await run(scoped, ['add', '--', path])
+      else if (op === 'stage') await run(scoped, ['add', '-A'])
+      else if (op === 'unstage' && path !== undefined) await run(scoped, ['restore', '--staged', '--', path])
+      else if (op === 'unstage') await run(scoped, ['restore', '--staged', '--', '.'])
+      else if (op === 'restore' && path !== undefined) await run(scoped, ['restore', '--', path])
       else if (op === 'commit' && message !== undefined && message.trim() !== '') {
         if (message.length > MAX_COMMIT_MESSAGE_CHARS) {
           throw new GitRequestError(400, 'bad-request', 'commit message is too long')
         }
-        await git(scoped, ['commit', '-m', message])
+        await run(scoped, ['commit', '-m', message])
       }
       // --- sync group: network commands with a hard deadline --------------
       else if (op === 'fetch') {
-        const remote = await defaultRemote(scoped)
+        const remote = await defaultRemote(scoped, run)
         if (remote === undefined) {
           throw new GitRequestError(
             400, 'no-remote', 'no usable remote is configured, so fetching is impossible', 'git.noRemoteSync',
           )
         }
-        await git(scoped, ['fetch', '--prune', remote], { timeoutMs: NETWORK_TIMEOUT_MS })
+        await run(scoped, ['fetch', '--prune', remote], { timeoutMs: NETWORK_TIMEOUT_MS })
       } else if (op === 'pull') {
         let out: string
-        if (await hasUpstream(scoped)) {
-          out = await git(scoped, ['pull', '--ff-only'], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
+        if (await hasUpstream(scoped, run)) {
+          out = await run(scoped, ['pull', '--ff-only'], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
         } else {
           // No tracking yet: pull the same branch from the default remote
           // (this is what git's own hint suggests) instead of failing.
-          const remote = await defaultRemote(scoped)
+          const remote = await defaultRemote(scoped, run)
           if (remote === undefined) {
             throw new GitRequestError(
               400, 'no-remote', 'no usable remote is configured, so pulling is impossible', 'git.noRemotePull',
             )
           }
-          const branch = (await git(scoped, ['branch', '--show-current'])).trim()
+          const branch = (await run(scoped, ['branch', '--show-current'])).trim()
           if (branch === '') {
             throw new GitRequestError(
               400, 'detached-head', 'the repository is on a detached HEAD, so pulling is impossible', 'git.detachedPull',
             )
           }
-          out = await git(scoped, ['pull', '--ff-only', remote, branch], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
+          out = await run(scoped, ['pull', '--ff-only', remote, branch], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
         }
         value = { out: out.slice(0, MAX_SYNC_OUT_CHARS) }
       } else if (op === 'push') {
         // Plain `git push` is a dead end without an upstream; set it in the
         // same step instead. (Local divergence errors are simply git stderr.)
         let out: string
-        if (await hasUpstream(scoped)) {
-          out = await git(scoped, ['push'], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
+        if (await hasUpstream(scoped, run)) {
+          out = await run(scoped, ['push'], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
         } else {
-          const remote = await defaultRemote(scoped)
+          const remote = await defaultRemote(scoped, run)
           if (remote === undefined) {
             throw new GitRequestError(
               400, 'no-remote', 'no usable remote is configured, so pushing is impossible', 'git.noRemotePush',
             )
           }
-          out = await git(scoped, ['push', '-u', remote, 'HEAD'], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
+          out = await run(scoped, ['push', '-u', remote, 'HEAD'], { timeoutMs: NETWORK_TIMEOUT_MS, mergeStderr: true })
         }
         value = { out: out.slice(0, MAX_SYNC_OUT_CHARS) }
       }
       // --- branch group ----------------------------------------------------
       else if (op === 'branch.list') {
-        value = parseBranchList(await git(scoped, ['branch', '--format=%(refname:short)%00%(HEAD)']))
+        value = parseBranchList(await run(scoped, ['branch', '--format=%(refname:short)%00%(HEAD)']))
       } else if (op === 'branch.checkout' || op === 'branch.create') {
         if (name === undefined) {
           throw new GitRequestError(400, 'bad-request', 'a branch name is required', 'git.branchNameMissing')
@@ -620,15 +665,15 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
           )
         }
         // A dirty worktree that blocks the checkout surfaces as git stderr.
-        await git(scoped, op === 'branch.create' ? ['checkout', '-b', name] : ['checkout', name])
+        await run(scoped, op === 'branch.create' ? ['checkout', '-b', name] : ['checkout', name])
       }
       // --- stash group -------------------------------------------------------
       else if (op === 'stash.push') {
         if (message !== undefined && message.length > MAX_COMMIT_MESSAGE_CHARS) {
           throw new GitRequestError(400, 'bad-request', 'stash message is too long')
         }
-        await git(scoped, ['stash', 'push', '-u', '-m', message ?? DEFAULT_STASH_MESSAGE])
-      } else if (op === 'stash.pop') await git(scoped, ['stash', 'pop'])
+        await run(scoped, ['stash', 'push', '-u', '-m', message ?? DEFAULT_STASH_MESSAGE])
+      } else if (op === 'stash.pop') await run(scoped, ['stash', 'pop'])
       else {
         return fail(400, 'bad-request', `unsupported git action: ${op}`)
       }
@@ -646,6 +691,15 @@ export async function handleGitRequest(route: GitRouteName, request: Request, sc
       return fail(504, 'git-timeout', error.message, error.hostText())
     }
     const raw = error as { code?: string, stdout?: string, stderr?: string, message?: string }
+    // The child was killed mid-write, so its stdout is a fragment of the
+    // output, never a diagnostic. Answer a coded, actionable message instead
+    // of echoing half a diff back as the failure detail.
+    if (raw.code === MAX_BUFFER_ERROR_CODE) {
+      return fail(413, 'output-too-large', OUTPUT_TOO_LARGE_MESSAGE, {
+        code: 'git.outputTooLarge',
+        text: OUTPUT_TOO_LARGE_MESSAGE,
+      })
+    }
     // execFile non-zero exit: git's own message is the diagnostic the tab
     // shows inside its sentence frame (it names the actual failure).
     // Some failures report through stdout instead of stderr — merge-class
