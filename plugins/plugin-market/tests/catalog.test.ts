@@ -25,7 +25,9 @@ import {
   fetchCatalogFromNpmPackage,
   gitTargetOf,
   mergeCatalogs,
+  mergeCatalogsDetailed,
   parseCatalog,
+  parseCatalogDetailed,
   validateSourceUrl,
   type CatalogEntry,
 } from '../src/catalog.ts'
@@ -185,6 +187,12 @@ describe('parseCatalog', () => {
     }))
     const entries = parseCatalog(JSON.stringify({ name: 'big', plugins }))
     assert.equal(entries.length, MAX_ENTRIES_PER_SOURCE)
+    // The cap is stated, not applied silently: the fetch path turns this into a
+    // host warning and a persisted flag (see SourceTruncation).
+    assert.deepEqual(
+      parseCatalogDetailed(JSON.stringify({ name: 'big', plugins })).truncated,
+      { kept: MAX_ENTRIES_PER_SOURCE, declared: MAX_ENTRIES_PER_SOURCE + 50 },
+    )
   })
 })
 
@@ -477,6 +485,36 @@ describe('parseCatalog (format-1 index)', () => {
     const entries = parseCatalog(indexDocument(Array.from({ length: 3730 }, (_, i) => indexEntry(`dsh-pkg-${i}`))))
     assert.equal(entries.length, 3730)
   })
+
+  it('parses a 7,000-row document whole — the live index declares 6,885 and a 5,000 cap silently dropped 27%', () => {
+    // Measured 2026-11-26 against the primary source: 6,885 rows / 4.71 MB. The
+    // count is pinned ABOVE that so a cap that shrinks again fails here rather
+    // than in a user's search result.
+    const parsed = parseCatalogDetailed(indexDocument(Array.from({ length: 7_000 }, (_, i) => indexEntry(`dsh-pkg-${i}`))))
+    assert.equal(parsed.entries.length, 7_000)
+    assert.equal(parsed.truncated, undefined)
+  })
+
+  it('reports the per-source clip instead of dropping the tail silently', () => {
+    const declared = MAX_ENTRIES_PER_SOURCE + 50
+    const parsed = parseCatalogDetailed(indexDocument(
+      Array.from({ length: declared }, (_, i) => indexEntry(`dsh-pkg-${i}`)),
+    ))
+    assert.equal(parsed.entries.length, MAX_ENTRIES_PER_SOURCE)
+    assert.deepEqual(parsed.truncated, { kept: MAX_ENTRIES_PER_SOURCE, declared })
+  })
+
+  it('does not report a clip for a document that merely carried dropped rows', () => {
+    // Two invalid rows (no description / no versions shape) below the cap are a
+    // validation outcome, not a truncation.
+    const parsed = parseCatalogDetailed(indexDocument([
+      indexEntry('dsh-alpha'),
+      { name: 'dsh-no-desc', versions: [] },
+      { name: 'not a name', description: { en: 'x' } },
+    ]))
+    assert.equal(parsed.entries.length, 1)
+    assert.equal(parsed.truncated, undefined)
+  })
 })
 
 describe('parseCatalog (store directory format)', () => {
@@ -682,6 +720,27 @@ describe('mergeCatalogs', () => {
     const big: CatalogEntry[] = Array.from({ length: MAX_ENTRIES_TOTAL + 10 }, (_, index) => entry(`pkg-${index}`))
     const merged = mergeCatalogs([big])
     assert.equal(merged.length, MAX_ENTRIES_TOTAL)
+  })
+
+  it('reports the clip when the merged cap drops rows', () => {
+    // Two full sources (16,000 each against a 24,000 total): the second source's
+    // tail used to disappear with nothing said. The detailed variant carries the
+    // verdict, and the resolution turns it into `truncated`.
+    const first: CatalogEntry[] = Array.from({ length: MAX_ENTRIES_PER_SOURCE }, (_, index) => entry(`a-${index}`))
+    const second: CatalogEntry[] = Array.from({ length: MAX_ENTRIES_PER_SOURCE }, (_, index) => entry(`b-${index}`))
+    const merged = mergeCatalogsDetailed([first, second])
+    assert.equal(merged.entries.length, MAX_ENTRIES_TOTAL)
+    assert.equal(merged.truncated, true)
+    assert.equal(merged.entries.at(-1)?.package, `b-${MAX_ENTRIES_TOTAL - MAX_ENTRIES_PER_SOURCE - 1}`)
+  })
+
+  it('does not report a clip when the rows past the cap are duplicates', () => {
+    // The duplicate check runs first: a repeated package after the cap would not
+    // have been listed anyway, so it is not a dropped row.
+    const full: CatalogEntry[] = Array.from({ length: MAX_ENTRIES_TOTAL }, (_, index) => entry(`pkg-${index}`))
+    const merged = mergeCatalogsDetailed([full, [entry('pkg-0'), entry('pkg-1')]])
+    assert.equal(merged.entries.length, MAX_ENTRIES_TOTAL)
+    assert.equal(merged.truncated, false)
   })
 })
 
@@ -1141,16 +1200,20 @@ describe('fetchCatalogFromNpmPackage', () => {
   })
 
   it('caps the tarball read, stopping where the cap is crossed', async () => {
-    // The tarball cap is the document cap (8 MB) — 16 MB of body is 64 chunks.
+    // The tarball cap is the document cap (MAX_BYTES_PER_SOURCE): this body is
+    // that plus 4 MB, in the helper's 256 KB chunks.
+    const CHUNK = 256_000
+    const bodyBytes = MAX_BYTES_PER_SOURCE + 4_000_000
+    const totalChunks = Math.ceil(bodyBytes / CHUNK)
     const counter = { pulls: 0 }
     const transport = recordingFetch(url => url.endsWith('/latest')
       ? packument('1.0.0', 'https://mirror.example.com/pkg-1.0.0.tgz')
-      : chunkedResponse(16_000_000, counter))
+      : chunkedResponse(bodyBytes, counter))
     try {
       const result = await fetchCatalogFromNpmPackage('dsh-plugin-catalog', 'https://mirror.example.com/npm', undefined, answering('93.184.216.34'))
       assert.equal('reason' in result && result.reason.code, 'catalog.npmTarballTooLarge')
-      assert.equal('reason' in result && result.reason.params?.mb, 8)
-      assert.equal(counter.pulls < 64, true, `pulled ${String(counter.pulls)} of 64 chunks`)
+      assert.equal('reason' in result && result.reason.params?.mb, Math.floor(MAX_BYTES_PER_SOURCE / 1_000_000))
+      assert.equal(counter.pulls < totalChunks, true, `pulled ${String(counter.pulls)} of ${String(totalChunks)} chunks`)
     } finally {
       transport.restore()
     }

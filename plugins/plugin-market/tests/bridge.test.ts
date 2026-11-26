@@ -212,8 +212,8 @@ describe('registerMarketBridge', () => {
       query: 'pdf tools',
       scope: 'skills',
       limit: 5,
-      searchSkills: async () => { calls.push('skills'); return [] },
-      searchPlugins: async () => { calls.push('plugins'); return [] },
+      searchSkills: async () => { calls.push('skills'); return { hits: [] } },
+      searchPlugins: async () => { calls.push('plugins'); return { hits: [] } },
     })
     assert.deepEqual(calls, ['skills'])
     assert.equal(result.scope, 'skills')
@@ -229,7 +229,7 @@ describe('registerMarketBridge', () => {
       scope: 'all',
       limit: 5,
       searchSkills: async () => { throw new Error('HTTP 400') },
-      searchPlugins: async () => [pluginHitOf(entry(), new Set())],
+      searchPlugins: async () => ({ hits: [pluginHitOf(entry(), new Set())] }),
     })
     assert.equal(result.ok, true)
     assert.deepEqual(result.failures, [{ source: 'skills', reason: 'HTTP 400' }])
@@ -244,8 +244,8 @@ describe('registerMarketBridge', () => {
       query: '   ',
       scope: 'all',
       limit: 5,
-      searchSkills: async () => { calls.push('skills'); return [] },
-      searchPlugins: async () => { calls.push('plugins'); return [] },
+      searchSkills: async () => { calls.push('skills'); return { hits: [] } },
+      searchPlugins: async () => { calls.push('plugins'); return { hits: [] } },
     })
     assert.deepEqual(calls, [])
     assert.equal(result.ok, false)
@@ -259,8 +259,8 @@ describe('registerMarketBridge', () => {
       query: 'x',
       scope: 'nonsense',
       limit: 5,
-      searchSkills: async () => { calls.push('skills'); return [] },
-      searchPlugins: async () => { calls.push('plugins'); return [] },
+      searchSkills: async () => { calls.push('skills'); return { hits: [] } },
+      searchPlugins: async () => { calls.push('plugins'); return { hits: [] } },
     })
     assert.deepEqual(calls, ['skills', 'plugins'])
     assert.equal(result.scope, 'all')
@@ -272,8 +272,8 @@ describe('registerMarketBridge', () => {
       query: 'x',
       scope: 'all',
       limit: 9999,
-      searchSkills: async (_q, limit) => { seen.push(limit); return [] },
-      searchPlugins: async (_q, limit) => { seen.push(limit); return [] },
+      searchSkills: async (_q, limit) => { seen.push(limit); return { hits: [] } },
+      searchPlugins: async (_q, limit) => { seen.push(limit); return { hits: [] } },
     })
     assert.deepEqual(seen, [25, 25])
   })

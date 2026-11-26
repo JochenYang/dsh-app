@@ -91,6 +91,7 @@ import type { HostConnectionFetch } from '@deepseek-ai/dsh-client-connection'
 import {
   fetchCatalog,
   mergeCatalogs,
+  mergeCatalogsDetailed,
   validateSourceUrl,
   MAX_SOURCES,
   type CatalogEntry,
@@ -544,15 +545,19 @@ function listsOf(
   served: number
   /** Rows whose origin answered 304, keyed by URL: their cached state survives as-is. */
   revalidated: Readonly<Record<string, CachedSourceState>>
+  /** True when any contributing source row was clipped by the per-source cap. */
+  truncated: boolean
 } {
   const lists: CatalogEntry[][] = []
   const failed: Array<{ url: string, reason: HostText }> = []
   const revalidated: Record<string, CachedSourceState> = {}
   let served = 0
+  let truncated = false
   for (const result of results) {
     if ('entries' in result) {
       lists.push([...result.entries])
       served += 1
+      if (result.truncated !== undefined) truncated = true
     } else if ('notModified' in result) {
       // The cached copy is confirmed current: reuse it, validators included
       // (the next refresh revalidates against the same origin state).
@@ -561,6 +566,7 @@ function listsOf(
         lists.push([...cached.entries])
         revalidated[result.url] = cached
         served += 1
+        if (cached.truncated === true) truncated = true
       } else {
         // A 304 without a local copy cannot render anything; treat it as a
         // failure so the panel's normal failure path reports it.
@@ -590,10 +596,11 @@ function listsOf(
       // the very list the first one was allowed to keep.
       if (cached !== undefined && cached.entries.length > 0) {
         lists.push([...cached.entries])
+        if (cached.truncated === true) truncated = true
       }
     }
   }
-  return { lists, failed, served, revalidated }
+  return { lists, failed, served, revalidated, truncated }
 }
 
 /**
@@ -610,8 +617,12 @@ function withRepoKeys(entries: readonly CatalogEntry[]): CatalogEntry[] {
   })
 }
 
-/** Project the persisted cache to a payload, in the CURRENT source order. */
-function cachePayload(cache: CatalogCache, sources: readonly string[], fresh: boolean): CatalogPayload {
+/**
+ * Project the persisted cache to a payload, in the CURRENT source order.
+ * Exported because the model bridge answers from the same projection when its
+ * refresh does not land in time — one cache must not read as two catalogs.
+ */
+export function cachePayload(cache: CatalogCache, sources: readonly string[], fresh: boolean): CatalogPayload {
   const lists: CatalogEntry[][] = []
   const failed: Array<{ url: string, reason: HostText }> = []
   for (const url of sources) {
@@ -632,8 +643,12 @@ function cachePayload(cache: CatalogCache, sources: readonly string[], fresh: bo
   }
 }
 
-/** A cache is usable only when it is inside the TTL and covers every source. */
-function isCacheFresh(cache: CatalogCache, sources: readonly string[], now: number): boolean {
+/**
+ * A cache is usable only when it is inside the TTL and covers every source.
+ * Exported because the model bridge makes the same decision before choosing
+ * between an answer and a refresh (see `searchPluginsBranch`).
+ */
+export function isCacheFresh(cache: CatalogCache, sources: readonly string[], now: number): boolean {
   if (!Number.isSafeInteger(cache.fetchedAt) || now - cache.fetchedAt < 0) return false
   if (now - cache.fetchedAt >= CATALOG_CACHE_TTL_MS) return false
   // A failed row is NOT fresh. The TTL bounds how long a GOOD answer is reused;
@@ -644,6 +659,17 @@ function isCacheFresh(cache: CatalogCache, sources: readonly string[], now: numb
     const row = cache.sources[url]
     return row !== undefined && row.failed === undefined
   })
+}
+
+/**
+ * Whether any source row behind this snapshot was clipped by the per-source
+ * entry cap. A cache written before the flag existed reads as untruncated —
+ * deliberately, since a format-version bump would throw the snapshot away to
+ * learn something only a refetch could prove.
+ */
+export function isTruncatedCache(cache: CatalogCache | null, sources: readonly string[]): boolean {
+  if (cache === null) return false
+  return sources.some(url => cache.sources[url]?.truncated === true)
 }
 
 /**
@@ -745,6 +771,8 @@ export interface CatalogResolveDeps {
   readonly readCache: () => CatalogCache | null
   readonly loadSnapshot: () => SnapshotFallback | null
   readonly now: () => number
+  /** Warning sink for the conditions that must not be silent (a clipped source). */
+  readonly log?: (message: string) => void
 }
 
 /** The resolution outcome: the response payload plus the cache to persist. */
@@ -752,6 +780,93 @@ export interface CatalogResolution {
   readonly payload: CatalogPayload
   /** Non-null = persist this snapshot (atomic write is the caller's job). */
   readonly cacheToWrite: CatalogCache | null
+  /**
+   * True when a source row behind this answer was clipped by the per-source
+   * entry cap. Carried beside the payload rather than inside it: the payload is
+   * the catalog's wire shape, this is a statement about how complete it is.
+   */
+  readonly truncated: boolean
+}
+
+/** One stale-while-revalidate pass at a time, per process. */
+let catalogRefreshInFlight: Promise<CatalogResolution | null> | null = null
+
+/**
+ * What one background refresh needs. The FIRST caller's request leads the pass;
+ * a caller that arrives while it runs joins it and shares the result, which is
+ * why the process needs one pass rather than one per caller.
+ */
+export interface CatalogRefreshRequest {
+  readonly sources: readonly string[]
+  /** The snapshot this refresh revalidates against (validators, fallback rows). */
+  readonly readCache: () => CatalogCache | null
+  /** Persist a rebuilt snapshot; the caller owns the path and its write-error policy. */
+  readonly persist: (cache: CatalogCache) => void
+  /** The install-intent hold the refreshed build is remembered into. */
+  readonly hold?: CatalogHold
+  /** Diagnostic logger (English; never user-facing). */
+  readonly log: (message: string) => void
+  /** Fetch seam; defaults to {@link fetchCatalog}. Tests supply a fake. */
+  readonly fetchSource?: CatalogResolveDeps['fetchSource']
+  /** Clock seam; defaults to `Date.now`. Tests pin it. */
+  readonly now?: () => number
+}
+
+/**
+ * Refresh the catalog BEHIND an already-answered request — one pass per
+ * process, awaited by every caller that arrives while it runs.
+ *
+ * The expired-open path used to block the panel on every source. Measured on this
+ * machine 2026-11-01: the jsDelivr index is 3.3 MB in 1.8 s, the community API
+ * 2.25 s, and parsing the merged snapshot costs about another second — so the first
+ * open after the six-hour window sat on a spinner for ~3.5 s. The snapshot is now
+ * served immediately and this runs behind it, which is what makes the next open
+ * instant (and what the community plugin's CDN-fed panel effectively does).
+ *
+ * Single-flight, not a boolean latch, because there are two callers with two
+ * different needs: the panel fires and forgets (it has already answered), while
+ * `market_search` answers from the result when the pass lands inside its wait
+ * window and persists it either way (see `BRIDGE_REFRESH_WAIT_MS`). Both await
+ * the same promise, so a model call can never start a second download.
+ *
+ * @param request - sources, the snapshot to revalidate against, where a rebuilt
+ *   snapshot goes, and the hold to remember it into.
+ * @returns the pass's resolution, or null when the refresh FAILED (logged here;
+ *   the joined callers answer from whatever they already hold).
+ */
+export function refreshCatalogBehind(request: CatalogRefreshRequest): Promise<CatalogResolution | null> {
+  if (catalogRefreshInFlight !== null) return catalogRefreshInFlight
+  const run = async (): Promise<CatalogResolution | null> => {
+    try {
+      const resolution = await resolveCatalog({
+        sources: request.sources,
+        refresh: true,
+        fetchSource: request.fetchSource ?? fetchCatalog,
+        readCache: request.readCache,
+        loadSnapshot,
+        now: request.now ?? Date.now,
+        log: request.log,
+      })
+      if (resolution.cacheToWrite !== null) request.persist(resolution.cacheToWrite)
+      request.hold?.remember(catalogBuildOf(
+        resolution.payload.plugins,
+        resolution.payload.cachedAt,
+        request.sources,
+        resolution.cacheToWrite ?? request.readCache(),
+      ))
+      return resolution
+    } catch (error) {
+      // A silent catch leaves the banner's "refreshing" claim unverifiable: this log
+      // line is the only place the failure shows up for whoever reads it next.
+      request.log(`plugin-market: the background catalog refresh failed: ${String(error)}`)
+      return null
+    } finally {
+      catalogRefreshInFlight = null
+    }
+  }
+  const promise = run()
+  catalogRefreshInFlight = promise
+  return promise
 }
 
 /**
@@ -765,66 +880,19 @@ export interface CatalogResolution {
  *    THIS payload (its failure still reaches `failed`, and the refreshed
  *    cache records the failure so the next open retries it);
  * 3. every source failed with nothing live → fall back to the stale cache
- *    (marked `stale`, nothing written);
+ *    (marked `stale`; the rebuild is still written, its timestamp unmoved);
  * 4. no cache either → render the bundled offline snapshot (`snapshot`);
  * 5. nothing at all → an empty payload whose failed list drives the panel's
  *    prominent reload box.
- */
-/** One stale-while-revalidate pass at a time, per process. */
-let catalogRefreshing = false
-
-/**
- * Refresh the catalog BEHIND an already-answered request.
  *
- * The expired-open path used to block the panel on every source. Measured on this
- * machine 2026-11-01: the jsDelivr index is 3.3 MB in 1.8 s, the community API
- * 2.25 s, and parsing the merged snapshot costs about another second — so the first
- * open after the six-hour window sat on a spinner for ~3.5 s. The snapshot is now
- * served immediately and this runs behind it, which is what makes the next open
- * instant (and what the community plugin's CDN-fed panel effectively does).
- *
- * @param deps - the route's dependencies.
- * @param sources - the configured sources, in order.
- * @param heldCache - the snapshot the request just served.
+ * `truncated` states how complete the answer is: a source clipped by
+ * `MAX_ENTRIES_PER_SOURCE` makes every "not found" answer provisional, and the
+ * callers that can reach a model say so.
  */
-async function refreshCatalogBehind(
-  deps: MarketDeps,
-  sources: readonly string[],
-  heldCache: CatalogCache,
-  persist: (cache: CatalogCache) => void,
-  log: (message: string) => void,
-): Promise<void> {
-  if (catalogRefreshing) return
-  catalogRefreshing = true
-  try {
-    const resolution = await resolveCatalog({
-      sources,
-      refresh: true,
-      fetchSource: fetchCatalog,
-      readCache: () => heldCache,
-      loadSnapshot,
-      now: Date.now,
-    })
-    if (resolution.cacheToWrite !== null) persist(resolution.cacheToWrite)
-    deps.installIntents.hold.remember(catalogBuildOf(
-      resolution.payload.plugins,
-      resolution.payload.cachedAt,
-      sources,
-      resolution.cacheToWrite ?? heldCache,
-    ))
-  } catch (error) {
-    // A silent catch leaves the banner's "refreshing" claim unverifiable: this log
-    // line is the only place the failure shows up for whoever reads it next.
-    log(`plugin-market: the background catalog refresh failed: ${String(error)}`)
-  } finally {
-    catalogRefreshing = false
-  }
-}
-
 export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogResolution> {
   const { sources } = deps
   if (sources.length === 0) {
-    return { payload: { plugins: [], failed: [], sources }, cacheToWrite: null }
+    return { payload: { plugins: [], failed: [], sources }, cacheToWrite: null, truncated: false }
   }
   // A forced refresh skips the freshness window but still reads the cache:
   // the moment a user most likely hits reload is exactly when the sources are
@@ -832,7 +900,7 @@ export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogR
   // `refresh` re-enters the fetch path below regardless.
   const cache = deps.readCache()
   if (!deps.refresh && cache !== null && isCacheFresh(cache, sources, deps.now())) {
-    return { payload: cachePayload(cache, sources, true), cacheToWrite: null }
+    return { payload: cachePayload(cache, sources, true), cacheToWrite: null, truncated: isTruncatedCache(cache, sources) }
   }
   // Per-source validators from the last download: a source the origin can
   // revalidate answers 304 and contributes its cached rows at zero bytes —
@@ -846,7 +914,15 @@ export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogR
     return { ...(row.etag !== undefined ? { etag: row.etag } : {}), ...(row.modified !== undefined ? { modified: row.modified } : {}) }
   }
   const results = await Promise.all(sources.map(url => deps.fetchSource(url, validatorsOf(url))))
-  const { lists, failed, served, revalidated } = listsOf(results, cache)
+  // A clipped source is a warning, never a silent drop: the panel and the model
+  // both search a partial directory, and only this line says so to whoever reads
+  // the logs (the rows and the flag travel with the payload and the cache).
+  for (const result of results) {
+    if ('entries' in result && result.truncated !== undefined) {
+      deps.log?.(`plugin-market catalog: ${result.url} declared ${String(result.truncated.declared)} entries and the per-source cap kept ${String(result.truncated.kept)}`)
+    }
+  }
+  const { lists, failed, served, revalidated, truncated } = listsOf(results, cache)
   if (served > 0) {
     // At least one source answered live (fresh entries or a confirmed 304):
     // this is a refresh, so stamp a new timestamp and persist — including the
@@ -854,9 +930,15 @@ export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogR
     // failed but LENT its cached rows counts as unserved: the next open must
     // retry it, and its old rows stay in the cache for that retry to read.
     const fetchedAt = deps.now()
+    // The merged cap is the second place rows disappear: two full sources
+    // (16,000 each against a 24,000 total) drop the second one's tail. It counts
+    // as truncation for the same reason a per-source clip does — "not found" is
+    // only as good as the list that was searched.
+    const merged = mergeCatalogsDetailed(lists)
     return {
-      payload: { plugins: withRepoKeys(mergeCatalogs(lists)), failed, sources, cachedAt: fetchedAt },
+      payload: { plugins: withRepoKeys(merged.entries), failed, sources, cachedAt: fetchedAt },
       cacheToWrite: buildCatalogCache(fetchedAt, results, revalidated, cache?.sources ?? {}),
+      truncated: truncated || merged.truncated,
     }
   }
   // Every source failed with nothing live: the last good snapshot (even an
@@ -873,6 +955,7 @@ export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogR
     return {
       payload: { ...payload, failed },
       cacheToWrite: buildCatalogCache(cache.fetchedAt, results, revalidated, cache.sources),
+      truncated: isTruncatedCache(cache, sources),
     }
   }
   const snapshot = deps.loadSnapshot()
@@ -886,9 +969,10 @@ export async function resolveCatalog(deps: CatalogResolveDeps): Promise<CatalogR
         snapshot: true,
       },
       cacheToWrite: null,
+      truncated: false,
     }
   }
-  return { payload: { plugins: [], failed, sources }, cacheToWrite: null }
+  return { payload: { plugins: [], failed, sources }, cacheToWrite: null, truncated: false }
 }
 
 /**
@@ -1164,7 +1248,13 @@ export function registerMarketRoutes(
           // every six hours take seconds (see `refreshCatalogBehind`). A forced
           // `?refresh=1` still pays the live fetch, because that click asks for it.
           if (heldCache !== null && !wantsRefresh(request.url) && !isCacheFresh(heldCache, sources, Date.now())) {
-            void refreshCatalogBehind(deps, sources, heldCache, persistCache, log)
+            void refreshCatalogBehind({
+              sources,
+              readCache: () => heldCache,
+              persist: persistCache,
+              hold: deps.installIntents.hold,
+              log,
+            })
             const payload = cachePayload(heldCache, sources, false)
             deps.installIntents.hold.remember(catalogBuildOf(payload.plugins, payload.cachedAt, sources, heldCache))
             return ok(payload)
@@ -1178,6 +1268,7 @@ export function registerMarketRoutes(
             readCache: () => heldCache,
             loadSnapshot,
             now: Date.now,
+            log,
           })
           if (resolution.cacheToWrite !== null) persistCache(resolution.cacheToWrite)
           // The answer becomes the host's own catalog for install-intent

@@ -8,11 +8,11 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
-import { MAX_ENTRIES_TOTAL, type CatalogEntry, type SourceFetchResult } from '../src/catalog.ts'
+import { MAX_ENTRIES_PER_SOURCE, MAX_ENTRIES_TOTAL, type CatalogEntry, type SourceFetchResult } from '../src/catalog.ts'
 import type { HostText } from '../src/errors.ts'
 import { CATALOG_CACHE_TTL_MS, resolveCatalog, type CatalogResolveDeps, type CatalogResolution } from '../src/routes.ts'
 import { buildCatalogCache, CACHE_FORMAT_VERSION, loadCatalogCache, saveCatalogCache } from '../src/store.ts'
@@ -31,8 +31,27 @@ const TIMEOUT_REASON = { code: 'catalog.timeout', params: { seconds: 30 }, text:
 const okSource = (url: string, packages: readonly string[]): SourceFetchResult =>
   ({ url, entries: packages.map(pkg => entry(pkg)) })
 const failedSource = (url: string, reason: HostText = FAILED_REASON): SourceFetchResult => ({ url, reason })
+/** A source whose document the per-source cap clipped: kept rows plus the declared count. */
+const clippedSource = (url: string, packages: readonly string[], declared: number): SourceFetchResult =>
+  ({ url, entries: packages.map(pkg => entry(pkg)), truncated: { kept: packages.length, declared } })
 
 describe('buildCatalogCache', () => {
+  it('does not flag a source whose rows all duplicate an earlier one', () => {
+    // Source B's rows are all copies of source A's, well inside the budget. The
+    // merged catalog lists each package once, so nothing was clipped — and a
+    // flag here would be permanent: every later 304 and stale-row read re-serves
+    // it, and `market_search` would keep calling a complete list incomplete.
+    const shared = Array.from({ length: 100 }, (_, index) => `pkg-${index}`)
+    const cache = buildCatalogCache(1, [
+      okSource('https://a.example.com/l', shared),
+      okSource('https://b.example.com/l', shared),
+    ])
+    assert.equal(cache.sources['https://a.example.com/l']?.entries.length, 100)
+    assert.equal(cache.sources['https://b.example.com/l']?.entries.length, 100)
+    assert.equal(cache.sources['https://a.example.com/l']?.truncated, undefined)
+    assert.equal(cache.sources['https://b.example.com/l']?.truncated, undefined)
+  })
+
   it('keeps entry lists and per-source failure rows side by side', () => {
     const cache = buildCatalogCache(1000, [
       okSource('https://a.example.com/l', ['pkg-a1', 'pkg-a2']),
@@ -52,6 +71,10 @@ describe('buildCatalogCache', () => {
     ])
     assert.equal(cache.sources['https://a.example.com/l']?.entries.length, MAX_ENTRIES_TOTAL - 10)
     assert.equal(cache.sources['https://b.example.com/l']?.entries.length, 10)
+    // The budget clip is flagged like a per-source clip: the file holds fewer
+    // rows than the source declared, and a later read must be able to say so.
+    assert.equal(cache.sources['https://b.example.com/l']?.truncated, true)
+    assert.equal(cache.sources['https://a.example.com/l']?.truncated, undefined)
   })
 })
 
@@ -118,6 +141,73 @@ describe('catalog cache persistence', () => {
     assert.ok(warnings.length > 0)
   })
 
+  it('keeps a truncated source flagged through the file, and never invents one', () => {
+    // The clip has to survive the cache: the panel and the model read the file,
+    // not the fetch result, and "the directory is incomplete" is a fact about a
+    // source row — not something a reader can recompute from the row count.
+    saveCatalogCache(path, buildCatalogCache(7000, [
+      clippedSource('https://a.example.com/l', ['pkg-a'], MAX_ENTRIES_PER_SOURCE + 1),
+      okSource('https://b.example.com/l', ['pkg-b']),
+    ]))
+    const loaded = loadCatalogCache(path, (message) => warnings.push(message))
+    assert.equal(loaded?.sources['https://a.example.com/l']?.truncated, true)
+    assert.equal(loaded?.sources['https://b.example.com/l']?.truncated, undefined)
+    assert.equal(warnings.length, 0)
+  })
+
+  it('reads a cache written before the flag existed as untruncated', () => {
+    // No format-version bump for this field: the old shape is simply a complete
+    // directory as far as the reader can prove, and the next refetch that clips
+    // records it.
+    writeFileSync(path, JSON.stringify({
+      version: CACHE_FORMAT_VERSION,
+      fetchedAt: 42,
+      sources: { 'https://a.example.com/l': { entries: [entry('pkg-a')] } },
+    }), 'utf8')
+    const loaded = loadCatalogCache(path, () => {})
+    assert.equal(loaded?.sources['https://a.example.com/l']?.truncated, undefined)
+  })
+
+  it('re-parses only when the file changes (the parse memo keys on mtime + size)', () => {
+    // The cache is read on every /catalog request and every market_search, and
+    // the live directory makes the file megabytes: an unchanged file must answer
+    // the object already parsed, a rewrite must be visible.
+    saveCatalogCache(path, buildCatalogCache(5_000, [okSource('https://a.example.com/l', ['pkg-a'])]))
+    const first = loadCatalogCache(path, () => {})
+    const second = loadCatalogCache(path, () => {})
+    assert.equal(second, first, 'the unchanged file answers the same parsed object')
+    saveCatalogCache(path, buildCatalogCache(6_000, [okSource('https://a.example.com/l', ['pkg-a', 'pkg-b'])]))
+    const third = loadCatalogCache(path, () => {})
+    assert.notEqual(third, first)
+    assert.equal(third?.fetchedAt, 6_000)
+    assert.deepEqual(third?.sources['https://a.example.com/l']?.entries.map(item => item.package), ['pkg-a', 'pkg-b'])
+  })
+
+  it('reads back a legal full-size cache instead of refusing it as corruption', () => {
+    // Measured 2026-11-26 on real cache rows: this writer emits ~625 bytes per
+    // row, so a cache at the merged-catalog cap (24,000 rows) is ~15 MB. The
+    // old 16 MB FILE cap sat inside that range, and crossing it did not degrade:
+    // the whole cache was refused as corruption, every request refetched live,
+    // and nothing was ever persisted again.
+    const filler = 'a realistic feature sentence for volume. '.repeat(10)
+    const url = 'https://a.example.com/l'
+    const entries: CatalogEntry[] = Array.from({ length: MAX_ENTRIES_TOTAL }, (_, index) => ({
+      id: `pkg-${index}`,
+      name: `plugin-${index}`,
+      description: `${filler}${index}`,
+      package: `pkg-${index}`,
+    }))
+    const cache = buildCatalogCache(9_000, [{ url, entries }])
+    assert.equal(cache.sources[url]?.entries.length, MAX_ENTRIES_TOTAL)
+    saveCatalogCache(path, cache)
+    assert.ok(statSync(path).size > 10_000_000, 'the full-size cache really is ten-plus MB')
+    const loaded = loadCatalogCache(path, (message) => warnings.push(message))
+    assert.notEqual(loaded, null)
+    assert.equal(loaded?.sources[url]?.entries.length, MAX_ENTRIES_TOTAL)
+    assert.equal(loaded?.sources[url]?.entries.at(-1)?.package, `pkg-${MAX_ENTRIES_TOTAL - 1}`)
+    assert.deepEqual(warnings, [])
+  })
+
   it('drops unusable rows and entries instead of failing the whole snapshot', () => {
     writeFileSync(path, JSON.stringify({
       version: CACHE_FORMAT_VERSION,
@@ -150,6 +240,7 @@ describe('resolveCatalog (TTL cache flow)', () => {
     now?: () => number
     refresh?: boolean
     sources?: readonly string[]
+    log?: (message: string) => void
   }): { fetches: string[], run: () => Promise<CatalogResolution> } {
     const fetches: string[] = []
     const deps: CatalogResolveDeps = {
@@ -164,6 +255,7 @@ describe('resolveCatalog (TTL cache flow)', () => {
       readCache: () => options.cache ?? null,
       loadSnapshot: () => options.snapshot ?? null,
       now: options.now ?? (() => 10_000),
+      ...(options.log !== undefined ? { log: options.log } : {}),
     }
     return { fetches, run: () => resolveCatalog(deps) }
   }
@@ -375,5 +467,64 @@ describe('resolveCatalog (TTL cache flow)', () => {
     assert.deepEqual(payload.plugins, [])
     assert.deepEqual(payload.failed, [])
     assert.equal(cacheToWrite, null)
+  })
+
+  it('reports a clipped source as truncated and warns once, with url and both counts', async () => {
+    // The measured defect this pins: 6,885 live rows met a 5,000 cap and the
+    // 1,885 dropped rows reached nobody — not the payload, not the log, not the
+    // tool result. The count is now stated where a human reads it.
+    const lines: string[] = []
+    const declared = MAX_ENTRIES_PER_SOURCE + 5
+    const { run } = harness({
+      cache: null,
+      results: [clippedSource(URL_A, ['pkg-a', 'pkg-b'], declared), okSource(URL_B, ['pkg-c'])],
+      log: (message) => lines.push(message),
+    })
+    const { truncated, cacheToWrite } = await run()
+    assert.equal(truncated, true)
+    const warnings = lines.filter(line => line.includes(URL_A))
+    assert.equal(warnings.length, 1, 'one line per clipped source, not per row')
+    assert.ok(warnings[0]!.includes(String(declared)), 'the declared count is in the line')
+    assert.ok(warnings[0]!.includes('2'), 'the kept count is in the line')
+    // The clip travels into the cache, so the next reader does not have to guess.
+    assert.equal(cacheToWrite?.sources[URL_A]?.truncated, true)
+    assert.equal(cacheToWrite?.sources[URL_B]?.truncated, undefined)
+  })
+
+  it('flags a merge that hits the merged cap, not only a per-source clip', async () => {
+    // Two sources at the per-source cap sum past the merged cap: the second
+    // source's tail is dropped by `mergeCatalogs`, which was a silent clip of
+    // its own. The resolution now reports it, so the model is not told "not
+    // found" about a row that was merely never listed.
+    const first = Array.from({ length: MAX_ENTRIES_PER_SOURCE }, (_, index) => `pkg-a${index}`)
+    const second = Array.from({ length: MAX_ENTRIES_PER_SOURCE }, (_, index) => `pkg-b${index}`)
+    const { run } = harness({ cache: null, results: [okSource(URL_A, first), okSource(URL_B, second)] })
+    const { truncated, payload } = await run()
+    assert.equal(truncated, true)
+    assert.equal(payload.plugins.length, MAX_ENTRIES_TOTAL)
+    assert.equal(payload.plugins.at(-1)?.package, `pkg-b${MAX_ENTRIES_TOTAL - MAX_ENTRIES_PER_SOURCE - 1}`)
+  })
+
+  it('carries truncation from the cache into the resolution, and reads an old cache as complete', async () => {
+    const clipped = buildCatalogCache(9_000, [
+      clippedSource(URL_A, ['pkg-a'], MAX_ENTRIES_PER_SOURCE + 1),
+      okSource(URL_B, ['pkg-b']),
+    ])
+    const fromCache = await harness({ cache: clipped, results: [] }).run()
+    assert.equal(fromCache.truncated, true, 'a fresh cache states the clip it was written with')
+
+    // The same rows WITHOUT the flag are what a cache written before this field
+    // existed looks like: untruncated as far as the reader can prove, and no
+    // format-version bump was paid to learn it.
+    const legacy = {
+      version: CACHE_FORMAT_VERSION,
+      fetchedAt: 9_000,
+      sources: {
+        [URL_A]: { entries: [entry('pkg-a')] },
+        [URL_B]: { entries: [entry('pkg-b')] },
+      },
+    }
+    const fromLegacy = await harness({ cache: legacy, results: [] }).run()
+    assert.equal(fromLegacy.truncated, false)
   })
 })

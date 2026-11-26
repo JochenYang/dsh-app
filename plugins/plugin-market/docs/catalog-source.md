@@ -35,12 +35,16 @@ both a fetched body and the bundled offline snapshot flow through).
 ## 1. The document
 
 - The body parses as a JSON **object** with a `plugins` **array**
-  (`src/catalog.ts:396`). Anything else yields zero rows; on the fetched path a
+  (`src/catalog.ts:532`). Anything else yields zero rows; on the fetched path a
   non-JSON body is refused with `catalog.notJson` and a non-object document with
   `catalog.notObject`.
-- Documents are capped at 8 MB per source, 5000 entries per source and 8000
+- Documents are capped at 20 MB per source, 16,000 entries per source and 24,000
   entries after merging (`MAX_BYTES_PER_SOURCE`, `MAX_ENTRIES_PER_SOURCE`,
-  `MAX_ENTRIES_TOTAL`).
+  `MAX_ENTRIES_TOTAL`). The primary format-1 index measured 4.71 MB / 6,885 rows
+  on 2026-11-26, and the previous 5,000-entry cap silently dropped 27% of it. A
+  clipped source is now reported: `SourceTruncation` in the fetch result, a host
+  log line naming the source and both counts, a `truncated` flag on the cached
+  row, and a note in `market_search`'s result.
 - Transport is separate from the document: the default enabled source is
   `npm:<package>@<registry base>`, which reads the same document out of a
   published npm tarball entry (`package/plugins.json`). A source's URL — https
@@ -271,7 +275,7 @@ install chain could act on; the command itself is never retained and never
 executed.
 
 **Git-shaped rows.** The one accepted grammar is a GitHub shortcut with an
-optional immutable pin — `GIT_TARGET_PATTERN`, `src/catalog.ts:555`:
+optional immutable pin — `GIT_TARGET_PATTERN`, `src/catalog.ts:800`:
 
 ```
 github:<owner>/<repo>            # up to 39 / 100 characters

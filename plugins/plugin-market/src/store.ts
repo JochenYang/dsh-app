@@ -116,6 +116,13 @@ export interface CachedSourceState {
   readonly etag?: string
   /** The origin's Last-Modified; sent back as `If-Modified-Since`. */
   readonly modified?: string
+  /**
+   * True when the per-source entry cap clipped this source's document when it
+   * was fetched (see `SourceTruncation`). Optional and deliberately NOT a
+   * format-version bump: a cache written before the flag existed simply reads
+   * as untruncated, and the next refetch that clips a row records it.
+   */
+  readonly truncated?: true
 }
 
 /**
@@ -198,17 +205,24 @@ function cachedSourceStateOf(value: unknown): CachedSourceState | undefined {
     ...(typeof record.modified === 'string' && record.modified !== '' && record.modified.length <= 64
       ? { modified: record.modified }
       : {}),
+    // Only the literal `true` counts: an older cache has no field at all, and a
+    // hand-edited value must not make a complete directory read as clipped.
+    ...(record.truncated === true ? { truncated: true as const } : {}),
   }
 }
 
 /**
  * Build a cache snapshot from per-source fetch results (source order kept).
  * Total entries are capped at the merged-catalog limit; per-source caps were
- * already enforced at parse time, so no re-slicing per source here. Response
- * validators (etag / last-modified) travel with their source's row so the
- * next refresh can revalidate instead of re-downloading. A revalidated row
- * (304) keeps its prior cached state verbatim — entries AND validators —
- * keyed by the source URL the caller resolved it for.
+ * already enforced at parse time, so no re-slicing per source here. A row the
+ * shared budget clipped is flagged `truncated` ONLY when the merge would have
+ * listed it — a package an earlier source already carries is dropped by the
+ * dedupe, so it is not a clip (the flag is re-served by every later 304 and
+ * stale-row read, so a false one would never age out). Response validators
+ * (etag / last-modified) travel with their source's row so the next refresh
+ * can revalidate instead of re-downloading. A revalidated row (304) keeps its
+ * prior cached state verbatim — entries AND validators — keyed by the source URL
+ * the caller resolved it for.
  */
 export function buildCatalogCache(
   fetchedAt: number,
@@ -217,15 +231,29 @@ export function buildCatalogCache(
   previous: Readonly<Record<string, CachedSourceState>> = {},
 ): CatalogCache {
   const sources: Record<string, CachedSourceState> = {}
+  /** Packages the rows already written carry: the merged list holds each one once. */
+  const seen = new Set<string>()
   let budget = MAX_ENTRIES_TOTAL
   for (const result of results) {
     if ('entries' in result) {
-      const entries = result.entries.slice(0, Math.max(budget, 0))
+      const room = Math.max(budget, 0)
+      const entries = result.entries.slice(0, room)
       budget -= entries.length
+      // Two caps can clip a row here: the per-source one (already reported by the
+      // fetch) and this shared budget, which is the merged cap applied at write
+      // time. The budget clip is judged the way `mergeCatalogsDetailed` judges it:
+      // a package an earlier row already carries is dropped by the dedupe, so its
+      // absence is not truncation. Without that test a source whose rows all
+      // duplicate an earlier one was flagged "truncated" for ever — the cache
+      // re-serves the flag through 304s and stale-row lending, so the model kept
+      // reading "this directory is incomplete" about a complete list.
+      const clippedByBudget = result.entries.slice(room).some(entry => !seen.has(entry.package))
+      for (const entry of entries) seen.add(entry.package)
       sources[result.url] = {
         entries,
         ...(result.etag !== undefined ? { etag: result.etag } : {}),
         ...(result.modified !== undefined ? { modified: result.modified } : {}),
+        ...(result.truncated !== undefined || clippedByBudget ? { truncated: true as const } : {}),
       }
     } else if ('notModified' in result) {
       // The cached copy is confirmed current: write it back so the next refresh
@@ -235,10 +263,12 @@ export function buildCatalogCache(
       // very rows this response just confirmed.
       const row = revalidated[result.url]
       if (row !== undefined) {
+        for (const entry of row.entries) seen.add(entry.package)
         sources[result.url] = {
           entries: row.entries,
           ...(row.etag !== undefined ? { etag: row.etag } : {}),
           ...(row.modified !== undefined ? { modified: row.modified } : {}),
+          ...(row.truncated === true ? { truncated: true as const } : {}),
         }
       }
     } else {
@@ -248,19 +278,49 @@ export function buildCatalogCache(
       // the retry path assumes. `failed` marks the row as unproven: the freshness
       // check retries it on the next request.
       const prior = previous[result.url] ?? revalidated[result.url]
+      for (const entry of prior?.entries ?? []) seen.add(entry.package)
       sources[result.url] = {
         entries: prior?.entries ?? [],
         failed: result.reason,
         ...(prior?.etag !== undefined ? { etag: prior.etag } : {}),
         ...(prior?.modified !== undefined ? { modified: prior.modified } : {}),
+        ...(prior?.truncated === true ? { truncated: true as const } : {}),
       }
     }
   }
   return { version: CACHE_FORMAT_VERSION, fetchedAt, sources }
 }
 
-/** Sanity cap: a real cache is ~1-2 MB; anything beyond this is corruption. */
-export const MAX_CACHE_BYTES = 16_000_000
+/**
+ * Sanity cap for the cache FILE: a hand-mangled or runaway file is refused
+ * before it is parsed on the request thread.
+ *
+ * Measured 2026-11-26 on real cache rows (625 bytes per row as this writer
+ * emits them, indentation included): 6,985 rows → 3.50 MB, 16,100 rows →
+ * 8.09 MB, 24,000 rows → 12.07 MB, and 24,000 rows of the current shape
+ * extrapolate to ~15.0 MB. The previous 16 MB cap therefore sat within a tenth
+ * of a LEGAL full cache, and crossing it did not degrade — it made
+ * `loadCatalogCache` refuse the file as corruption, so every request refetched
+ * live and nothing was ever persisted again: the same silent failure this round
+ * exists to remove. 32 MB keeps the cap a bound on hand-edited/runaway files
+ * (2x the largest legal cache) instead of a second, hidden entry limit.
+ */
+export const MAX_CACHE_BYTES = 32_000_000
+
+/**
+ * Last parse per cache path, keyed by the file's identity (`mtimeMs` + `size`).
+ *
+ * A cache read happens on EVERY `/catalog` request, `/install-intent`, and
+ * `market_search`, and the primary source's 6,885 rows make the file several
+ * megabytes — measured 2026-11-26: ~7.8 ms per `JSON.parse` on a 3 MB file, on
+ * the request thread. A stat is microseconds, and this process's own writes go
+ * through tmp+rename, so every write moves `mtimeMs` (and usually `size`) and
+ * invalidates the entry. `null` is cached too: a garbage file must not be
+ * re-parsed on every request either. A rewrite that landed in the same
+ * millisecond AND kept the exact byte length is the one case this can serve
+ * stale — the next stat after that tick moves on.
+ */
+const cacheParseMemo = new Map<string, { mtimeMs: number, size: number, cache: CatalogCache | null }>()
 
 /**
  * Read + validate the catalog cache. Missing/unreadable/garbage answers null
@@ -273,15 +333,35 @@ export const MAX_CACHE_BYTES = 16_000_000
  * @returns the cache, or null when absent or unusable.
  */
 export function loadCatalogCache(path: string, log: (message: string) => void): CatalogCache | null {
-  let raw: string
+  let mtimeMs: number
+  let size: number
   try {
     // Size guard BEFORE parsing: this runs on the request thread, and a
     // hand-mangled multi-megabyte file would otherwise stall every open.
-    const bytes = statSync(path).size
-    if (!Number.isFinite(bytes) || bytes > MAX_CACHE_BYTES) {
-      log(`plugin-market catalog cache: ${bytes} bytes exceeds the ${MAX_CACHE_BYTES} cap, ignoring`)
-      return null
+    const stat = statSync(path)
+    mtimeMs = stat.mtimeMs
+    size = stat.size
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      log(`plugin-market catalog cache: unreadable, ignoring: ${(error as Error).message}`)
     }
+    return null // missing (first run) or unreadable: fall through to a live fetch
+  }
+  if (!Number.isFinite(size) || size > MAX_CACHE_BYTES) {
+    log(`plugin-market catalog cache: ${size} bytes exceeds the ${MAX_CACHE_BYTES} cap, ignoring`)
+    return null
+  }
+  const memo = cacheParseMemo.get(path)
+  if (memo !== undefined && memo.mtimeMs === mtimeMs && memo.size === size) return memo.cache
+  const cache = parseCatalogCacheFile(path, log)
+  cacheParseMemo.set(path, { mtimeMs, size, cache })
+  return cache
+}
+
+/** Read + parse one cache file; the caller owns the stat guard and the memo. */
+function parseCatalogCacheFile(path: string, log: (message: string) => void): CatalogCache | null {
+  let raw: string
+  try {
     raw = readFileSync(path, 'utf8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {

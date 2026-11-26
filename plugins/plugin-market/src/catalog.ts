@@ -242,17 +242,41 @@ export interface CatalogEntry {
  */
 export const LEGACY_SOURCE_URLS: readonly string[] = [NPM_PACKAGE_SOURCE_URL, DEFAULT_SECONDARY_SOURCE_URL]
 
-/** Per-source fetch cap: large aggregated directories clock in around 3 MB. */
-export const MAX_BYTES_PER_SOURCE = 8_000_000
+/**
+ * Per-source fetch cap: the bytes of ONE response body.
+ *
+ * Measured 2026-11-26 against the primary source: the format-1 index on jsDelivr
+ * is 4.71 MB of JSON (6,885 rows), so the previous 8 MB cap left the directory
+ * almost no room to grow. 20 MB is a little over four times today's document —
+ * enough headroom, still a hard bound on what one source can make the kernel
+ * child buffer. The npm-package source reads its tarball under the same cap (see
+ * {@link fetchCatalogFromNpmPackage}): that tarball carries the same document
+ * compressed, so one number bounds both transports.
+ */
+export const MAX_BYTES_PER_SOURCE = 20_000_000
 
 /**
  * Per-source entry cap: real aggregated directories carry thousands of rows;
  * the panel paginates its rendering, so the host can pass them through.
+ *
+ * Measured 2026-11-26 against the primary source: the jsDelivr index declares
+ * 6,885 rows, so the previous 5,000 cap dropped 1,885 of them — 27% of the
+ * directory — and the dropped tail (names such as `dsh-ask-panel`,
+ * `dsh-context-cap`) was invisible to the panel AND to `market_search`, which
+ * let the model answer "no such plugin" for a plugin that was published. The
+ * document is not sorted by name, so the tail is simply whatever the index
+ * placed after row 5,000. 16,000 is ~2.3x today's directory: room to grow, and
+ * small enough that one source cannot hand the host an unbounded array. A clip
+ * is never silent — see {@link SourceTruncation}.
  */
-export const MAX_ENTRIES_PER_SOURCE = 5000
+export const MAX_ENTRIES_PER_SOURCE = 16_000
 
-/** Merged-catalog cap across all sources. */
-export const MAX_ENTRIES_TOTAL = 8000
+/**
+ * Merged-catalog cap across all sources: above one source's own cap, because
+ * the preset list carries two sources and a duplicate-heavy directory must not
+ * push the second one's unique rows out. 24,000 = 1.5x the per-source cap.
+ */
+export const MAX_ENTRIES_TOTAL = 24_000
 
 /** Allowed source-list size. */
 export const MAX_SOURCES = 20
@@ -465,6 +489,38 @@ function isIndexDocument(json: object, plugins: readonly unknown[]): boolean {
 }
 
 /**
+ * How far the per-source entry cap actually bit: the rows the source declared
+ * and the rows that survived. Present only when the cap stopped the parse, so a
+ * consumer can tell a small directory from a clipped one — and every consumer
+ * that can reach the model says so (a clipped directory makes "nothing matched"
+ * mean "not in the part I searched").
+ */
+export interface SourceTruncation {
+  /** Entries kept (the cap). */
+  readonly kept: number
+  /** Elements the source's `plugins` array declared. */
+  readonly declared: number
+}
+
+/** One parsed document: the valid rows plus, when the per-source cap clipped it, the clip. */
+export interface ParsedCatalog {
+  readonly entries: CatalogEntry[]
+  readonly truncated?: SourceTruncation
+}
+
+/**
+ * The clip, when there was one. The per-entry loops stop at the cap, so this is
+ * the only place the declared count is known: the array's own length versus what
+ * fitted. Guarded on the cap being hit, so a document that merely carried
+ * invalid rows (dropped by validation, not by the cap) reports no truncation.
+ */
+function cappedOf(entries: CatalogEntry[], plugins: readonly unknown[]): ParsedCatalog {
+  return entries.length >= MAX_ENTRIES_PER_SOURCE && plugins.length > entries.length
+    ? { entries, truncated: { kept: entries.length, declared: plugins.length } }
+    : { entries }
+}
+
+/**
  * Validate one already-parsed catalog document. The shared entry point for
  * fetched bodies (parseCatalog) and the bundled offline snapshot (snapshot.ts)
  * — both flow through the same per-field validation, so a snapshot entry can
@@ -474,9 +530,20 @@ function isIndexDocument(json: object, plugins: readonly unknown[]): boolean {
  *   the caller surfaces the count through `parseCatalog`.
  */
 export function parseCatalogDocument(json: unknown): CatalogEntry[] {
-  if (typeof json !== 'object' || json === null || Array.isArray(json)) return []
+  return parseCatalogDocumentDetailed(json).entries
+}
+
+/**
+ * The same parse, keeping the per-source clip. The fetch paths use this one
+ * because a clipped directory must not look like a complete one; the snapshot
+ * paths read {@link parseCatalogDocument} and have their own budget.
+ * @param json - the parsed document.
+ * @returns the valid entries plus the truncation report, if any.
+ */
+export function parseCatalogDocumentDetailed(json: unknown): ParsedCatalog {
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) return { entries: [] }
   const plugins = (json as { plugins?: unknown }).plugins
-  if (!Array.isArray(plugins)) return []
+  if (!Array.isArray(plugins)) return { entries: [] }
   // The declared-format branch goes first: a format-1 document also carries
   // `name`-only entries, which the custom path would drop and the aggregated
   // path would misread.
@@ -487,7 +554,7 @@ export function parseCatalogDocument(json: unknown): CatalogEntry[] {
 }
 
 /** Custom-schema path: every entry carries a real npm package name. */
-function customEntriesOf(plugins: readonly unknown[]): CatalogEntry[] {
+function customEntriesOf(plugins: readonly unknown[]): ParsedCatalog {
   const entries: CatalogEntry[] = []
   for (const candidate of plugins) {
     if (entries.length >= MAX_ENTRIES_PER_SOURCE) break
@@ -513,7 +580,7 @@ function customEntriesOf(plugins: readonly unknown[]): CatalogEntry[] {
       ...(homepage !== undefined ? { homepage } : {}),
     })
   }
-  return entries
+  return cappedOf(entries, plugins)
 }
 
 /**
@@ -521,7 +588,7 @@ function customEntriesOf(plugins: readonly unknown[]): CatalogEntry[] {
  * as source-only rows (`installable: false`, deduped by their source page);
  * only entries missing name/description are dropped.
  */
-function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): CatalogEntry[] {
+function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): ParsedCatalog {
   const categories = categoryMapOf((json as { categories?: unknown }).categories)
   const entries: CatalogEntry[] = []
   for (const candidate of plugins) {
@@ -580,7 +647,7 @@ function aggregatedEntriesOf(json: object, plugins: readonly unknown[]): Catalog
       ...(category !== undefined ? { category: category.label, categoryId: category.id } : {}),
     })
   }
-  return entries
+  return cappedOf(entries, plugins)
 }
 
 /**
@@ -640,7 +707,7 @@ function indexCategoryMapOf(value: unknown): ReadonlyMap<string, { zh?: string, 
  *   meaningful against the repository (a directory page identifies the catalog
  *   entry, not the code).
  */
-function indexEntriesOf(json: object, plugins: readonly unknown[]): CatalogEntry[] {
+function indexEntriesOf(json: object, plugins: readonly unknown[]): ParsedCatalog {
   const metadata = (json as { metadata?: { categories?: unknown } }).metadata
   const categories = indexCategoryMapOf(metadata?.categories)
   const entries: CatalogEntry[] = []
@@ -674,7 +741,7 @@ function indexEntriesOf(json: object, plugins: readonly unknown[]): CatalogEntry
       ...(category !== undefined ? { category: category.label, categoryId: category.id } : {}),
     })
   }
-  return entries
+  return cappedOf(entries, plugins)
 }
 
 /** Store-schema categories arrive as an array of `{ id, en, zh, count }`. */
@@ -770,7 +837,7 @@ export function gitTargetOf(raw: unknown): GitTarget | undefined {
  * — the panel renders its own placeholder, and faking one from the name
  * would duplicate the title line in the description slot.
  */
-function storeEntriesOf(json: object, plugins: readonly unknown[]): CatalogEntry[] {
+function storeEntriesOf(json: object, plugins: readonly unknown[]): ParsedCatalog {
   const categories = storeCategoryMapOf((json as { categories?: unknown }).categories)
   const entries: CatalogEntry[] = []
   for (const candidate of plugins) {
@@ -806,7 +873,7 @@ function storeEntriesOf(json: object, plugins: readonly unknown[]): CatalogEntry
       ...(category !== undefined ? { category: category.label, categoryId: category.id } : {}),
     })
   }
-  return entries
+  return cappedOf(entries, plugins)
 }
 
 /**
@@ -816,6 +883,16 @@ function storeEntriesOf(json: object, plugins: readonly unknown[]): CatalogEntry
  * @throws MarketExecutionError when the body is not a usable catalog object.
  */
 export function parseCatalog(body: string): CatalogEntry[] {
+  return parseCatalogDetailed(body).entries
+}
+
+/**
+ * The same parse, keeping the per-source clip so the fetch path can report it.
+ * @param body - raw response text.
+ * @returns the valid entries plus the truncation report, if any.
+ * @throws MarketExecutionError when the body is not a usable catalog object.
+ */
+export function parseCatalogDetailed(body: string): ParsedCatalog {
   let json: unknown
   try {
     json = JSON.parse(body)
@@ -831,28 +908,51 @@ export function parseCatalog(body: string): CatalogEntry[] {
       'catalog',
     )
   }
-  return parseCatalogDocument(json)
+  return parseCatalogDocumentDetailed(json)
+}
+
+/** One merged catalog: the rows plus whether the merged cap stopped the walk. */
+export interface MergedCatalog {
+  readonly entries: CatalogEntry[]
+  /** True when {@link MAX_ENTRIES_TOTAL} dropped rows that would otherwise be listed. */
+  readonly truncated: boolean
 }
 
 /**
  * Merge per-source entry lists into one catalog: dedupe by package name with
  * first-source-wins, preserving source order then entry order. Total size is
- * capped.
+ * capped; the detailed variant reports when the cap actually dropped a row, so
+ * the resolution can say its answer is partial.
  * @param lists - one validated list per source, in source order.
  * @returns the merged list.
  */
 export function mergeCatalogs(lists: ReadonlyArray<readonly CatalogEntry[]>): CatalogEntry[] {
+  return mergeCatalogsDetailed(lists).entries
+}
+
+/**
+ * The same merge, keeping the cap verdict.
+ *
+ * The duplicate check runs BEFORE the cap check: a repeated package after the
+ * cap would not have been listed anyway, so only a row the cap genuinely
+ * excluded reports `truncated`. Two full sources (16,000 rows each against a
+ * 24,000 total) therefore report the clip instead of dropping the second
+ * source's tail in silence.
+ * @param lists - one validated list per source, in source order.
+ * @returns the merged rows plus the cap verdict.
+ */
+export function mergeCatalogsDetailed(lists: ReadonlyArray<readonly CatalogEntry[]>): MergedCatalog {
   const seen = new Set<string>()
   const merged: CatalogEntry[] = []
   for (const list of lists) {
     for (const entry of list) {
-      if (merged.length >= MAX_ENTRIES_TOTAL) return merged
       if (seen.has(entry.package)) continue
+      if (merged.length >= MAX_ENTRIES_TOTAL) return { entries: merged, truncated: true }
       seen.add(entry.package)
       merged.push(entry)
     }
   }
-  return merged
+  return { entries: merged, truncated: false }
 }
 
 /** Result of fetching one source (failures never throw across sources). */
@@ -860,6 +960,12 @@ export type SourceFetchResult =
   | {
     readonly url: string
     readonly entries: readonly CatalogEntry[]
+    /**
+     * Present when the per-source cap clipped this document. The caller logs it
+     * (a clip is never silent) and persists it with the rows, so a later cache
+     * read still knows the directory it holds is incomplete.
+     */
+    readonly truncated?: SourceTruncation
     /** The origin's ETag, when it served one; the cache persists it. */
     readonly etag?: string
     /** The origin's Last-Modified (or, for the npm-package source, the
@@ -1311,7 +1417,13 @@ export async function fetchCatalogFromNpmPackage(
     if (bytes === null) {
       return { url, reason: { code: 'catalog.npmTarball', text: `the package tarball carries no plugins.json` } }
     }
-    return { url, entries: parseCatalog(bytes.toString('utf8')), modified: version }
+    const parsed = parseCatalogDetailed(bytes.toString('utf8'))
+    return {
+      url,
+      entries: parsed.entries,
+      ...(parsed.truncated !== undefined ? { truncated: parsed.truncated } : {}),
+      modified: version,
+    }
   } catch (error) {
     if (error instanceof MarketExecutionError) return { url, reason: error.host }
     if (controller.signal.aborted) {
@@ -1413,9 +1525,11 @@ export async function fetchCatalog(
       tooLargeReason('catalog.responseTooLarge', MAX_BYTES_PER_SOURCE),
     )
     const body = maybeGunzip(bytes, response.headers.get('content-encoding'))
+    const parsed = parseCatalogDetailed(body)
     return {
       url,
-      entries: parseCatalog(body),
+      entries: parsed.entries,
+      ...(parsed.truncated !== undefined ? { truncated: parsed.truncated } : {}),
       ...(response.headers.get('etag') !== null ? { etag: response.headers.get('etag')! } : {}),
       ...(response.headers.get('last-modified') !== null
         ? { modified: response.headers.get('last-modified')! }
