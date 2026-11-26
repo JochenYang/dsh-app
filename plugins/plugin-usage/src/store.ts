@@ -1,8 +1,9 @@
 /**
  * Usage store: append-only JSONL persistence for usage rows plus per-session
- * fold watermarks. Rows are keyed `sessionId:seq` so live capture and
- * backfill fold the same event at most once; watermarks keep a session with
- * zero usage rows from being re-inspected forever.
+ * fold watermarks and log-size witnesses. Rows are keyed `sessionId:seq` so
+ * live capture and backfill fold the same event at most once; watermarks keep a
+ * session with zero usage rows from being re-inspected forever, and a size
+ * witness keeps an unchanged log from being read at all.
  *
  * @module @dsh-app/plugin-usage/store
  */
@@ -30,6 +31,15 @@ export class UsageStore {
   private rows = new Map<string, UsageRow>()
   private watermarks = new Map<string, number>()
   /**
+   * The physical log byte size each session's rows were folded from. The log is
+   * append-only, so a size that did not move means there is nothing new to fold
+   * and the backfill can skip the read entirely. Persisted in
+   * `fold-state.json` beside the format witness, which is what lets it skip
+   * across restarts; a backend that does not report a size simply never fills
+   * this in.
+   */
+  private foldedBytes = new Map<string, number>()
+  /**
    * The log format this store's watermarks mean anything under (0 = nothing
    * folded yet). See {@link observeLogFormat}: a format change renumbers the tail
    * of every log, which is exactly what a seq-based watermark cannot survive.
@@ -46,6 +56,10 @@ export class UsageStore {
    * watermark and fold-state files are rewritten only then, so row-only flushes
    * never pay for them. */
   private watermarksDirty = false
+  /** Set when a size witness changed since the last flush. Rides the same
+   * watermark write: both live in `fold-state.json` and both must wait for the
+   * rows they describe to land. */
+  private witnessDirty = false
   private flushTimer: NodeJS.Timeout | undefined
   private disposed = false
 
@@ -89,8 +103,19 @@ export class UsageStore {
     }
     if (existsSync(this.foldStatePath)) {
       try {
-        const parsed = JSON.parse(readFileSync(this.foldStatePath, 'utf8')) as { logFormatVersion?: unknown }
+        const parsed = JSON.parse(readFileSync(this.foldStatePath, 'utf8')) as {
+          logFormatVersion?: unknown
+          foldedBytes?: unknown
+        }
         if (typeof parsed.logFormatVersion === 'number') this.logFormatVersion = parsed.logFormatVersion
+        if (typeof parsed.foldedBytes === 'object' && parsed.foldedBytes !== null && !Array.isArray(parsed.foldedBytes)) {
+          for (const [id, bytes] of Object.entries(parsed.foldedBytes as Record<string, unknown>)) {
+            // Same tolerance as a row or a watermark: an entry of an unknown
+            // shape is dropped, and that session is read once more rather than
+            // skipped on a value nobody can trust.
+            if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0) this.foldedBytes.set(id, bytes)
+          }
+        }
       } catch (error) {
         // A witness we cannot read is one we do not have: the watermarks stay as
         // they are rather than being dropped on a guess, and the next format
@@ -112,8 +137,9 @@ export class UsageStore {
 
   /**
    * Advance the session watermark to `seq` (monotonic; never rewinds).
-   * Called for every event seen, so a session with no usage rows still stops
-   * being re-inspected.
+   * The fold paths decide when that is legal: a contiguous live event advances
+   * it — so a session with no usage rows still stops being re-inspected —
+   * while a live event that jumped a gap leaves it to the backfill (fold.ts).
    */
   advanceWatermark(sessionId: string, seq: number): void {
     const current = this.watermarks.get(sessionId) ?? 0
@@ -122,6 +148,29 @@ export class UsageStore {
       this.watermarksDirty = true
       this.scheduleFlush()
     }
+  }
+
+  /**
+   * The physical log byte size one session's rows were folded from, or
+   * undefined when this store has never folded it with a reported size.
+   */
+  foldedBytesOf(sessionId: string): number | undefined {
+    return this.foldedBytes.get(sessionId)
+  }
+
+  /**
+   * Record that a session's rows now cover the log at `bytes`.
+   *
+   * Called only after a successful read (and, when it folds, after the fold):
+   * the witness says "everything in the log of this size has been folded", so
+   * writing it on a failed or unread attempt would make the next pass skip the
+   * very events the failure lost. Persisted with the watermarks — see
+   * {@link flush}.
+   */
+  noteFoldedBytes(sessionId: string, bytes: number): void {
+    this.foldedBytes.set(sessionId, bytes)
+    this.witnessDirty = true
+    this.scheduleFlush()
   }
 
   /**
@@ -149,7 +198,12 @@ export class UsageStore {
     this.logFormatVersion = version
     if (replaced) {
       this.watermarks.clear()
+      // The recorded sizes describe the PRE-migration artifacts; the migration
+      // rewrites the logs, so a matching size would now skip a perfectly good
+      // re-read. Dropped together with the watermarks they belong to.
+      this.foldedBytes.clear()
       this.watermarksDirty = true
+      this.witnessDirty = true
       this.scheduleFlush()
     }
     return replaced
@@ -177,6 +231,14 @@ export class UsageStore {
       if (row.sessionId !== sessionId) continue
       this.rows.delete(key)
       dropped += 1
+    }
+    // The size witness goes with the rows: "the log up to this size is already
+    // folded" stops being true the moment those rows are dropped, and a restart
+    // that read the witness back would skip the re-fold the format change asked
+    // for.
+    if (this.foldedBytes.delete(sessionId)) {
+      this.witnessDirty = true
+      this.scheduleFlush()
     }
     if (dropped > 0) {
       this.rewrite = true
@@ -213,7 +275,8 @@ export class UsageStore {
   }
 
   /**
-   * Write the pending rows and watermarks. FAILURE KEEPS THE DATA: the batch
+   * Write the pending rows and the fold witnesses (watermarks + log sizes).
+   * FAILURE KEEPS THE DATA: the batch
    * is only dropped from the buffer after the append succeeded, and the
    * watermark file is only written once its rows are on disk. Clearing first
    * (the earlier shape) lost rows for good on a full disk or a locked file —
@@ -221,7 +284,7 @@ export class UsageStore {
    * the backfill would ever produce them again.
    */
   private flush(): void {
-    if (this.pendingLines.length === 0 && !this.watermarksDirty && !this.rewrite) return
+    if (this.pendingLines.length === 0 && !this.watermarksDirty && !this.witnessDirty && !this.rewrite) return
     if (this.rewrite) {
       // A removal cannot be appended away: the whole file is written from memory,
       // which already holds every surviving row. Pending appends ride along —
@@ -251,18 +314,27 @@ export class UsageStore {
         return
       }
     }
-    if (!this.watermarksDirty) return
+    // The witnesses are written only past this point: landing a watermark or a
+    // size while the rows it describes are still in memory would make the next
+    // start (or the next backfill) trust a fold that never reached disk.
+    if (!this.watermarksDirty && !this.witnessDirty) return
     try {
       writeFileSync(this.watermarkPath, `${JSON.stringify(Object.fromEntries(this.watermarks), null, 2)}\n`, 'utf8')
-      // The witness rides the same flush: dropping the watermarks without
+      // The witnesses ride the same flush: dropping the watermarks without
       // recording WHY would make the next start read an empty map as "nothing was
       // ever folded", which is the same outcome here but hides the reason. Both
       // files are tiny and are two halves of one fact — how far this session was
-      // folded, and under which log format.
-      writeFileSync(this.foldStatePath, `${JSON.stringify({ logFormatVersion: this.logFormatVersion }, null, 2)}\n`, 'utf8')
+      // folded, and under which log format / at which log size.
+      writeFileSync(this.foldStatePath, `${JSON.stringify({
+        logFormatVersion: this.logFormatVersion,
+        foldedBytes: Object.fromEntries(this.foldedBytes),
+      }, null, 2)}\n`, 'utf8')
       this.watermarksDirty = false
+      // Only a LANDED write clears this: a thrown write leaves both flags set,
+      // and the next flush retries them with the rows.
+      this.witnessDirty = false
     } catch (error) {
-      this.log(`usage store: watermark persist failed (rows are safe; watermarks retry): ${(error as Error).message}`)
+      this.log(`usage store: witness persist failed (rows are safe; watermarks and sizes retry): ${(error as Error).message}`)
     }
   }
 

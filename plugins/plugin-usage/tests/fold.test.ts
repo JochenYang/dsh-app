@@ -117,6 +117,28 @@ test('foldLiveEvent: a newer header replaces the cached one mid-session', () => 
   assert.equal(row.model, 'm2')
 })
 
+test('foldLiveEvent: contiguous events advance the watermark one at a time', () => {
+  const store = tmpStore()
+  foldLiveEvent(store, 'contig', header(1, 'deepseek', 'm'))
+  assert.equal(store.watermark('contig'), 1)
+  foldLiveEvent(store, 'contig', message(2, { inputTokens: 1, outputTokens: 1 }))
+  assert.equal(store.watermark('contig'), 2, 'the next contiguous event still advances')
+  foldLiveEvent(store, 'contig', message(3, { inputTokens: 1, outputTokens: 1 }))
+  assert.equal(store.watermark('contig'), 3)
+})
+
+test('foldLiveEvent: a replay at or below the watermark neither folds nor rewinds', () => {
+  const store = tmpStore()
+  foldEvents(store, 'replay', [header(1, 'p', 'm'), message(5, { inputTokens: 1, outputTokens: 1 })])
+  assert.equal(store.watermark('replay'), 5)
+  // A duplicate of the last folded event and one from below the watermark: the
+  // store must add nothing and must not move the watermark (it is monotonic).
+  assert.equal(foldLiveEvent(store, 'replay', message(5, { inputTokens: 1, outputTokens: 1 })), 0)
+  assert.equal(foldLiveEvent(store, 'replay', message(2, { inputTokens: 9, outputTokens: 9 })), 0)
+  assert.equal(store.watermark('replay'), 5, 'a replayed seq never rewinds the watermark')
+  assert.equal(store.size, 1)
+})
+
 // --- fork inheritance ---------------------------------------------------------
 
 test('foldEvents: fromSeq skips a fork inherited prefix the parent already counted', () => {

@@ -39,7 +39,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-session'
 // Type-only: pulls the sessionPersistence Context merge into scope.
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { runBackfill } from './backfill.ts'
+import { runBackfill, singleFlightPass } from './backfill.ts'
 import { mergePricing } from './aggregate.ts'
 import { foldLiveEvent } from './fold.ts'
 import { BalanceError, registerUsageRoutes, type BalanceFetcher } from './routes.ts'
@@ -324,14 +324,18 @@ export function apply(ctx: Context, baseConfig: Config): void {
     }
   })
 
+  // The start-up pass and the rescan timer share one serialized pass: a large
+  // store's pass can outlast the interval, and a second pass overlapping it
+  // would re-fold sessions mid-format-change (see singleFlightPass).
+  const backfillPass = singleFlightPass(
+    () => runBackfill(store, ctx.sessionPersistence, (message) => log.info(message)),
+  )
   if (config.backfillOnStart) {
-    void runBackfill(store, ctx.sessionPersistence, (message) => log.info(message))
-      .catch((error: unknown) => { log.warn(`usage backfill failed: ${(error as Error).message}`) })
+    void backfillPass().catch((error: unknown) => { log.warn(`usage backfill failed: ${(error as Error).message}`) })
   }
   if (config.rescanMinutes > 0) {
     const timer = setInterval(() => {
-      void runBackfill(store, ctx.sessionPersistence, (message) => log.info(message))
-        .catch((error: unknown) => { log.warn(`usage rescan failed: ${(error as Error).message}`) })
+      void backfillPass().catch((error: unknown) => { log.warn(`usage rescan failed: ${(error as Error).message}`) })
     }, config.rescanMinutes * 60_000)
     ctx.effect(() => () => { clearInterval(timer) }, 'plugin-usage: rescan timer')
   }
