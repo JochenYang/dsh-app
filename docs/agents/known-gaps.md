@@ -71,6 +71,35 @@ a short summary and points here.
   read its caller's remaining budget, so the choice to detach is made on "is nested" rather than on an
   estimate, and no tool can promote a still-running call at the deadline. Both would need upstream changes
   (`exec.deadline` exposure and a promotion contract); neither is planned here.
+- **The 2026-11-26 sweep of the other seventeen plugins — what was measured and deliberately
+  left.** They were re-checked for hidden cost and silent failure by mechanical scans plus
+  measurement rather than another read-through (`scratch/suite-audit/`); ten defects across four plugins
+  (usage, market, rewind, sidebar) were fixed, and these were left, each with the number that says why:
+  - `plugin-rewind`'s snapshot walk skips only directories it knows (dependency, VCS and cache
+    directories — never build output, which a recall must be able to put back), so on this very
+    repository (`scratch/` 2.4 GB, `runtime-dist/` 1.5 GB) every snapshot is incomplete: 499 of
+    the 1,013 stored manifests carry a `partial` reason, and a recall here reports
+    `coverage: partial`. `maxSnapshotFiles` / `maxSnapshotBytes` are the user's knobs; which
+    directories to skip by default is a product decision.
+  - `plugin-rewind`: the write recorder holds up to 20,000 entries with no byte ceiling (each
+    ≤ 4 MiB); manifests are rewritten at every turn and their bytes sit outside the 1 GB blob
+    budget; the quarantine keeps everything until it is purged (W24's one remaining item).
+  - `plugin-market`: `/catalog` answers a 2.8 MiB payload and recomputes `repoKey` for every
+    entry on each request (~7 ms); the install queue holds its mutex while it resolves a
+    registry version (≤ 20 s against a dead registry); the skills branch of `market_search` is
+    always a live search.
+  - `plugin-usage`: `usage.jsonl` has no retention (46,949 rows / 12.8 MB after about three
+    months here, loaded synchronously at start: 83 ms), and the watermark file is rewritten on
+    every debounced live event (28 KB per write at 558 sessions). A live event that jumped a
+    gap carries whatever provider/model the in-memory header cache holds — nothing, right after
+    a restart — and the backfill's later re-fold does not correct an existing row's attribution:
+    the counts stay right, the per-model cost of those rows can be off.
+  - `plugin-archives`: every list, delete and prune calls the kernel's uncached
+    `sessionPersistence.list()` — 102 ms and 1,366 filesystem operations for 256 sessions here,
+    linear in sessions. That cost is upstream's.
+  - `plugin-sidebar`: mounting the Git tab runs four serial git processes (~159 ms, 68% of it
+    process start-up); `status` still refuses, now with a coded message, past about 44,000
+    untracked entries; the diff view is not virtualized.
 - Future: signed kernel manifests; `$DSH_HOME` settings rollback on major-version upgrades. `docs/capability-roadmap/`
   holds the rest of the roadmap; `docs/plans/` holds the plans that are still open.
 - **The kernel preflight cannot see a shift in responsibility, or anything at render time.** It answers

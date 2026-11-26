@@ -88,7 +88,7 @@
 | W9 | P2 · 一致性 | `plugin-codegraph/src/routes.ts:318` `GET /graph` 对未知 cwd 触发 `reindex`：**不绕过队列**（`void options.reindex(...)` 就是 `queue.request`），但把索引范围放到了「任意 cwd」而非「已 adopt 项目」`[复核]`（自 P1 下调：无提权含义，落库不出本机） | [x] |
 | W21 | P2 · 防漂移 | `plugin-archives/src/routes.ts:471` 删除走 `rm(dirname(resolveCurrentLog(id)))` 且不校验目录名；三道栅栏（已归档 / 在内核列表 / 无活动）挡掉了任意 id，但主路径完全信任 resolver 的返回形状，内核布局变化会连带删同项目其它会话；同文件 fallback 反而有校验 `[复核]`（自 P1 下调：当前布局下不可触发） | [x] |
 | W23 | P2 | `plugin-market/src/routes.ts:1303` `/uninstall` 缺 `@dsh-app/` 守卫（`/toggle:1021` 有），面板卸载按钮未对 `pkg.suite` 禁用 `[复核]` | [x] |
-| W24 | P2 | `plugin-rewind`：`recorder.ts:106` 无上限、`quarantine.ts` 零保留策略、`index.ts:1100` 预览载荷无上限（一次重建 dist 可让 plan 返回数百 MB）、`trees.ts:457` `inFlight.clear()` 清掉别的会话的持有 | [~] |
+| W24 | P2 | `plugin-rewind`：`recorder.ts:106` 无上限、`quarantine.ts` 零保留策略、`index.ts:1100` 预览载荷无上限（一次重建 dist 可让 plan 返回数百 MB）、`trees.ts:457` `inFlight.clear()` 清掉别的会话的持有。2026-11-26：预览载荷上限已做（`MAX_PREVIEW_*` 三级预算，host + client；实测 2000 个变更文件 180 MB → 有界并如实标注），见 Phase log 第 9 行 | [~] |
 | W25 | P2 | `plugin-memory/src/light-sweep.ts:81` 每对相似卡整份同步重写 `distill-state.json`（30 卡最坏 435 次），且阻塞 `memory_save` 返回路径 | [x] |
 | W26 | P2 | `plugin-codegraph`：`store.ts:276` 损坏库重建时句柄未关即 unlink；`graph-view.ts:126` 边在过滤前 `LIMIT` 且不并入 truncated；`queue.ts:562` `status()` 每次全量构造；`index.ts:457` 每次工具调用 `await gitHead()` spawn | [x] |
 | W27 | P2 | `plugin-ppt`/`plugin-pdf`：`writeFile` 非原子（`writeFileAtomic` 已导入未用）；渲染不看 `exec.signal`；`${target}.${pid}.tmp` 非唯一且失败不清理；`templates.ts:150` 首次扫描失败永久缓存空目录；`pdfd/read.ts:24` 单次可返回 2MB 文本；`index.ts:234` 返回插件安装绝对路径 | [~] |
@@ -197,7 +197,7 @@
 | W34 nit 批量清扫 | 不影响行为 | 触碰相关文件时顺手 |
 | 工作台扩展契约的真实检验 | 套件目前没有域插件；契约要求「逐字复制」，字段拼错只在运行时从界面消失 | 第一个真实域卡片落地时补 drift 测试 |
 | 工作台 `openView` 未注册 key 静默 no-op | 属可观测性问题，非错误 | 与上一个域卡片一起做（加日志或提示） |
-| W24 其余两项（quarantine 保留策略、预览载荷上限） | 「保留多少隔离副本」是产品取舍，会改变用户能看到的历史 | 磁盘占用被报告，或预览慢到可感知 |
+| W24 其余一项（quarantine 保留策略） | 「保留多少隔离副本」是产品取舍，会改变用户能看到的历史（预览载荷上限已于 2026-11-26 做掉） | 磁盘占用被报告 |
 | W27 其余四项（原子写、`exec.signal`、`pdfd/read` 2MB、安装路径绝对化） | 原子写与 signal 都要渲染器配合，属渲染管线重构 | 取消长文档渲染后仍有输出现象 |
 | 代码图谱的边截断无标志、`symbolGraph` 仍是过滤前 LIMIT | `fileGraph` 已改成过滤后取边，但边数被 `MAX_VIEW_EDGES` 砍掉时没有 `truncated` 标志；`symbolGraph` 的 1200 条 LIMIT 仍在 `.filter(known)` 之前 | 面板出现「连接缺失」的报告时 |
 | W31 的 client-ui 组件测试与 market 路由测试 | 需要 react-dom 测试环境；本轮已补 hooks 的原子挂载与 recorder 的 trim 用例 | 建测试环境时一并做 |
@@ -228,3 +228,4 @@
 | 7 真机启动 | 2026-11-01 | `scratch/dev-kernel-0.2.1-rc.5/runtime` 上的 `npm run dev` | 14 个插件 lib 全部按新版本重建 → 内核 host `ready (web transport)` 于 `127.0.0.1:7712` → renderer 建立两条 ESTABLISHED 连接（页面已加载并连上内核），进程无 crash、日志无 error。**界面行为仍需人工确认**：代码图谱对未 adopt 项目显示「还没有图谱」、市场确认弹层的 Esc/遮罩/焦点返回、模型设置的请求头表格、记忆归档清空。 |
 
 | 8 账本同步 | 2026-11-23 | 对照代码逐条核对（W29 三个子项、W30 两个对话框与 `.dshMkt-cardFoot` 定义次数、W25 的「一次写入」注释、W9 的 `notAdopted` 分支） | 状态列按「本轮完成度」段回填：W9、W25、W26、W30、W33 → `[x]`；W29 → `[~]`（两项已做，`cloneDraft` 每次 render 未做）。W32 仍待裁决；另核实「备份不含凭据库时导出与导入两头都不说」并补上提示（`changesets/presets-todo-notices.md`）——这与 W32 的明文导出决定无关。 |
+| 9 隐藏性能与缺陷专项 | 2026-11-26 | `scratch/suite-audit/`（语法树与类型检查器定向扫描、各插件的只读度量脚本、隔离真机端到端台架 `e2e/run.mjs` 及其结果 JSON） | 对 memory / codegraph 之外的 17 个插件换视角复查（机械定向 + 实测，不再通读）。确证并修复十处，均**未提交**。usage：回填每轮全量读所有会话日志（真实内核实测一轮约 223 MB 读取、16.7 s CPU，每 5 分钟一次）→ 持久化的日志尺寸见证，重扫窗口降到 +1.7 MB；实时事件跨缺口推进水位导致静默少计（真实存储里一个会话缺 9 行）→ 只在连续时推进；两轮回填可重叠 → 单飞守卫。market：目录源被 5,000 上限静默截断（线上 6,885 条丢 1,885 条）→ 上限 16,000 / 24,000 / 20 MB，截断进日志、缓存行与工具结果；`market_search` 阻塞活抓取且从不落盘（实测每次 3.26 s / 1.87 s）→ 单飞刷新、最多等 5 秒、结果落盘；缓存字节上限与新条目上限不相称 → 32 MB。rewind：plan 载荷无上限（2000 个文件 180 MB，被内核写进会话日志）→ 三级预算并如实标注；快照复制阶段不受期限约束 → 到期即停；每回合无条件全库 GC（本机 5.1 s 一趟且持闸门）→ 每小时下限；回合中途重拍快照（还原目标漂移，大仓库上每个工具调用多一趟遍历）→ 有工具跑过就不再重拍。sidebar：超过 4 MiB 的单文件 diff 报错并回显 diff 片段 → 内容读取 32 MiB + 编码错误。核验后不修（有数字）：archives 列表（成本在内核 `list()`，本机 102 ms）、Git 面板每次切标签约 159 ms、各处客户端轮询。两轮独立审查（reviewer）无阻塞发现。余项记在 `docs/agents/known-gaps.md`。 |
