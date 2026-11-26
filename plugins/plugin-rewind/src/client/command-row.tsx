@@ -15,7 +15,7 @@
  * @module @dsh-app/plugin-rewind/client/command-row
  */
 
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import type { CommandNode, CommandRowProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS } from './locales.ts'
@@ -27,6 +27,13 @@ export type RewindCommandRowProps = CommandRowProps & PropsLocale<typeof NS>
 /**
  * Render one `/rewind` outcome as a sentence.
  *
+ * The resolution is memorised because `hostMessage` `JSON.parse`s the whole
+ * result text and resolves its `params` on every call, while this component
+ * re-renders for reasons unrelated to the result (a streaming neighbour, a
+ * theme or locale change). A plan row's text can still be a few MiB after the
+ * caps — before them the payload was measured at 179.9 MB and 265 ms per parse —
+ * so repeating that work on an unrelated render is waste the memo removes.
+ *
  * @param props - the command row's props.
  * @returns the rendered row.
  */
@@ -34,7 +41,7 @@ export function RewindCommandRow({ node, t }: RewindCommandRowProps): ReactNode 
   const command: CommandNode = node
   const outcome = command.outcome
   const raw = outcome?.text
-  const rendered = hostMessage(raw, t)
+  const rendered = useMemo(() => hostMessage(raw, t), [raw, t])
   const failed = outcome?.kind === 'error'
   return (
     <div className="dshRewind-commandRow" data-tone={failed ? 'error' : 'info'} role="status">

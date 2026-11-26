@@ -120,10 +120,48 @@ export interface FileChangePreview {
    * `remove` — the recalled range CREATED it; it moves into the quarantine.
    */
   readonly action: 'restore' | 'remove'
-  /** Bytes the file holds now, for the diff. Absent when it does not exist. */
+  /**
+   * Bytes the file holds now, for the diff.
+   *
+   * Empty when the file no longer exists: the recall recreates it, so the diff
+   * shows the whole file as added. Absent only when the current side could not be
+   * previewed although the file exists — see `currentOmitted`.
+   */
   readonly current?: string
   /** Bytes it will hold after the recall. Absent for `remove`. */
   readonly next?: string
+  /**
+   * `current` was cut at the preview's per-side cap: it is a WINDOW of the file,
+   * not the whole of it. The window prefers the first difference (so an empty
+   * diff cannot be mistaken for "no change"), otherwise it starts at the file's
+   * beginning. The diff the dialog renders is therefore partial, and saying so is
+   * the difference between a preview and a plausible-looking lie about a file's
+   * content.
+   */
+  readonly currentTruncated?: boolean
+  /** `next` was cut at the same cap, in the same aligned window. */
+  readonly nextTruncated?: boolean
+  /**
+   * No text could be produced for `current` although the file EXISTS — it is
+   * binary, unreadable, or larger than the capture cap. The row still exists
+   * because the recall will still touch the file; the marker keeps the bare path
+   * from reading as "there is nothing here".
+   *
+   * A file that no longer exists is NOT this case: its `current` is the empty
+   * string and it carries no marker, because the recall recreates it and the diff
+   * must show the whole file as added.
+   */
+  readonly currentOmitted?: boolean
+  /** No text could be produced for `next` for the same reasons (binary content). */
+  readonly nextOmitted?: boolean
+  /**
+   * The payload's TOTAL text budget ran out before this row, so neither side is
+   * carried. The recall still applies to this path; only its preview is gone.
+   *
+   * Such a row must never be rendered as a diff of two empty files — the dialog
+   * hides that affordance instead.
+   */
+  readonly textOmitted?: boolean
 }
 
 /**
@@ -185,6 +223,14 @@ export interface RevertPlan {
   readonly prompt?: string
   /** The ordinal the plan was computed for. */
   readonly n?: number
+  /**
+   * Files the preview did NOT list individually because it hit its row cap.
+   *
+   * They are still affected: the recall acts on every target, and this count only
+   * says how many rows the dialog is not showing. Absent when every file is
+   * listed, so a small payload is byte-for-byte what it was before the cap.
+   */
+  readonly omitted?: number
   /**
    * Whether a compaction bounds the recallable list.
    *

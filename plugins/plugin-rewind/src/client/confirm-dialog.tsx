@@ -43,6 +43,16 @@
  * cannot reach past the newest checkpoint, and the user approving a cut should
  * know that older messages are not in the list they are choosing from.
  *
+ * ## What the preview could carry, as opposed to what the recall can do
+ *
+ * A third kind of shortfall is the payload's own size: the command result is
+ * appended to the session log verbatim, so the host caps rows, per-side text and
+ * total text (`MAX_PREVIEW_*` in `../index.ts`). The dialog states each cap where
+ * it lands — a cut side is labelled truncated, a row with no text keeps its place
+ * and loses the diff affordance (an empty diff would claim the file was empty),
+ * and files past the row cap are counted in the note because the recall still
+ * acts on them.
+ *
  * @module @dsh-app/plugin-rewind/client/confirm-dialog
  */
 
@@ -157,6 +167,9 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose, onScope
   const remove = plan?.remove ?? []
   const unrestorable = plan?.unrestorable ?? []
   const rows: PreviewRow[] = [...restore, ...remove]
+  // Files past the preview's row cap are NOT rows, but they are still affected —
+  // the count is what keeps the dialog from understating the change it describes.
+  const omitted = plan?.omitted ?? 0
   // A shortfall the plugin can NAME (files it could not put back) and one it can
   // only quantify (a range with no snapshot, so it does not know what it missed)
   // are different sentences, and both belong above the confirm button.
@@ -167,12 +180,18 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose, onScope
   // The boundary is context, not a shortfall: it takes the plain tone, which is
   // why `warn` below stays driven by the coverage verdict and the named files.
   const boundary = plan?.stoppedAtCompaction === true ? t('rewind.confirm.boundary') : undefined
+  // The unlisted-files sentence is about FILES, so it is withheld while the
+  // scope says the files will not be touched at all.
+  const unlisted = mode === 'withFiles' && omitted > 0
+    ? t('rewind.confirm.omitted', { n: omitted })
+    : undefined
   const note = [
     ...(boundary === undefined ? [] : [boundary]),
     ...(coverage === undefined ? [] : [coverage]),
     ...(unrestorable.length === 0 ? [] : [t('rewind.confirm.unrestorable', { n: unrestorable.length })]),
+    ...(unlisted === undefined ? [] : [unlisted]),
   ].join(' ')
-  const warn = coverage !== undefined || unrestorable.length > 0
+  const warn = coverage !== undefined || unrestorable.length > 0 || unlisted !== undefined
   // Choosing "messages only" makes the file rows moot, and the dialog says so
   // rather than showing a list of files it will not touch.
   const modeNote = mode === 'conversationOnly' ? t('rewind.confirm.modeConversationOnly') : undefined
@@ -190,7 +209,7 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose, onScope
       className="dshRewind-confirmDialog"
       description={rows.length === 0
         ? t('rewind.confirm.nofiles')
-        : t('rewind.confirm.summary', { files: rows.length })}
+        : t('rewind.confirm.summary', { files: rows.length + omitted })}
       footer={(
         <>
           <Button variant="outline" disabled={busy} onClick={onClose}>
@@ -226,33 +245,54 @@ export function ConfirmDialog({ open, plan, busy, t, onConfirm, onClose, onScope
       )}
       {mode === 'withFiles' && rows.length > 0 && (
         <ul className="dshRewind-fileList">
-          {rows.map((row) => (
-            <li key={row.path} className="dshRewind-fileRow">
-              <div className="dshRewind-fileHead">
-                <span className="dshRewind-fileAction" data-action={row.action}>
-                  {row.action === 'restore' ? t('rewind.confirm.restore') : t('rewind.confirm.remove')}
-                </span>
-                <span className="dshRewind-filePath" title={row.path}>{baseName(row.path)}</span>
-                {row.action === 'restore' && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    aria-expanded={expanded === row.path}
-                    onClick={() => setExpanded((current) => (current === row.path ? undefined : row.path))}
-                  >
-                    {expanded === row.path ? t('rewind.confirm.hideDiff') : t('rewind.confirm.showDiff')}
-                  </Button>
+          {rows.map((row) => {
+            // A row carries a diff only when BOTH sides are real text. Opening an
+            // empty diff for a file that could not be read is worse than offering
+            // nothing: an empty left side reads as "the file was empty", which is a
+            // claim the preview cannot make.
+            const previewable = row.action === 'restore'
+              && row.textOmitted !== true
+              && row.current !== undefined
+              && row.next !== undefined
+            const truncated = row.currentTruncated === true || row.nextTruncated === true
+            return (
+              <li key={row.path} className="dshRewind-fileRow">
+                <div className="dshRewind-fileHead">
+                  <span className="dshRewind-fileAction" data-action={row.action}>
+                    {row.action === 'restore' ? t('rewind.confirm.restore') : t('rewind.confirm.remove')}
+                  </span>
+                  <span className="dshRewind-filePath" title={row.path}>{baseName(row.path)}</span>
+                  {row.action === 'restore' && truncated && (
+                    <span className="dshRewind-fileTag" data-kind="truncated">
+                      {t('rewind.confirm.truncated')}
+                    </span>
+                  )}
+                  {row.action === 'restore' && !previewable && (
+                    <span className="dshRewind-fileTag" data-kind="omitted">
+                      {t('rewind.confirm.notPreviewed')}
+                    </span>
+                  )}
+                  {previewable && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-expanded={expanded === row.path}
+                      onClick={() => setExpanded((current) => (current === row.path ? undefined : row.path))}
+                    >
+                      {expanded === row.path ? t('rewind.confirm.hideDiff') : t('rewind.confirm.showDiff')}
+                    </Button>
+                  )}
+                </div>
+                {previewable && expanded === row.path && (
+                  <DiffBlock
+                    diffs={[{ path: row.path, oldText: row.current ?? '', newText: row.next ?? '' }]}
+                    labels={diffLabels(t)}
+                    maxLines={24}
+                  />
                 )}
-              </div>
-              {expanded === row.path && row.action === 'restore' && (
-                <DiffBlock
-                  diffs={[{ path: row.path, oldText: row.current ?? '', newText: row.next ?? '' }]}
-                  labels={diffLabels(t)}
-                  maxLines={24}
-                />
-              )}
-            </li>
-          ))}
+              </li>
+            )
+          })}
         </ul>
       )}
 

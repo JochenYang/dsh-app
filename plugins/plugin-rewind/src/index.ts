@@ -130,6 +130,7 @@ import {
   pathKey,
   pruneSnapshots,
   readSnapshot,
+  requestCaptureCollection,
   requestGarbageCollection,
   type TreeLimits,
   type TreeSnapshot,
@@ -561,33 +562,67 @@ export function apply(ctx: Context, config: Config): void {
   // that turn changed. `write` and `edit` DO trigger it — the write waterfalls
   // cover their target exactly, but a turn that writes and then runs a shell
   // command would otherwise be snapshotted AFTER the write, and the diff would
-  // then treat that write as part of the range's starting state. ---
+  // then treat that write as part of the range's starting state.
+  //
+  // A capture only ever describes the turn's START, which is why `ranIn` exists:
+  // once a tool of the turn has run, a new walk records a mid-turn tree under the
+  // turn's own number, `latestSnapshotBefore` hands it back as the range's
+  // starting point, and the recall then "restores" bytes an earlier tool of the
+  // same turn wrote. An incomplete first snapshot used to open exactly that door
+  // — the claim was released so later callers could retry — and on a repository
+  // whose snapshot is never complete it also cost one walk plus one copy (≤1.5 s
+  // each) at EVERY tool call (measured here: 61,788 files / 4.2 GB in scope, 499
+  // of 1,013 stored manifests partial). So a tool gate in a turn that already ran
+  // a tool only JOINS a capture that is already claimed; it never starts one. ---
   const captured = new Map<string, Promise<void>>()
+  /** Per session, the last turn in which a tool that could write has RUN. */
+  const ranIn = new Map<string, number>()
   ctx.effect(() => ctx.on('tools/pre-execute', async (exec, next) => {
     const info = sessionInfoOfExec(exec)
     const tool = String((exec as { name?: unknown } | null)?.name ?? '')
-    if (
-      snapshotWorkspace
-      && info !== undefined
-      && info.cwd !== undefined
-      && !READ_ONLY_TOOLS.has(tool)
-    ) {
+    const watched = snapshotWorkspace && info !== undefined && info.cwd !== undefined && !READ_ONLY_TOOLS.has(tool)
+      ? { id: info.id, cwd: info.cwd, turn: info.turn }
+      : undefined
+    if (watched !== undefined) {
       // AWAITED, not fire-and-forget: the snapshot must describe the workspace
       // BEFORE this tool runs. Started and not waited for, it would race the very
       // write it exists to capture.
+      const inFlight = captured.get(`${watched.id}\u0000${String(watched.turn)}`)
       try {
-        await ensureSnapshot({ id: info.id, cwd: info.cwd, turn: info.turn }, signalOfExec(exec))
+        if (ranIn.get(watched.id) === watched.turn) {
+          // A tool of this turn already ran, so a fresh walk is no longer a
+          // turn-start state. A claim that is already there (the turn boundary's
+          // walk still running, or a settled one) is joined: this tool must not
+          // write while that walk is still reading, and must not re-walk either.
+          if (inFlight !== undefined) await inFlight
+        } else {
+          // No tool of this turn has run yet, so an absent claim — a cold disk
+          // left the first walk incomplete, or it failed — is worth one retry:
+          // that is the recovery path this gate exists for.
+          await ensureSnapshot(watched, signalOfExec(exec))
+        }
       } catch (error) {
         // A tool call is never failed over bookkeeping: the snapshot is a safety
         // net, and a missing net must not stop the work.
         log.warn(`rewind: workspace snapshot failed: ${messageOf(error)}`)
       }
     }
-    return next()
+    try {
+      return await next()
+    } finally {
+      // Marked after the tool RAN, whatever it answered: a tool that failed can
+      // have written before it failed, so the turn's starting state is gone
+      // either way and no later gate may re-capture.
+      if (watched !== undefined) ranIn.set(watched.id, watched.turn)
+    }
   }, { prepend: true }), 'plugin-rewind: workspace snapshot gate')
 
   /**
    * Take this turn's workspace snapshot if it does not exist yet.
+   *
+   * Only called while no tool of the turn has RUN — after that the gate joins a
+   * claim instead of starting a walk (see `ranIn` above), because a walk started
+   * mid-turn records the wrong tree under this turn's number.
    *
    * The in-memory guard is claimed BEFORE the await so two concurrent callers —
    * two tool calls of one step, or the turn boundary racing the first tool —
@@ -615,17 +650,22 @@ export function apply(ctx: Context, config: Config): void {
         await pruneSnapshots(dshHome, info.id, limits)
         // Scheduled, not awaited: collecting parses every manifest of every
         // session and stats every blob, so awaiting it here put the whole store's
-        // size in front of the turn's first tool call. A background pass can still
-        // hold the collection gate when a capture arrives, which delays that one
-        // capture by at most a pass — the same wait this used to charge every time.
-        requestGarbageCollection(dshHome, (error: unknown) => {
+        // size in front of the turn's first tool call. The request is FLOORED by
+        // `minCollectionIntervalMs`, including when this prune dropped a
+        // manifest: once a session is at its retention cap every capture drops
+        // one, so treating a drop as "collect now" put a whole-store scan behind
+        // every turn again. A pass can still hold the collection gate when a
+        // capture arrives, which delays that one capture by at most a pass.
+        requestCaptureCollection(dshHome, (error: unknown) => {
           log.warn(`rewind: snapshot collection failed: ${messageOf(error)}`)
         }, limits)
-        // A CANCELLED walk is not a snapshot: `captureWorkspace` answers
-        // `complete:false, reason:'cancelled'` instead of throwing. Keeping the claim
-        // would make every later tool gate in this turn await a promise that recorded
-        // nothing, and the recall would then report partial coverage with no way to
-        // repair it.
+        // An INCOMPLETE walk is not a snapshot: `captureWorkspace` answers
+        // `complete:false` (a bound, a timeout, a cancellation) instead of throwing,
+        // and there is nothing here worth joining. Releasing the claim is the
+        // recovery path for the ONE case that is still safe: no tool of the turn has
+        // run yet, so the first tool gate may walk again and still see the turn's
+        // starting state. After a tool has run the gate never starts a capture (see
+        // `ranIn`), so this release can no longer turn into a mid-turn re-walk.
         if (!capture.complete) captured.delete(key)
       } catch (error) {
         // The claim is RELEASED on failure, and this is why the two callers can
@@ -656,15 +696,17 @@ export function apply(ctx: Context, config: Config): void {
   // edits to the range and undoes them.
   //
   // The snapshot is therefore also taken at `turn/start`. This costs the same
-  // single tree walk the gate would have done (the guard is shared, so whichever
-  // fires first wins and the other is a no-op), and it is strictly earlier: the
-  // state at the turn's first prompt is the state a recall of that turn must
-  // return to.
+  // single tree walk the gate would have done (the guard is shared, so the gate
+  // joins this walk rather than starting a second one), and it is strictly
+  // earlier: the state at the turn's first prompt is the state a recall of that
+  // turn must return to — and it is the only walk a turn gets once a tool of that
+  // turn has run.
   //
   // It is NOT a timer, deliberately. A periodic snapshot would pay the walk
-  // (bounded at 1.5 s by `maxWalkMs`) over and over inside one turn while the
-  // only thing a recall can return to is a turn boundary — the extra snapshots
-  // would cost IO and disk for states no command can address.
+  // (bounded at 1.5 s for the directory scan plus another 1.5 s for the copy,
+  // `maxWalkMs` each) over and over inside one turn while the only thing a
+  // recall can return to is a turn boundary — the extra snapshots would cost IO
+  // and disk for states no command can address.
   ctx.effect(() => ctx.on('session/event', (session, event) => {
     // An ordinary event, not a waterfall: it carries no `next`, and returning a
     // value means nothing here. Only the turn's own start is interesting.
@@ -672,8 +714,8 @@ export function apply(ctx: Context, config: Config): void {
     const info = sessionInfoOfSession(session, event)
     if (info === undefined) return
     // Not awaited: this listener sits on the event feed, and a turn must not wait
-    // on a tree walk to begin. The guard makes a later tool gate a no-op if this
-    // one is still running, so the two cannot both walk.
+    // on a tree walk to begin. The guard makes a later tool gate join this walk
+    // instead of starting one, so the two cannot both walk.
     void ensureSnapshot(info).catch((error: unknown) => {
       log.warn(`rewind: turn-start snapshot failed: ${messageOf(error)}`)
     })
@@ -831,10 +873,13 @@ export function apply(ctx: Context, config: Config): void {
         log.warn(`rewind: snapshot cleanup failed: ${messageOf(error)}`)
       }
       // The command answers WITHOUT waiting for the blobs to be collected: a
-      // collection is a whole-store scan (2.7 s for the full pass on a store of 577
-      // manifests and 24k blobs, 1.4 s of it pure reading, growing with every session
-      // ever used), and the recall's dialog is on the other side of this answer — it
-      // sat there looking frozen for as long as the scan ran.
+      // collection is a whole-store scan (measured on a store of 577 manifests and
+      // 23,970 blobs: 1.9 s of manifest parsing plus 3.2 s of blob `stat`, about
+      // 5.1 s per pass, growing with every session ever used), and the recall's
+      // dialog is on the other side of this answer — it sat there looking frozen
+      // for as long as the scan ran. This call is deliberately NOT the capture
+      // path's floored request: the recall just orphaned turns and must not wait
+      // for a timer.
       requestGarbageCollection(dshHome, (error: unknown) => {
         log.warn(`rewind: snapshot collection failed: ${messageOf(error)}`)
       }, limits)
@@ -1130,6 +1175,330 @@ async function snapshotDiff(
 }
 
 /**
+ * Maximum characters of ONE side of one file carried in a preview payload.
+ *
+ * The confirmation dialog shows at most 24 diff lines per file (`DiffBlock`
+ * `maxLines`), so whole-file text bought nothing. `/rewind plan <n>` used to put
+ * both sides of EVERY affected file into the command result, and the kernel
+ * appends that text to the session log, where every load replays it: 2,000 files
+ * of 42 KB measured 179.9 MB of payload, +170 MB on the host heap at the
+ * instant, and a 265 ms `JSON.parse` in the transcript row on each render.
+ */
+export const MAX_PREVIEW_SIDE_CHARS = 64 * 1024
+
+/**
+ * Total characters of preview text one payload may carry.
+ *
+ * Spent in the payload's own currency — the JSON-escaped length — so a line
+ * break that will be stored as two characters is charged as two and the bound
+ * holds on what actually reaches the log. Once it is gone, the remaining rows
+ * keep their path and action and carry no text.
+ */
+export const MAX_PREVIEW_TOTAL_CHARS = 4 * 1024 * 1024
+
+/**
+ * Maximum number of files a preview lists individually.
+ *
+ * Past this the dialog would be an unbounded list nobody reads; the count of the
+ * files it does not show travels as `omitted`, and the recall still acts on all
+ * of them.
+ */
+export const MAX_PREVIEW_ROWS = 500
+
+/** One file as `previewRevert` reads it, before the payload budgets apply. */
+export interface PreviewEntry {
+  readonly path: string
+  readonly action: 'restore' | 'remove'
+  readonly current?: string
+  readonly next?: string
+  readonly currentOmitted?: boolean
+  readonly nextOmitted?: boolean
+}
+
+/** The budgets one payload is built under; every field defaults to its cap. */
+export interface PreviewLimits {
+  readonly sideChars?: number
+  readonly totalChars?: number
+  readonly rows?: number
+}
+
+/** One preview payload after the budgets are applied. */
+export interface PreviewPayload {
+  readonly restore: FileChangePreview[]
+  readonly remove: FileChangePreview[]
+  /** Files past the row cap, not listed individually. */
+  readonly omitted: number
+}
+
+/**
+ * The length one string occupies inside the JSON payload.
+ *
+ * `JSON.stringify` is the encoder the command result already goes through, so
+ * measuring with it is the only count that survives escaping: a newline costs
+ * two characters there, six for a control byte.
+ *
+ * @param text - one side of a diff.
+ * @returns its encoded length, without the surrounding quotes.
+ */
+function wireChars(text: string): number {
+  return JSON.stringify(text).length - 2
+}
+
+/**
+ * One capped side of a diff: the text kept, and whether anything was dropped.
+ *
+ * `start` is the offset the window begins at, so a restore row can cut both
+ * sides at the SAME offset and keep them aligned.
+ */
+interface CappedSide {
+  readonly text: string
+  readonly truncated: boolean
+}
+
+/** Whether a UTF-16 code unit is the high half of a surrogate pair. */
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff
+}
+
+/** Whether a UTF-16 code unit is the low half of a surrogate pair. */
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff
+}
+
+/**
+ * Where a window of `limit` characters starting at `start` actually ends.
+ *
+ * The end backs off to the last line start past the window's first quarter, so
+ * the kept text reads as whole lines. `include` is a position the window MUST
+ * contain: the back-off never moves the end at or before it, because a trim that
+ * lands before the first difference would hand the dialog two identical texts.
+ *
+ * @param text - the full side.
+ * @param start - first character of the window.
+ * @param limit - maximum characters to keep.
+ * @param include - an offset the window must keep, when one exists.
+ * @returns the exclusive end offset.
+ */
+function windowEnd(text: string, start: number, limit: number, include?: number): number {
+  let end = Math.min(text.length, start + limit)
+  if (end < text.length) {
+    const boundary = text.lastIndexOf('\n', end - 1)
+    const floor = include === undefined
+      ? start + (limit >> 2)
+      : Math.max(start + (limit >> 2), include)
+    if (boundary >= floor) end = boundary + 1
+  }
+  return end
+}
+
+/**
+ * Slice `limit` characters out of `text` starting at `start`.
+ *
+ * `include` is passed to {@link windowEnd}; the cut never splits a surrogate
+ * pair, because a half pair in the payload reaches the diff view as U+FFFD and
+ * misreports the file's characters.
+ *
+ * @param text - the full side.
+ * @param start - first character to keep.
+ * @param limit - maximum characters to keep.
+ * @param include - an offset the window must keep, when one exists.
+ * @returns the kept text, and whether anything before `start` or after the window
+ *   was dropped.
+ */
+function sliceWindow(text: string, start: number, limit: number, include?: number): CappedSide {
+  // A window that begins on the low half of a pair drops that orphan instead of
+  // shipping it. Both sides of a restore row share the start, and the region
+  // before the first difference is identical, so this adjustment is the same on
+  // both and the diff stays aligned.
+  const from = start > 0 && isLowSurrogate(text.charCodeAt(start)) ? start + 1 : start
+  let end = windowEnd(text, from, limit, include)
+  if (end > from && isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) {
+    end -= 1
+  }
+  return { text: text.slice(from, end), truncated: from > 0 || end < text.length }
+}
+
+/**
+ * The first index at which two strings differ.
+ *
+ * When one is a prefix of the other the answer is the shorter length — the point
+ * where the missing text starts, which is exactly where a diff would begin.
+ *
+ * @param a - one side.
+ * @param b - the other side.
+ * @returns the first differing offset, or `Math.min(a.length, b.length)`.
+ */
+function firstDifference(a: string, b: string): number {
+  const shared = Math.min(a.length, b.length)
+  let at = 0
+  while (at < shared && a.charCodeAt(at) === b.charCodeAt(at)) at += 1
+  return at
+}
+
+/**
+ * Cap the two sides of a restore row, keeping the FIRST DIFFERENCE inside the
+ * window when it would otherwise fall past the cap.
+ *
+ * A prefix-only preview of two files whose first difference falls outside the
+ * prefix window shows two identical texts, and an empty diff beside a "truncated"
+ * label reads as "nothing changed" — the opposite of what the row means. So the
+ * decision is made against the window's REAL end, after its line-boundary
+ * back-off: when the difference is not inside it, the window moves to just before
+ * the difference, with a little leading context, and both sides start at the SAME
+ * offset. The region before the first difference is identical, so one offset
+ * keeps the diff aligned, and the difference itself is passed as a position the
+ * window must keep.
+ *
+ * A difference inside the cap, an identical pair, or a row with only one side of
+ * text all keep the beginning: there is nothing to move towards.
+ *
+ * @param current - the file's current text, when it is readable text.
+ * @param next - the text the recall would write, when it is readable text.
+ * @param limit - the per-side cap.
+ * @returns the capped sides; `undefined` stays `undefined` (that side is marked
+ *   omitted by its caller).
+ */
+function capRestoreSides(
+  current: string | undefined,
+  next: string | undefined,
+  limit: number,
+): { readonly current: CappedSide | undefined, readonly next: CappedSide | undefined } {
+  if (current === undefined || next === undefined) {
+    // One side has no text at all (binary, unreadable): there is no alignment to
+    // keep, so the visible side shows the beginning.
+    return {
+      current: current === undefined ? undefined : sliceWindow(current, 0, limit),
+      next: next === undefined ? undefined : sliceWindow(next, 0, limit),
+    }
+  }
+  // Nothing is truncated, so there is no window to place: the common case, and
+  // it skips the character scan below.
+  if (current.length <= limit && next.length <= limit) {
+    return {
+      current: { text: current, truncated: false },
+      next: { text: next, truncated: false },
+    }
+  }
+  const diffAt = firstDifference(current, next)
+  const identical = diffAt === current.length && diffAt === next.length
+  if (identical) {
+    return { current: sliceWindow(current, 0, limit), next: sliceWindow(next, 0, limit) }
+  }
+  // The prefix window's REAL end, after its line-boundary back-off, on both
+  // sides. Comparing `diffAt` with `limit` alone missed the case that matters:
+  // the back-off can land before the difference (a short-line region followed by
+  // one long line), leaving two identical prefixes beside a "truncated" label.
+  const prefixEnd = Math.min(windowEnd(current, 0, limit), windowEnd(next, 0, limit))
+  if (diffAt < prefixEnd) {
+    return { current: sliceWindow(current, 0, limit), next: sliceWindow(next, 0, limit) }
+  }
+  // A little leading context, then the nearest line start no further back than
+  // that context. Both sides are identical before `diffAt`, so either one gives
+  // the same boundary. `diffAt` itself is passed as a position the window must
+  // keep, so the end's back-off cannot cut the difference away a second time.
+  const context = Math.max(1, limit >> 3)
+  let start = Math.max(0, diffAt - context)
+  const lineStart = current.lastIndexOf('\n', start - 1)
+  if (lineStart >= start - context) start = lineStart + 1
+  // Even a tiny cap must be able to hold the difference itself.
+  if (diffAt - start >= limit) start = Math.max(0, diffAt - limit + 1)
+  return {
+    current: sliceWindow(current, start, limit, diffAt),
+    next: sliceWindow(next, start, limit, diffAt),
+  }
+}
+
+/**
+ * The payload builder: applies the three budgets while the rows arrive.
+ *
+ * Stateful on purpose. `previewRevert` reads one file at a time, and collecting
+ * every row's text first would rebuild the very spike this cap exists to remove:
+ * 2,000 files of 42 KB is 168 MB of strings held before the budget ever looks at
+ * them. `add` caps, stores at most the surviving slice, and drops the rest, so
+ * the live text is bounded by the total budget at every moment.
+ *
+ * Text is charged per ROW, never per side: a row whose two sides do not fit is
+ * listed without text rather than with one side cut by the total budget, because
+ * that seam would show changes nobody made.
+ *
+ * @param limits - the budgets; omitted fields take the exported caps.
+ * @returns the accumulator and its one-shot result.
+ */
+function previewBuilder(limits: PreviewLimits = {}): {
+  add(entry: PreviewEntry): void
+  finish(): PreviewPayload
+} {
+  const sideChars = limits.sideChars ?? MAX_PREVIEW_SIDE_CHARS
+  const totalChars = limits.totalChars ?? MAX_PREVIEW_TOTAL_CHARS
+  const maxRows = Math.max(0, Math.trunc(limits.rows ?? MAX_PREVIEW_ROWS))
+  const restore: FileChangePreview[] = []
+  const remove: FileChangePreview[] = []
+  let seen = 0
+  let remaining = Math.max(0, totalChars)
+  return {
+    add(entry: PreviewEntry): void {
+      seen += 1
+      // The row cap is applied before any text is examined, so files past it cost
+      // a path and a counter, not a slice of their content.
+      if (restore.length + remove.length >= maxRows) return
+      const base = {
+        path: entry.path,
+        action: entry.action,
+        ...(entry.currentOmitted === true ? { currentOmitted: true } : {}),
+        ...(entry.nextOmitted === true ? { nextOmitted: true } : {}),
+      }
+      // A restore row caps its two sides together, so a difference past the cap
+      // still lands inside one aligned window; a remove row has one side only.
+      const sides = entry.action === 'restore'
+        ? capRestoreSides(entry.current, entry.next, sideChars)
+        : {
+            current: entry.current === undefined ? undefined : sliceWindow(entry.current, 0, sideChars),
+            next: undefined,
+          }
+      const current = sides.current
+      const next = sides.next
+      const cost = (current === undefined ? 0 : wireChars(current.text))
+        + (next === undefined ? 0 : wireChars(next.text))
+      const fits = cost <= remaining
+      const row: FileChangePreview = fits
+        ? {
+            ...base,
+            ...(current === undefined ? {} : { current: current.text }),
+            ...(next === undefined ? {} : { next: next.text }),
+            ...(current?.truncated === true ? { currentTruncated: true } : {}),
+            ...(next?.truncated === true ? { nextTruncated: true } : {}),
+          }
+        : { ...base, textOmitted: true }
+      if (fits) remaining -= cost
+      if (entry.action === 'restore') restore.push(row)
+      else remove.push(row)
+    },
+    finish(): PreviewPayload {
+      return { restore, remove, omitted: seen - restore.length - remove.length }
+    },
+  }
+}
+
+/**
+ * Apply the three preview budgets to a materialised row list.
+ *
+ * The testable face of {@link previewBuilder}; `previewRevert` uses the builder
+ * itself so it never holds every file's text at once.
+ *
+ * @param entries - the affected files, in the recall's own order.
+ * @param limits - the budgets; omitted fields take the exported caps.
+ * @returns the listed rows per action, plus how many files were left out.
+ */
+export function previewPayload(
+  entries: readonly PreviewEntry[],
+  limits: PreviewLimits = {},
+): PreviewPayload {
+  const builder = previewBuilder(limits)
+  for (const entry of entries) builder.add(entry)
+  return builder.finish()
+}
+
+/**
  * Describe what a recall would do to the tree, WITHOUT doing it.
  *
  * This is what the confirmation dialog renders. It reads the current bytes of each
@@ -1137,10 +1506,22 @@ async function snapshotDiff(
  * path list — the difference between asking a user to approve a described change
  * and asking them to approve a mystery.
  *
- * The read is best-effort per file: a file that cannot be read now is still
+ * The read is best-effort per file: a file that cannot be READ now is still
  * listed for restore, with no diff, because refusing to preview it would hide a
  * change the recall is about to make. Binary content has no diff to show — the
- * kernel's own diff view is text — so those rows carry paths only.
+ * kernel's own diff view is text — so those rows carry paths only. Both cases
+ * are MARKED (`currentOmitted` / `nextOmitted`), because a bare path that says
+ * nothing is exactly what a user reads as "nothing changed here".
+ *
+ * A file that no longer EXISTS is not one of those cases: the recall recreates
+ * it, so its current side is the empty string and the diff shows the whole file
+ * as added. Marking it `currentOmitted` would hide a real deletion behind
+ * "not previewed".
+ *
+ * What travels is bounded by {@link MAX_PREVIEW_SIDE_CHARS},
+ * {@link MAX_PREVIEW_TOTAL_CHARS} and {@link MAX_PREVIEW_ROWS}: this payload is
+ * appended to the session log as the command's result text, so its size is not
+ * a display concern but a storage one.
  *
  * @param session - the session being recalled.
  * @param sessionId - the session being recalled, by id.
@@ -1162,40 +1543,55 @@ async function previewRevert(
   coverage: RevertCoverage
   coverageReason?: string
   tools?: readonly string[]
+  omitted?: number
 }> {
   const { snapshot, diff } = await snapshotDiff(sessionId, plan, limits)
   const { targets, missed } = mergeTargets(sessionId, plan.turns, recorder, diff)
-  const restore: FileChangePreview[] = []
-  const remove: FileChangePreview[] = []
+  // Rows are added one at a time, so a file's text is capped and either kept or
+  // dropped before the next file is read; nothing accumulates above the budget.
+  const preview = previewBuilder()
   for (const target of targets) {
     const current = await captureBefore(target.path)
-    const now = current.kind === 'captured' ? current.before : undefined
-    const nowText = textOf(now)
-    const nextText = textOf(target.before)
+    // Three outcomes, not two. `captured` with a null image is a file that is
+    // GONE — a deletion inside the range, which the recall undoes — so its diff is
+    // "empty -> the old bytes" and it must be previewed like any other change.
+    // Only a file that EXISTS but yields no text (binary, unreadable, over the
+    // capture cap) is `currentOmitted`; hiding that diff would be the honest
+    // "cannot show this" case, while hiding the deletion would misread as "no
+    // change".
+    const missing = current.kind === 'captured' && current.before === null
+    const nowText = missing ? '' : textOf(current.kind === 'captured' ? current.before : undefined)
+    const currentOmitted = !missing && nowText === undefined
     if (target.before === null) {
       // The range created it; the recall moves it into the quarantine.
-      remove.push({
+      preview.add({
         path: target.path,
         action: 'remove',
         ...(nowText === undefined ? {} : { current: nowText }),
+        ...(currentOmitted ? { currentOmitted: true } : {}),
       })
       continue
     }
-    restore.push({
+    const nextText = textOf(target.before)
+    preview.add({
       path: target.path,
       action: 'restore',
       ...(nowText === undefined ? {} : { current: nowText }),
       ...(nextText === undefined ? {} : { next: nextText }),
+      ...(currentOmitted ? { currentOmitted: true } : {}),
+      ...(nextText === undefined ? { nextOmitted: true } : {}),
     })
   }
+  const payload = preview.finish()
   const cover = coverageOf(session, plan, snapshot, recorder.trimmedThroughSeq())
   return {
-    restore,
-    remove,
+    restore: payload.restore,
+    remove: payload.remove,
     unrestorable: missed,
     coverage: cover.coverage,
     ...(cover.reason === undefined ? {} : { coverageReason: cover.reason }),
     ...(cover.tools === undefined ? {} : { tools: cover.tools }),
+    ...(payload.omitted === 0 ? {} : { omitted: payload.omitted }),
   }
 }
 

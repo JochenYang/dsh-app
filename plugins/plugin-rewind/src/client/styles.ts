@@ -166,6 +166,20 @@ const cssText = `
   font-size: 13px;
   color: var(--dsw-alias-label-primary);
 }
+/*
+ * A row's own note about its preview: "truncated" or "not previewed".
+ *
+ * It sits inline after the path, so it belongs to that row rather than to the
+ * dialog's note below, and it stays short because the path takes the remaining
+ * width. The warn colour is deliberate: both tags mean the diff is missing part
+ * of the file, which is a shortfall even though the recall still does the work.
+ */
+.dshRewind-fileTag {
+  flex: none;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-warn-label);
+}
 
 
 /*

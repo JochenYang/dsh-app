@@ -16,14 +16,15 @@
  */
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { Session } from '@deepseek-ai/dsh-session'
-import { apply, type Config } from '../src/index.ts'
+import { apply, MAX_PREVIEW_SIDE_CHARS, type Config } from '../src/index.ts'
 import type { RewindParticipantRegistry } from '../src/participants.ts'
+import { readSnapshot } from '../src/trees.ts'
 
 /** A workspace and a `$DSH_HOME`, both removed by the caller. */
 function scratch(): { work: string, home: string } {
@@ -290,6 +291,137 @@ test('the preview lists what the recall will do, and changes nothing', async () 
   assert.equal(planned.coverage, 'full')
   assert.equal(readFileSync(join(work, 'note.md'), 'utf8'), 'SHELL EDIT', 'a preview must not change anything')
   assert.equal(existsSync(join(work, 'created.txt')), true)
+  // A small preview keeps the exact shape it had before the budgets: no marker
+  // field on a row (which would render a needless label), no `omitted` count on
+  // the plan (which would print "0 more files"), and the same key set the client
+  // already reads.
+  assert.deepEqual(
+    Object.keys(planned.restore?.[0] ?? {}),
+    ['path', 'action', 'current', 'next'],
+    'a row that needed no cap must gain no field',
+  )
+  assert.deepEqual(
+    Object.keys(planned as Record<string, unknown>),
+    ['code', 'ok', 'n', 'prompt', 'stoppedAtCompaction', 'restore', 'remove', 'unrestorable', 'coverage', 'tools'],
+    'a fully listed plan must gain no omitted count',
+  )
+  assert.equal('omitted' in (planned as Record<string, unknown>), false)
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a large file previews each side up to the cap and marks it truncated', async () => {
+  // The dialog renders 24 diff lines at most, so whole-file text was pure payload
+  // weight — and that payload is appended to the session log verbatim. This pins
+  // the host's own wiring of the per-side cap, not just the pure helper.
+  const { work, home } = scratch()
+  const line = `${'x'.repeat(79)}\n`
+  const big = line.repeat(1_400)
+  writeFileSync(join(work, 'a.ts'), big)
+  writeFileSync(join(work, 'b.ts'), big)
+  process.env.DSH_HOME = home
+  const { host, handler } = mount()
+  const target = session('probe-plan-big', work)
+  openTurn(target, 1, 'rewrite both files')
+  await toolGate(host, target, 'pwsh')
+  toolCall(target, 1, 'pwsh')
+  writeFileSync(join(work, 'a.ts'), big.replaceAll('x', 'y'))
+  writeFileSync(join(work, 'b.ts'), big.replaceAll('x', 'z'))
+  closeTurn(target, 1)
+  await settle()
+
+  const planned = report(await handler({ rawInput: 'plan 1', agent: { session: target, status: 'idle' } })) as {
+    restore?: readonly {
+      path: string
+      current?: string
+      next?: string
+      currentTruncated?: boolean
+      nextTruncated?: boolean
+    }[]
+  }
+  assert.equal(planned.restore?.length, 2)
+  for (const row of planned.restore ?? []) {
+    assert.ok(row.current !== undefined, `${row.path}: the current side is still shown`)
+    assert.ok(row.next !== undefined, `${row.path}: the restored side is still shown`)
+    assert.ok(row.current.length <= MAX_PREVIEW_SIDE_CHARS, `${row.path}: current is over the cap`)
+    assert.ok(row.next.length <= MAX_PREVIEW_SIDE_CHARS, `${row.path}: next is over the cap`)
+    assert.equal(row.currentTruncated, true)
+    assert.equal(row.nextTruncated, true)
+  }
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a binary file is marked as not previewable instead of silently showing a path', async () => {
+  // Before the markers, a file whose text cannot be decoded produced a row with a
+  // path and nothing else — which reads as "this file is unchanged", the opposite
+  // of what the row means. The recall still restores it; only the diff is absent.
+  const { work, home } = scratch()
+  const before = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x00, 0x11])
+  const after = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x00, 0x99])
+  writeFileSync(join(work, 'sprite.png'), before)
+  process.env.DSH_HOME = home
+  const { host, handler } = mount()
+  const target = session('probe-plan-binary', work)
+  openTurn(target, 1, 'regenerate the sprite sheet')
+  await toolGate(host, target, 'pwsh')
+  toolCall(target, 1, 'pwsh')
+  writeFileSync(join(work, 'sprite.png'), after)
+  closeTurn(target, 1)
+  await settle()
+
+  const planned = report(await handler({ rawInput: 'plan 1', agent: { session: target, status: 'idle' } })) as {
+    restore?: readonly {
+      path: string
+      current?: string
+      next?: string
+      currentOmitted?: boolean
+      nextOmitted?: boolean
+    }[]
+  }
+  const row = planned.restore?.find((candidate) => candidate.path === join(work, 'sprite.png'))
+  assert.ok(row !== undefined, 'the binary file is still listed for restore')
+  assert.equal(row.currentOmitted, true)
+  assert.equal(row.nextOmitted, true)
+  assert.equal(row.current, undefined)
+  assert.equal(row.next, undefined)
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a file deleted in the range previews as empty -> old bytes, not as not-previewable', async () => {
+  // A deletion inside the range is a change the recall undoes. Treated as "no
+  // text could be produced", it lost its diff affordance and read as "not
+  // previewed"; the right preview is the whole file shown as added.
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'gone.md'), 'ORIGINAL CONTENT')
+  process.env.DSH_HOME = home
+  const { host, handler } = mount()
+  const target = session('probe-plan-deleted', work)
+  openTurn(target, 1, 'delete it')
+  await toolGate(host, target, 'pwsh')
+  toolCall(target, 1, 'pwsh')
+  await rm(join(work, 'gone.md'), { force: true })
+  closeTurn(target, 1)
+  await settle()
+
+  const planned = report(await handler({ rawInput: 'plan 1', agent: { session: target, status: 'idle' } })) as {
+    restore?: readonly {
+      path: string
+      current?: string
+      next?: string
+      currentOmitted?: boolean
+      nextOmitted?: boolean
+      textOmitted?: boolean
+    }[]
+  }
+  const row = planned.restore?.find((candidate) => candidate.path === join(work, 'gone.md'))
+  assert.ok(row !== undefined, 'a deleted file is still listed for restore')
+  assert.equal(row.current, '', 'the current side is empty, so the diff shows the whole file as added')
+  assert.equal(row.next, 'ORIGINAL CONTENT')
+  assert.equal(row.currentOmitted, undefined, 'a gone file is not an unreadable one')
+  assert.equal(row.nextOmitted, undefined)
+  assert.equal(row.textOmitted, undefined)
   await rm(work, { recursive: true, force: true })
   await rm(home, { recursive: true, force: true })
 })
@@ -698,4 +830,199 @@ test('a messages-only preview reports NO file effect, so the dialog cannot overs
   assert.deepEqual(messagesOnly.restore, [], 'the messages-only preview listed a file it will not touch')
   assert.deepEqual(messagesOnly.remove, [])
   assert.equal(messagesOnly.skipped, true)
+})
+
+// --- The capture gate's turn rule. ---
+//
+// A snapshot only ever describes a turn's START. The claim is released when a
+// walk comes back incomplete so the first tool gate can retry — and that release
+// used to reopen the door for EVERY later tool gate, so the manifest was walked
+// again after tools had already written, and `latestSnapshotBefore` then handed
+// a mid-turn tree to a recall as the range's starting point. On a repository
+// whose snapshot is never complete (this one: 61,788 files / 4.2 GB in scope,
+// 499 of 1,013 manifests partial) it also paid a walk plus a copy at every tool
+// call.
+
+/** Drive the turn boundary the way the session's own event feed does. */
+function turnStart(host: Context, target: Session, turn: number): void {
+  host.emit('session/event' as never, target as never, { type: 'turn/start', data: { turn } } as never)
+}
+
+/** A workspace whose every capture is partial: the walk stops on `file-count`. */
+function partialWork(): { work: string, home: string } {
+  const { work, home } = scratch()
+  for (let i = 0; i < 3; i += 1) {
+    writeFileSync(join(work, `f${String(i)}.ts`), `export const v = ${String(i)}\n`)
+  }
+  return { work, home }
+}
+
+test('a partial turn-start snapshot is retried by the FIRST tool gate', async () => {
+  const { work, home } = partialWork()
+  process.env.DSH_HOME = home
+  const { host } = mount(config({ maxSnapshotFiles: 1 }))
+  const target = session('probe-gate-retry', work)
+  // The gate derives its turn from the session LOG (`turnAt`), so the turn has to
+  // exist there; the emit is what drives the boundary listener itself.
+  openTurn(target, 1, 'first')
+  turnStart(host, target, 1)
+  await settle()
+  const first = await readSnapshot(home, 'probe-gate-retry', 1)
+  assert.ok(first !== undefined, 'the turn boundary captured')
+  assert.equal(first.complete, false, 'the cap must leave it partial for this case')
+
+  // No tool has run yet, so a cold-disk partial walk is worth one more attempt:
+  // that is the recovery path this gate exists for.
+  await toolGate(host, target, 'write')
+  const second = await readSnapshot(home, 'probe-gate-retry', 1)
+  assert.ok(second !== undefined)
+  assert.notEqual(second.at, first.at, 'the first tool gate retried the partial walk')
+  assert.equal(second.complete, false, 'the retry is still partial — the cap did not move')
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('once a tool of the turn has run, a partial snapshot is never re-captured', async () => {
+  const { work, home } = partialWork()
+  process.env.DSH_HOME = home
+  const { host } = mount(config({ maxSnapshotFiles: 1 }))
+  const target = session('probe-gate-once', work)
+  openTurn(target, 1, 'first')
+  turnStart(host, target, 1)
+  await settle()
+  await toolGate(host, target, 'write')
+  const settled = await readSnapshot(home, 'probe-gate-once', 1)
+  assert.ok(settled !== undefined)
+  assert.equal(settled.complete, false, 'the fixture must stay partial')
+
+  // A tool of this turn has RUN. A new walk now records a mid-turn tree under
+  // turn 1, which a recall of turn 1 would hand back as its starting state, so
+  // the manifest must keep exactly what it has.
+  await settle()
+  await toolGate(host, target, 'pwsh')
+  const after = await readSnapshot(home, 'probe-gate-once', 1)
+  assert.ok(after !== undefined)
+  assert.equal(after.at, settled.at, 'the capture was re-taken after a tool of the turn ran')
+  assert.deepEqual(after.entries, settled.entries)
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a tool gate joins a capture already claimed instead of starting another', async () => {
+  // The one case where the rule WAITS rather than skips: a claim exists (the turn
+  // boundary's walk is still reading), so the tool must not write beside it. The
+  // fixture's files are big enough that the walk outlives the gate's own return
+  // by far when it is NOT joined, which is what the assertion below detects.
+  const { work, home } = scratch()
+  const outside = mkdtempSync(join(tmpdir(), 'rewind-gate-out-'))
+  const payload = 'z'.repeat(3 * 1024 * 1024)
+  for (let i = 0; i < 12; i += 1) {
+    writeFileSync(join(work, `b${String(i)}.bin`), `${String(i).padStart(2, '0')}${payload.slice(2)}`)
+  }
+  try {
+    symlinkSync(outside, join(work, 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
+  } catch {
+    // A platform that will not let this process create a link: the partial
+    // snapshot this case needs cannot be built here.
+    await rm(work, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+    return
+  }
+  process.env.DSH_HOME = home
+  const { host } = mount()
+  const target = session('probe-gate-join', work)
+  openTurn(target, 1, 'first')
+
+  turnStart(host, target, 1)
+  await settle(600)
+  await toolGate(host, target, 'write')
+  const settled = await readSnapshot(home, 'probe-gate-join', 1)
+  assert.ok(settled !== undefined)
+  assert.equal(settled.complete, false, 'the link is what leaves the claim released')
+
+  // A second turn boundary starts a slow walk and does not await it. A tool of
+  // the turn has already run, so the gate must JOIN that walk: wait for it, and
+  // not walk again. Both halves are observed here — the gate must still be
+  // pending when the in-flight walk writes its manifest, and that exact manifest
+  // must be the one on disk afterwards. A second walk would replace it with a
+  // later `at`, which `joined.at !== settled.at` alone would have accepted.
+  turnStart(host, target, 1)
+  let gateResolved = false
+  const gate = toolGate(host, target, 'pwsh').then(() => { gateResolved = true })
+  let inflightAt: number | undefined
+  const deadline = Date.now() + 20_000
+  while (Date.now() < deadline) {
+    const now = await readSnapshot(home, 'probe-gate-join', 1)
+    if (now !== undefined && now.at !== settled.at) {
+      inflightAt = now.at
+      break
+    }
+    assert.equal(gateResolved, false, 'the gate resolved before the in-flight walk wrote: it skipped instead of joining')
+    await settle(5)
+  }
+  await gate
+  assert.ok(inflightAt !== undefined, 'the in-flight walk wrote its manifest while the gate was pending')
+  const joined = await readSnapshot(home, 'probe-gate-join', 1)
+  assert.ok(joined !== undefined)
+  assert.equal(joined.at, inflightAt, 'no second walk replaced the manifest the gate joined')
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+  await rm(outside, { recursive: true, force: true })
+})
+
+test('a new turn is captured again', async () => {
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'a.ts'), 'v0')
+  process.env.DSH_HOME = home
+  const { host } = mount()
+  const target = session('probe-gate-turn', work)
+  openTurn(target, 1, 'first')
+  await toolGate(host, target, 'write')
+  const turn1 = await readSnapshot(home, 'probe-gate-turn', 1)
+  assert.ok(turn1 !== undefined)
+  assert.equal(turn1.complete, true)
+  await settle()
+  await toolGate(host, target, 'write')
+  assert.equal((await readSnapshot(home, 'probe-gate-turn', 1))?.at, turn1.at, 'the finished turn is not walked again')
+
+  writeFileSync(join(work, 'a.ts'), 'v1')
+  openTurn(target, 2, 'second')
+  await toolGate(host, target, 'write')
+  const turn2 = await readSnapshot(home, 'probe-gate-turn', 2)
+  assert.ok(turn2 !== undefined, 'a new turn gets its own snapshot')
+  assert.equal(turn2.complete, true)
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a first attempt that throws is retried by the first tool gate', async () => {
+  const { work, home } = scratch()
+  writeFileSync(join(work, 'a.ts'), 'CONTENT')
+  process.env.DSH_HOME = home
+  // A file where the manifest directory has to be: the capture stores its blobs
+  // and then fails to write, which is the failure the turn-start path logs.
+  mkdirSync(join(home, 'storages', 'dsh-app-plugin-rewind'), { recursive: true })
+  const blocker = join(home, 'storages', 'dsh-app-plugin-rewind', 'trees')
+  writeFileSync(blocker, 'not a directory')
+  const { host, warnings } = mount()
+  const target = session('probe-gate-throw', work)
+  openTurn(target, 1, 'first')
+
+  turnStart(host, target, 1)
+  await settle(150)
+  assert.ok(
+    warnings.some((line) => line.includes('turn-start snapshot failed')),
+    'the turn-start attempt failed and said so',
+  )
+  assert.equal(await readSnapshot(home, 'probe-gate-throw', 1), undefined)
+
+  await rm(blocker)
+  // No tool has run yet, so the failure is the other case worth one retry.
+  await toolGate(host, target, 'write')
+  const snapshot = await readSnapshot(home, 'probe-gate-throw', 1)
+  assert.ok(snapshot !== undefined, 'the first tool gate recovered the snapshot')
+  assert.equal(snapshot.complete, true)
+  await rm(work, { recursive: true, force: true })
+  await rm(home, { recursive: true, force: true })
 })

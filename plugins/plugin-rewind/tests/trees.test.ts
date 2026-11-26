@@ -46,6 +46,7 @@ import {
   pathKey,
   pruneSnapshots,
   readSnapshot,
+  requestCaptureCollection,
   requestGarbageCollection,
   treesRoot,
   type TreeLimits,
@@ -90,6 +91,14 @@ function blobCount(home: string): number {
   let total = 0
   for (const prefix of readdirSync(root)) total += readdirSync(join(root, prefix)).length
   return total
+}
+
+/** Store bytes no manifest names, which only a collection pass removes. */
+function plantOrphan(home: string, prefix: string): string {
+  const path = join(blobsRoot(home), prefix, `${prefix}${'0'.repeat(62)}`)
+  mkdirSync(join(blobsRoot(home), prefix), { recursive: true })
+  writeFileSync(path, 'ORPHAN')
+  return path
 }
 
 /** A symlink to a directory, spelled the way the platform allows. */
@@ -311,6 +320,88 @@ test('the newest manifest before a turn is what a capture reuses', async () => {
   await cleanup(root, home)
 })
 
+test('a capture past its copy deadline stores nothing more and still carries the unchanged files', async () => {
+  // The walk's own bound was honoured from the start; the copy phase that
+  // follows it was not, so a 2000-file copy ran to completion against a 50 ms
+  // budget (measured 842 ms, `entries 2000/2000`). This pins the stop — no read,
+  // no blob — and the part a partial snapshot must keep: every file that did not
+  // move is still carried forward from the previous manifest.
+  const { root, home } = scratch()
+  const names: string[] = []
+  for (let i = 0; i < 1000; i += 1) {
+    const name = `f${String(i).padStart(5, '0')}.txt`
+    names.push(name)
+    writeFileSync(join(root, name), `content ${String(i)}\n`)
+  }
+  const first = await captureWorkspace(home, 's', 1, root, limits())
+  assert.equal(Object.keys(first.entries).length, 1000)
+  const blobsAfterFirst = blobCount(home)
+  // Every second file moves, to a different SIZE: a same-size rewrite can land
+  // inside one filesystem timestamp tick and be carried as unchanged.
+  for (let i = 0; i < names.length; i += 2) writeFileSync(join(root, names[i]), `changed ${String(i)}\n`)
+
+  const second = await captureWorkspace(home, 's', 2, root, limits({ maxWalkMs: 40 }), first)
+  assert.equal(second.complete, false, 'a stopped copy is a partial snapshot')
+  assert.equal(second.reason, 'timeout')
+  const changed = names.filter((_name, index) => index % 2 === 0)
+  const unchanged = names.filter((_name, index) => index % 2 === 1)
+  for (const name of unchanged) {
+    assert.deepEqual(second.entries[name], first.entries[name], `${name} did not move, so it is carried without I/O`)
+  }
+  const stored = changed.filter((name) => second.entries[name] !== undefined)
+  assert.ok(stored.length > 0, 'the copy runs until its own bound')
+  assert.ok(
+    stored.length < changed.length,
+    `the copy stopped early (${String(stored.length)} of ${String(changed.length)} changed files)`,
+  )
+  assert.equal(blobCount(home) - blobsAfterFirst, stored.length, 'no blob is stored for a file the stop skipped')
+  for (const name of changed) {
+    if (second.entries[name] === undefined) {
+      assert.equal(second.uncaptured[name], undefined, 'a skipped file is left out of both maps, not mislabelled')
+    }
+  }
+  await cleanup(root, home)
+})
+
+test('an abort stops the copy instead of finishing it', async () => {
+  // The copy loop used to set `reason` on an abort and then read and store every
+  // remaining file. A real controller cannot be fired at a chosen point inside
+  // the loop from a test, so this signal reports itself aborted from its third
+  // read on: the walk checks it once per directory (this fixture is one
+  // directory), the copy loop's first check is the next one, and the one after
+  // that must stop the loop.
+  const { root, home } = scratch()
+  for (let i = 0; i < 6; i += 1) writeFileSync(join(root, `f${String(i)}.txt`), `content ${String(i)}\n`)
+  let reads = 0
+  const signal = {
+    get aborted() {
+      reads += 1
+      return reads > 2
+    },
+  } as unknown as AbortSignal
+  const snapshot = await captureWorkspace(home, 's', 1, root, limits(), undefined, signal)
+  assert.equal(snapshot.complete, false)
+  assert.equal(snapshot.reason, 'cancelled')
+  assert.equal(Object.keys(snapshot.entries).length, 1, 'the file in flight when the abort landed, and nothing after it')
+  assert.equal(blobCount(home), 1, 'and no bytes stored for the files it never reached')
+  await cleanup(root, home)
+})
+
+test('a walk stopped on its own bound still copies the files it reached, within the copy budget', async () => {
+  // `total-bytes` is about what the walk may LOOK at, not about the copy: the
+  // files it reached are still copied, as far as the copy phase's own deadline
+  // and abort allow. That behaviour must survive the copy getting a stop of its
+  // own — which is why the two are separate flags.
+  const { root, home } = scratch()
+  for (let i = 0; i < 6; i += 1) writeFileSync(join(root, `f${String(i)}.txt`), `${String(i).padStart(2, '0')}${'x'.repeat(62)}`)
+  const snapshot = await captureWorkspace(home, 's', 1, root, limits({ maxTotalBytes: 200 }))
+  assert.equal(snapshot.reason, 'total-bytes')
+  assert.equal(snapshot.complete, false)
+  assert.equal(Object.keys(snapshot.entries).length, 3, 'the three files the walk reached before its cap')
+  assert.equal(blobCount(home), 3, 'and each of them is stored')
+  await cleanup(root, home)
+})
+
 test('dropping a turn collects the blobs nothing references any more', async () => {
   const { root, home } = scratch()
   writeFileSync(join(root, 'a.txt'), 'A')
@@ -424,11 +515,31 @@ test('source rule: the manifest commit and the collection pass share one gate', 
   }
 })
 
+test('source rule: the capture path asks on the interval floor, never unconditionally', () => {
+  // `ensureSnapshot` is not exported, so the WIRING that used to request a
+  // whole-store pass after every capture cannot be driven here; the floor's
+  // behaviour is covered above. This pins the call itself — the regression is one
+  // edit away and would be silent, because a pass that runs early is correct,
+  // just slow. In particular it must not read a prune's drop count and turn it
+  // into an immediate pass: a capped session drops one manifest per capture.
+  const text = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8').replace(/\r\n/gu, '\n')
+  assert.match(text, /await pruneSnapshots\(dshHome, info\.id, limits\)/u)
+  assert.match(text, /requestCaptureCollection\(dshHome, \(error: unknown\) =>/u)
+  assert.doesNotMatch(
+    text,
+    /pruneSnapshots\([^\n]*\)[\s\S]{0,400}?requestGarbageCollection\(/u,
+    'a capture must go through the floored request, not call the collector directly',
+  )
+})
+
 test('the retention cap keeps the newest manifests and collects what it drops', async () => {
   const { root, home } = scratch()
   writeFileSync(join(root, 'a.txt'), 'v0')
   for (let turn = 1; turn <= 4; turn += 1) {
-    writeFileSync(join(root, 'a.txt'), `v${String(turn)}`)
+    // A different SIZE per turn: a same-size rewrite can land inside one
+    // filesystem timestamp tick and be carried as unchanged (measured here: one
+    // run recorded 3 blobs for 4 turns, all two-byte values).
+    writeFileSync(join(root, 'a.txt'), `v${'x'.repeat(turn)}`)
     await captureWorkspace(home, 's', turn, root, limits(), await latestSnapshotBefore(home, 's', turn))
   }
   assert.equal(blobCount(home), 4)
@@ -439,6 +550,121 @@ test('the retention cap keeps the newest manifests and collects what it drops', 
   assert.ok(await readSnapshot(home, 's', 3) !== undefined, 'the newest are kept')
   assert.ok(await readSnapshot(home, 's', 4) !== undefined)
   assert.equal(blobCount(home), 2, 'the blobs only the dropped turns referenced are collected')
+  await cleanup(root, home)
+})
+
+test('a prune inside the collection interval does not scan the store', async () => {
+  // A session at its retention cap prunes ONE manifest on every capture, so a
+  // prune count that forced an immediate pass put a whole-store scan behind every
+  // turn of a long session again. The capture path shares one floor for both the
+  // prune-dropped and the fallback case.
+  const { root, home } = scratch()
+  writeFileSync(join(root, 'a.txt'), 'v0')
+  for (let turn = 1; turn <= 4; turn += 1) {
+    // A different SIZE per turn: a same-size rewrite can land inside one
+    // filesystem timestamp tick and be carried as unchanged.
+    writeFileSync(join(root, 'a.txt'), `v${'x'.repeat(turn)}`)
+    await captureWorkspace(home, 's', turn, root, limits(), await latestSnapshotBefore(home, 's', turn))
+  }
+  assert.equal(blobCount(home), 4)
+  const hour = 60 * 60 * 1000
+  // A pass just finished, so the floor is not due for an hour.
+  await collect(home, limits({ minCollectionIntervalMs: hour }))
+  assert.equal(blobCount(home), 4, 'nothing is orphaned yet')
+
+  const dropped = await pruneSnapshots(home, 's', limits({ maxSnapshotsPerSession: 2 }))
+  assert.equal(dropped, 2, 'the two oldest manifests are what it reports dropping')
+  assert.equal(await pruneSnapshots(home, 's', limits({ maxSnapshotsPerSession: 2 })), 0, 'and nothing on a second pass')
+
+  requestCaptureCollection(home, () => {}, limits({ minCollectionIntervalMs: hour }))
+  await drainGarbageCollection(home)
+  assert.equal(blobCount(home), 4, "the dropped turns' blobs stay until the floor passes")
+  await cleanup(root, home)
+})
+
+test('once the interval has passed, a capped session\'s prune is collected', async () => {
+  const { root, home } = scratch()
+  writeFileSync(join(root, 'a.txt'), 'v0')
+  for (let turn = 1; turn <= 4; turn += 1) {
+    writeFileSync(join(root, 'a.txt'), `v${'x'.repeat(turn)}`)
+    await captureWorkspace(home, 's', turn, root, limits(), await latestSnapshotBefore(home, 's', turn))
+  }
+  const hour = 60 * 60 * 1000
+  await collect(home, limits({ minCollectionIntervalMs: hour }))
+  const dropped = await pruneSnapshots(home, 's', limits({ maxSnapshotsPerSession: 2 }))
+  assert.equal(dropped, 2)
+
+  // A zero interval means the floor has passed; the next capture request runs.
+  requestCaptureCollection(home, () => {}, limits({ minCollectionIntervalMs: 0 }))
+  await drainGarbageCollection(home)
+  assert.equal(blobCount(home), 2, "the dropped turns' blobs are collected")
+  await cleanup(root, home)
+})
+
+test('the recall path is not floored: a direct request collects at once', async () => {
+  // A recall just orphaned turns, so it must not wait for the capture path's
+  // interval; it calls `requestGarbageCollection` itself.
+  const { root, home } = scratch()
+  writeFileSync(join(root, 'a.txt'), 'A')
+  await captureWorkspace(home, 's', 1, root, limits())
+  const hour = 60 * 60 * 1000
+  await collect(home, limits({ minCollectionIntervalMs: hour }))
+
+  const orphan = plantOrphan(home, 'cc')
+  requestGarbageCollection(home, () => {}, limits({ minCollectionIntervalMs: hour }))
+  await drainGarbageCollection(home)
+  assert.equal(existsSync(orphan), false, 'a recall bypasses the interval floor')
+  await cleanup(root, home)
+})
+
+test('a pass that throws does not start the interval clock, so the next request retries', async () => {
+  const { root, home } = scratch()
+  writeFileSync(join(root, 'a.txt'), 'A')
+  await captureWorkspace(home, 's', 1, root, limits())
+  const hour = 60 * 60 * 1000
+  // A retention getter that throws: `collectOnce` reads it after it has read the
+  // manifests, so the pass fails the way an unreadable store would.
+  const broken = limits({ minCollectionIntervalMs: hour })
+  Object.defineProperty(broken, 'maxManifestAgeMs', {
+    get() { throw new Error('manifest store unreadable') },
+  })
+  const reported: unknown[] = []
+  requestGarbageCollection(home, (error) => { reported.push(error) }, broken)
+  await assert.rejects(drainGarbageCollection(home), /manifest store unreadable/u)
+  assert.equal(reported.length, 1, 'the failure is reported once, through the caller\'s logger')
+
+  // The clock was not stamped by the failed pass, so a capture request inside the
+  // hour still runs — a failed collection is retried, not silently skipped.
+  const orphan = plantOrphan(home, 'dd')
+  requestCaptureCollection(home, () => {}, limits({ minCollectionIntervalMs: hour }))
+  await drainGarbageCollection(home)
+  assert.equal(existsSync(orphan), false, 'the next request was not blocked by the failed pass')
+  await cleanup(root, home)
+})
+
+test('a capture that drops no manifest leaves the store to the interval floor', async () => {
+  // A pass is 1.9 s of manifest parsing plus 3.2 s of `stat` on a real store, and
+  // it holds the collection gate a capture has to wait for. So the no-drop path
+  // must not scan at all — except for the fallback that reclaims the orphans a
+  // FAILED capture leaves behind, which no prune ever sees.
+  const { root, home } = scratch()
+  writeFileSync(join(root, 'a.txt'), 'A')
+  await captureWorkspace(home, 's', 1, root, limits())
+  const hour = 60 * 60 * 1000
+
+  const first = plantOrphan(home, 'aa')
+  requestCaptureCollection(home, () => {}, limits({ minCollectionIntervalMs: hour }))
+  await drainGarbageCollection(home)
+  assert.equal(existsSync(first), false, 'the first fallback for a home is due')
+
+  const second = plantOrphan(home, 'bb')
+  requestCaptureCollection(home, () => {}, limits({ minCollectionIntervalMs: hour }))
+  await drainGarbageCollection(home)
+  assert.ok(existsSync(second), 'the interval has not passed, so nothing scans the store')
+
+  requestCaptureCollection(home, () => {}, limits({ minCollectionIntervalMs: 0 }))
+  await drainGarbageCollection(home)
+  assert.equal(existsSync(second), false, 'a due fallback reclaims it')
   await cleanup(root, home)
 })
 

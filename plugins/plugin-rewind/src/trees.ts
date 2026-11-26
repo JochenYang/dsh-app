@@ -36,8 +36,11 @@
  * A workspace can be arbitrarily large. The walk is bounded by file count, total
  * bytes, per-file bytes, a deadline AND the caller's abort signal, and a skipped
  * directory list (dependency/VCS/cache directories — never build output, which a
- * recall must be able to put back). When a bound is hit the snapshot is marked
- * INCOMPLETE and the recall says so.
+ * recall must be able to put back). The copy phase that follows the walk honours
+ * the deadline and the abort signal too, on a budget of its own: reading, hashing
+ * and storing is the other half of the cost, and a bound that covered only the
+ * scan let a 2000-file copy run for 842 ms against a 50 ms budget. When a bound
+ * is hit the snapshot is marked INCOMPLETE and the recall says so.
  *
  * Incompleteness has one hard consequence, enforced here rather than left to a
  * caller: **an incomplete snapshot is never used to decide that a file was
@@ -65,7 +68,10 @@ export interface TreeLimits {
   readonly maxTotalBytes: number
   /** A file larger than this is recorded as uncovered, never copied. */
   readonly maxFileBytes: number
-  /** Stop the walk after this long, whatever it has covered. */
+  /**
+   * Stop after this long: the walk gets one such budget, then the copy phase
+   * (read, hash, store) gets another.
+   */
   readonly maxWalkMs: number
   /** Directory names never descended into. */
   readonly skipDirs: readonly string[]
@@ -75,7 +81,27 @@ export interface TreeLimits {
   readonly maxBlobBytes: number
   /** How long a manifest is kept at all, whatever the caps say. */
   readonly maxManifestAgeMs: number
+  /**
+   * Minimum time between two collections requested by the CAPTURE path.
+   *
+   * The capture path asks after every snapshot, and a pass is a whole-store scan,
+   * so its requests are floored. The floor applies to a request made after a
+   * prune dropped a manifest too: a session at its retention cap drops one on
+   * every capture, and exempting those would put a scan behind every turn again.
+   * A recall does not come through this path — it calls the collector directly
+   * and is collected at once.
+   */
+  readonly minCollectionIntervalMs: number
 }
+
+/**
+ * The capture path's floor: one whole-store scan per home per hour.
+ *
+ * Long enough that an ordinary session never pays for the scan on its own
+ * captures, short enough that the orphans of a failed capture are reclaimed
+ * without a kernel restart.
+ */
+const CAPTURE_COLLECTION_MS = 60 * 60 * 1000
 
 /**
  * Shipped bounds.
@@ -100,6 +126,7 @@ export const DEFAULT_TREE_LIMITS: TreeLimits = {
   maxSnapshotsPerSession: 200,
   maxBlobBytes: 1024 * 1024 * 1024,
   maxManifestAgeMs: 30 * 24 * 60 * 60 * 1000,
+  minCollectionIntervalMs: CAPTURE_COLLECTION_MS,
 }
 
 /** One captured file: content hash, byte size, and mtime at capture time. */
@@ -467,13 +494,30 @@ export async function captureWorkspace(
   const held = new Set<string>()
   const deadline = Date.now() + limits.maxWalkMs
   let reason = walk.reason
+  /**
+   * Set once THIS phase's own bound — its deadline, or the caller's abort — has
+   * stopped the copy.
+   *
+   * Deliberately not `reason`: a walk that already stopped for one of its own
+   * bounds (`total-bytes`, `file-count`, `symlink`) still copies the files it
+   * found, as far as this phase's own bounds allow — the deadline and abort are
+   * re-checked in the loop below. A walk bound says what the walk may look at,
+   * not what the copy may read; only this phase's own stop forbids reading one
+   * of those files.
+   */
+  let stopped = false
   try {
     for (const [rel, found] of walk.files) {
-      if (reason === undefined && (signal?.aborted === true || Date.now() > deadline)) {
-        // Hashing and storing is the other half of the walk's cost, and it needs
-        // the same bounds: without this the "1500 ms" cap covered only the
-        // directory scan.
-        reason = signal?.aborted === true ? 'cancelled' : 'timeout'
+      if (!stopped) {
+        const aborted = signal?.aborted === true
+        if (aborted || Date.now() > deadline) {
+          // Hashing and storing is the other half of the walk's cost, so it gets
+          // its own copy of the same bounds. Without this the cap covered only
+          // the directory scan: a 2000-file copy ran to completion in 842 ms
+          // against a 50 ms budget.
+          stopped = true
+          reason ??= aborted ? 'cancelled' : 'timeout'
+        }
       }
       if (found.size > limits.maxFileBytes) {
         uncaptured[rel] = { size: found.size, mtimeMs: found.mtimeMs, reason: 'too-large' }
@@ -481,7 +525,16 @@ export async function captureWorkspace(
       }
       const before = previous?.entries[rel]
       if (before !== undefined && before[1] === found.size && before[2] === found.mtimeMs) {
+        // No I/O, so a stopped capture still carries this file forward: what a
+        // partial snapshot keeps is the part that did not move.
         entries[rel] = before
+        continue
+      }
+      if (stopped) {
+        // Changed and unread, because the read is what the bound forbids. Left
+        // out of BOTH maps rather than recorded under a reason that does not
+        // apply to it: `complete:false` is what keeps the absence from being
+        // read as "created" (see the module header).
         continue
       }
       let bytes: Buffer
@@ -693,18 +746,26 @@ export async function diffWorkspace(
  *
  * A collection is O(THE WHOLE STORE): it parses every session's manifest and
  * stats every blob. Measured on a real store of this machine — 115 sessions,
- * 577 manifests, 77.8 MB of JSON, 575,672 entries, 23,970 blobs — that is 1.4 s
- * of pure reading before it deletes anything, and it grows with every session
- * ever used. So it never runs on a caller's awaited path: a recall waits on
- * this store, and a recall that took a second and a half to answer is the
- * "frozen" confirmation dialog.
+ * 577 manifests, 77.8 MB of JSON, 575,672 entries, 23,970 blobs — that is 1.9 s
+ * of manifest parsing plus 3.2 s of `stat`, about 5.1 s per pass before it
+ * deletes anything, and it grows with every session ever used. So it never runs
+ * on a caller's awaited path: a recall waits on this store, and a recall that
+ * took five seconds to answer is the "frozen" confirmation dialog.
  *
- * Coalescing is not an optimisation either: `pruneSnapshots` runs on every turn
- * start, so a busy session would otherwise queue collections faster than they
- * finish, each rescanning the store the previous one just scanned.
+ * The capture path asks at most once per {@link TreeLimits.minCollectionIntervalMs};
+ * a recall calls {@link requestGarbageCollection} directly and is not floored.
+ * See {@link requestCaptureCollection} for why a prune's drop no longer forces a
+ * pass of its own.
+ *
+ * Coalescing is still not an optimisation: a recall and a capture-path request
+ * can overlap, and a request arriving mid-pass would otherwise queue a second
+ * full scan of the store the first one is reading.
  */
 const pendingCollections = new Map<string, Promise<void>>()
 const missedWhileCollecting = new Set<string>()
+
+/** When each home's last collection pass FINISHED; the capture path's floor. */
+const collectedAt = new Map<string, number>()
 
 /**
  * Ask for a collection without waiting for it.
@@ -714,11 +775,12 @@ const missedWhileCollecting = new Set<string>()
  * it finishes. Two requests therefore cost one scan, not two.
  *
  * A pass holds {@link withCollectionGate}, so a capture that arrives while one
- * runs waits for it and a turn's tool gate can wait at most one pass. That wait
- * is not new — the inline collection this replaced charged the same pass, at
- * every capture — only now it is paid when a tool actually needs the snapshot
- * instead of unconditionally. Do not "fix" the wait by taking either side out of
- * the gate: that is the blob-loss window described there.
+ * runs waits for it and a turn's tool gate can wait at most one pass. The
+ * capture path asks through {@link requestCaptureCollection}, which is floored by
+ * {@link TreeLimits.minCollectionIntervalMs}; a recall asks HERE, unconditionally,
+ * because it just orphaned turns and a recall is a user action that must not wait
+ * for a timer. Do not "fix" the remaining wait by taking either side out of the
+ * gate: that is the blob-loss window described there.
  *
  * @param dshHome - resolved `$DSH_HOME`.
  * @param report - where a failed pass is reported. A collection that failed
@@ -738,6 +800,10 @@ export function requestGarbageCollection(
     try {
       await collectGarbage(dshHome, limits)
       while (missedWhileCollecting.delete(dshHome)) await collectGarbage(dshHome, limits)
+      // The capture path's clock starts when a pass FINISHED, not when it was
+      // asked for: a pass that ran is exactly what the floor must not repeat.
+      // A pass that threw leaves the stamp alone, so the next request retries.
+      collectedAt.set(dshHome, Date.now())
     } finally {
       pendingCollections.delete(dshHome)
       // Drop the dirty mark too. A pass that threw skipped the loop above, so the
@@ -753,6 +819,37 @@ export function requestGarbageCollection(
   // the caller's logger and must not throw — a throwing reporter would turn this
   // derived promise into the very unhandled rejection it exists to prevent.
   run.catch(report)
+}
+
+/**
+ * Schedule what one capture owes the store, at most once per interval.
+ *
+ * A capture stores bytes before it writes the manifest that protects them, so a
+ * FAILED capture can leave orphans no prune ever sees; the fallback pass reclaims
+ * those. A prune can orphan a whole turn's blobs too — but a session at its
+ * retention cap prunes one manifest on EVERY capture, so "a prune dropped
+ * something, collect now" reproduced the very thing this replaced: a whole-store
+ * scan behind every turn's first tool call in long sessions. The floor therefore
+ * applies to BOTH the prune-dropped and the fallback case: the capture path scans
+ * the store at most once per {@link TreeLimits.minCollectionIntervalMs}. A recall
+ * does not come through here — it calls {@link requestGarbageCollection} directly
+ * and is collected at once.
+ *
+ * @param dshHome - resolved `$DSH_HOME`.
+ * @param report - where a failed pass is reported.
+ * @param limits - the retention bounds, including the floor.
+ */
+export function requestCaptureCollection(
+  dshHome: string,
+  report: (error: unknown) => void,
+  limits: TreeLimits = DEFAULT_TREE_LIMITS,
+): void {
+  const last = collectedAt.get(dshHome)
+  if (last !== undefined && Date.now() - last < limits.minCollectionIntervalMs) return
+  // A pass already running or queued reads the store as it stands, so asking
+  // again would only mark it dirty and buy a second scan of the same state.
+  if (pendingCollections.has(dshHome)) return
+  requestGarbageCollection(dshHome, report, limits)
 }
 
 /**
@@ -797,23 +894,28 @@ export async function dropSnapshots(dshHome: string, sessionId: string, turns: r
  * store grows without bound. The newest manifests win; the oldest are dropped,
  * and a recall reaching further back than the cap then reports a partial snapshot
  * rather than pretending. The orphaned blobs are collected by
- * {@link requestGarbageCollection}, scheduled by the caller: this runs on the
- * turn-start path, which must not wait on a whole-store scan.
+ * {@link requestCaptureCollection}, which is floored: a capture that prunes one
+ * manifest does not start a whole-store scan, because once this session is at the
+ * cap that would be every capture.
  *
  * @param dshHome - resolved `$DSH_HOME`.
  * @param sessionId - the session to prune.
  * @param limits - the retention bounds.
+ * @returns how many manifests it dropped, for the caller's log and the tests.
+ *   This is NOT a trigger: the capture path schedules collection on the interval
+ *   floor regardless of it. See `./index.ts`'s `ensureSnapshot`.
  */
 export async function pruneSnapshots(
   dshHome: string,
   sessionId: string,
   limits: TreeLimits,
-): Promise<void> {
+): Promise<number> {
   const turns = await manifestTurns(dshHome, sessionId)
   const excess = turns.slice(0, Math.max(0, turns.length - limits.maxSnapshotsPerSession))
   for (const turn of excess) {
     await rm(manifestPath(dshHome, sessionId, turn), { force: true })
   }
+  return excess.length
 }
 
 /** The turns this session has a manifest for, ascending. */
