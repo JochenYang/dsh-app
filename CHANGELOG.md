@@ -8,6 +8,24 @@ DSH APP 的版本变更记录。每个版本只记录相对**上一发布版**�
 
 双语条目对齐维护：`### 中文` / `### English` 子节条目一一对应、顺序一致，新条目加在列表顶部。
 
+## [v0.20.0] - 2026-11-26
+
+### 中文
+- 市场插件：目录条目上限从 5000 提高到 16,000（合并上限 24,000），超出每源或合并上限时不再静默丢弃——此前主目录源约四分之一的条目被悄悄截掉，面板与模型搜索都找不到；现在宿主日志、缓存与模型搜索都会说明目录不完整。缓存文件上限随之提高到 32 MB，满额缓存不再被当作损坏文件整体忽略；某个目录源读不到时，模型搜索把该源列为失败而不是答「没有」；`market_search` 遇到过期目录改为在后台刷新并落盘（此前每次搜索都重新下载目录），最多等待 5 秒后先用旧快照作答，刷新失败时如实说明失败并记为失败而不是「正在刷新」。
+- 撤回插件：`/rewind plan` 的文件预览加入每侧文本、总文本与行数上限（500 行、每侧 64 KB、共 4 MB），超大载荷不再写进会话日志（此前 2000 个变更文件的预览约 180 MB）；确认对话框对被截断、未预览与未列出的文件如实标注。
+- 撤回插件：工作区快照的读取与哈希阶段受 `maxWalkMs` 与取消信号约束（此前到期后仍会把剩余文件读完），快照后的存储收集改为每小时至多一次（此前每次快照后都全库扫描一遍）。
+- 撤回插件：回合内一旦有工具跑过就不再重拍快照，还原目标始终是回合开始时的树（此前在快照不完整的大仓库上会拍到回合中途的状态）；大仓库上不再每个工具调用都遍历一次。
+- Git 面板：大文件 diff（如 lockfile、打包产物）不再因 4 MiB 读取上限报错，改为读取后按既有长度截断；输出确实超限时给出明确、可行动的提示，不再回显 diff 片段。
+- 用量统计插件：日志尺寸未变的会话不再每轮解压重读（此前定时扫描（默认每 5 分钟）与每次启动都会把所有会话日志读一遍），定时扫描的 CPU 开销大幅下降；实时事件跨过未折算的历史时不再推进水位，缺口交给回填补齐，不再永久少计。
+
+### English
+- Market plugin: the per-source entry cap rises from 5,000 to 16,000 (24,000 merged), and a directory that hits either cap is no longer clipped silently — about a quarter of the primary source's rows used to disappear from both the panel and the model's searches; the host log, the cache and `market_search` now say when the catalog is incomplete. The cache file cap rises to 32 MB so a full-size cache is no longer discarded as corruption; a catalog source that cannot be read is reported as a failure instead of as "no match"; and `market_search` refreshes an expired catalog in the background and persists it (every search used to download the directory again), answering from the old snapshot after at most 5 seconds — a refresh that fails says so and is reported as a failure rather than as "refreshing".
+- Rewind plugin: `/rewind plan` file previews cap per-side text, total text and row count (500 rows, 64 KB per side, 4 MB in all), so an oversized payload never enters the session log (a 2,000-file change used to make a 180 MB preview); the confirmation dialog labels what was truncated, not previewed or left unlisted.
+- Rewind plugin: the workspace snapshot's read-and-hash phase now honours `maxWalkMs` and cancellation (it used to keep reading the remaining files after the deadline), and the store collection that follows a snapshot runs at most once an hour instead of a whole-store scan every time.
+- Rewind plugin: a turn's workspace snapshot is never re-taken once a tool of that turn has run, so a recall restores the tree as it stood at the turn's start (on a large repository whose snapshot never completes it used to capture a mid-turn state), and a tool call there no longer pays a walk.
+- Git panel: large-file diffs (lockfiles, build output) no longer fail on the 4 MiB read ceiling and are truncated at the existing limit instead; a truly oversized read now answers an actionable message instead of echoing a diff fragment.
+- Usage plugin: session logs whose size did not change are no longer decompressed on every rescan (the periodic scan, every 5 minutes by default, and every start used to read all of them), cutting the scan's CPU cost; a live event that jumps past unfolded history no longer advances the watermark, so the backfill fills that gap instead of the usage being under-counted for good.
+
 ## [v0.19.9] - 2026-11-23
 
 ### 中文
